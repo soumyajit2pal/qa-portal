@@ -3,6 +3,7 @@ import { isSelectableUser, ROLE_LABELS, userDepartments } from '../constants'
 import ClearableSearchInput from './ClearableSearchInput'
 import { IconSearch } from './Icons'
 import { computePanelPos, PanelPos } from './panelPosition'
+import { isKeyboardActivationKey } from '../keyboard'
 
 const WORKSPACE_ACCESS_ROLES = new Set([
   'WORKSPACE_MEMBER', 'WORKSPACE_VIEWER', 'PARENT_WORKSPACE_VIEWER', 'PARENT_WORKSPACE_ADMIN',
@@ -137,14 +138,14 @@ export default function UserPicker({
       <IconSearch width={13} height={13} />
       <ClearableSearchInput ref={inputRef} placeholder={searchPlaceholder || 'Search users...'} value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery('')} clearLabel="Clear user search" />
     </div>
-    <div className="searchable-select-list">
+    <div className="searchable-select-list" role="listbox" aria-label={placeholder} aria-multiselectable={multiple || undefined}>
       {showClearOption && (
-        <div className={`searchable-select-option ${selectedIds.size === 0 ? 'active' : ''}`} onClick={() => { onChange(''); close() }}>{clearLabel}</div>
+        <div className={`searchable-select-option ${selectedIds.size === 0 ? 'active' : ''}`} role="option" aria-selected={selectedIds.size === 0} tabIndex={0} onClick={() => { onChange(''); close() }} onKeyDown={(event) => { if (isKeyboardActivationKey(event.key)) { event.preventDefault(); onChange(''); close() } }}>{clearLabel}</div>
       )}
       {filtered.length === 0 && !showClearOption && <div className="searchable-select-empty">{candidates.length ? 'No matching users' : 'No eligible users'}</div>}
       {filtered.map((user) => {
         const checked = selectedIds.has(String(user.id))
-        return <div key={user.id} className={`searchable-select-option ${multiple ? 'multi-user-option' : 'user-assign-option'} ${checked ? 'active' : ''}`} onClick={() => select(user)}>
+        return <div key={user.id} className={`searchable-select-option ${multiple ? 'multi-user-option' : 'user-assign-option'} ${checked ? 'active' : ''}`} role="option" aria-selected={checked} tabIndex={0} onClick={() => select(user)} onKeyDown={(event) => { if (isKeyboardActivationKey(event.key)) { event.preventDefault(); select(user) } }}>
           {multiple && <span className={`multi-user-checkbox ${checked ? 'checked' : ''}`}>{checked && '✓'}</span>}
           {multiple
             ? <div className="multi-user-identity"><span>{user.full_name}</span><UserDetails user={user} showRoles={showRoles} /></div>

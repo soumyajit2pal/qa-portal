@@ -1,10 +1,12 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from starlette.requests import Request
 
 from app import models
 from app import email_notifications
@@ -12,14 +14,37 @@ from app.email_notifications import (
     _defect_notification_route,
     _is_workflow_transition,
     _next_approver_roles,
-    _notification_route,
     install_outbox_listener,
     smtp_readiness,
 )
 from app.constants import GatewayStatus, QAStatus, Role
+from app.routers import auth as auth_router
 
 
 class EmailNotificationTests(unittest.TestCase):
+    def test_admin_smtp_probe_does_not_expose_transport_details(self):
+        request = Request({
+            "type": "http", "method": "POST", "path": "/api/auth/admin/test-email",
+            "headers": [],
+        })
+        actor = SimpleNamespace(full_name="Portal Admin", username="admin")
+        with (
+            patch.object(
+                email_notifications,
+                "send_test_email",
+                side_effect=RuntimeError("smtp.internal.example:465 certificate /private/ca.pem"),
+            ),
+            patch.object(auth_router, "write_audit"),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            auth_router.send_admin_test_email(
+                SimpleNamespace(recipient="admin@example.com"), request, MagicMock(), actor,
+            )
+
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertNotIn("smtp.internal", raised.exception.detail)
+        self.assertNotIn("/private/ca.pem", raised.exception.detail)
+
     def test_sla_breach_check_is_queued_once_per_hour(self):
         with (
             patch.object(email_notifications, "_last_sla_check", None),

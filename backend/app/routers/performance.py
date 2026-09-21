@@ -19,6 +19,7 @@ from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
 from .. import reassignment
+from ..workflow_authority import is_system_admin
 
 router = APIRouter(prefix="/api/performance-requests", tags=["performance"])
 
@@ -83,8 +84,36 @@ def _require_visible(db: Session, obj: "models.PerformanceRequest", user: models
         )
 
 
+def _require_distinct_department_head_approver(
+    db: Session, obj: "models.PerformanceRequest", user: models.User,
+) -> None:
+    """Prevent one multi-role actor from approving both business stages."""
+    # ADMIN is intentionally removed from effective workflow roles, but the
+    # explicit maker-checker oversight exception follows the stored system
+    # assignment rather than those request-local effective roles.
+    if is_system_admin(user):
+        return
+    sm_approval = (
+        db.query(models.ApprovalAction)
+        .filter_by(
+            entity_type="PERFORMANCE",
+            entity_id=obj.id,
+            step_name="SM Approval",
+            decision="Approved",
+            actor_id=user.id,
+        )
+        .first()
+    )
+    if sm_approval:
+        raise HTTPException(
+            403,
+            "Department Head approval must be completed by a different approver; "
+            "your SM approval is already recorded on this request.",
+        )
+
+
 def _it_qa_user(db: Session, user_id: int | None, role: str, label: str, workspace_id: int | None = None) -> models.User:
-    user = db.query(models.User).get(user_id) if user_id else None
+    user = db.get(models.User, user_id) if user_id else None
     if user and not user.show_in_user_dropdowns:
         raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
     if not user or not user.is_active or not user.has_qa_workspace_role(role, workspace_id=workspace_id):
@@ -253,6 +282,7 @@ def create_performance(payload: schemas.PerformanceCreate, db: Session = Depends
 def update_performance(req_id: int, payload: schemas.PerformanceUpdate, db: Session = Depends(get_db),
                         current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     # See _can_edit_details's own docstring below for the full permission
     # model (requester while it's theirs/returned to them; SM/Department
     # Head only while it's genuinely pending their own decision).
@@ -309,6 +339,7 @@ def update_performance(req_id: int, payload: schemas.PerformanceUpdate, db: Sess
 @router.post("/{req_id}/submit", response_model=schemas.PerformanceOut)
 def submit_performance(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this request")
     _require(obj, "DRAFT", "Submit")
@@ -342,6 +373,7 @@ def resubmit_performance(req_id: int, db: Session = Depends(get_db), current_use
     reopenable the same way a Return is: edit details, then call this to
     send it straight back to SM_APPROVAL_PENDING for a fresh decision."""
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
     if obj.active_delegation:
@@ -419,6 +451,7 @@ def department_head_decision(req_id: int, payload: schemas.PerformanceDeptHeadDe
     )
     require_not_requester(current_user, obj.requester_id)
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
+    _require_distinct_department_head_approver(db, obj, current_user)
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
         raise HTTPException(400, application_name_block_message(obj.application_master_status, "department_head"))
     if payload.decision == "Approved":
@@ -440,6 +473,7 @@ def department_head_decision(req_id: int, payload: schemas.PerformanceDeptHeadDe
 def start_readiness(req_id: int, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, "ENGINEER_ASSIGNED", "Start readiness")
     _require_assigned_qa_lead(obj, current_user)
     obj.status = "READINESS"
@@ -473,6 +507,7 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
     addressed (the default -- same assigned engineer, no re-approval
     needed)."""
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, "READINESS", "Readiness decision")
     _require_assigned_qa_lead(obj, current_user)
     if payload.decision == "Passed":
@@ -531,6 +566,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.Performanc
     if not item:
         raise HTTPException(404, "Checklist item not found")
     parent = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, parent, current_user)
     if parent.status != "READINESS":
         raise HTTPException(
             400,
@@ -564,6 +600,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.Performanc
 def complete_feasibility(req_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require_assigned_qa_lead(obj, current_user)
     return _advance(db, obj, "FEASIBILITY", "PLANNING", "Feasibility", current_user)
 
@@ -592,6 +629,7 @@ def complete_planning(req_id: int, payload: schemas.AssignTesterIn, db: Session 
     "Reassigned" audit row is written alongside the existing history log
     entry below."""
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, PERFORMANCE_TESTER_REASSIGNABLE_STATUSES, "Assign QA Tester")
     is_initial_assignment = obj.status == "PLANNING"
     previous_ids = _performance_tester_ids(obj)
@@ -635,6 +673,7 @@ def complete_planning(req_id: int, payload: schemas.AssignTesterIn, db: Session 
 def complete_environment_setup(req_id: int, db: Session = Depends(get_db),
                                 current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require_performance_execution_owner(obj, current_user)
     return _advance(db, obj, "ENVIRONMENT_SETUP", "SCRIPT_DEVELOPMENT", "Environment Setup", current_user)
 
@@ -643,6 +682,7 @@ def complete_environment_setup(req_id: int, db: Session = Depends(get_db),
 def complete_script_development(req_id: int, db: Session = Depends(get_db),
                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require_performance_execution_owner(obj, current_user)
     return _advance(db, obj, "SCRIPT_DEVELOPMENT", "BASELINE", "Script Development", current_user)
 
@@ -651,6 +691,7 @@ def complete_script_development(req_id: int, db: Session = Depends(get_db),
 def complete_baseline(req_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require_performance_execution_owner(obj, current_user)
     return _advance(db, obj, "BASELINE", "LOAD_TEST_EXECUTION", "Baseline", current_user)
 
@@ -659,6 +700,7 @@ def complete_baseline(req_id: int, db: Session = Depends(get_db),
 def complete_load_test(req_id: int, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require_performance_execution_owner(obj, current_user)
     return _advance(db, obj, "LOAD_TEST_EXECUTION", "RESULT_ANALYSIS", "Load Test Execution", current_user)
 
@@ -667,6 +709,7 @@ def complete_load_test(req_id: int, db: Session = Depends(get_db),
 def result_analysis_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, "RESULT_ANALYSIS", "Result analysis decision")
     _require_assigned_qa_lead(obj, current_user)
     if payload.decision == "Passed":
@@ -686,6 +729,7 @@ def complete_defect_fix_retest(req_id: int, db: Session = Depends(get_db),
                                 current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """Loops back to Load Test Execution for a re-run once the fix is in."""
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require_performance_execution_owner(obj, current_user)
     return _advance(db, obj, "DEFECT_FIX_RETEST", "LOAD_TEST_EXECUTION", "Defect / Fix / Retest", current_user)
 
@@ -694,6 +738,7 @@ def complete_defect_fix_retest(req_id: int, db: Session = Depends(get_db),
 def complete_report(req_id: int, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require_assigned_qa_lead(obj, current_user)
     return _advance(db, obj, "REPORT", "SIGNOFF_PENDING", "Report", current_user)
 
@@ -702,6 +747,7 @@ def complete_report(req_id: int, db: Session = Depends(get_db),
 def sign_off(req_id: int, db: Session = Depends(get_db),
              current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, "SIGNOFF_PENDING", "Clearance")
     _require_assigned_qa_lead(obj, current_user)
     _log(db, obj.id, "Clearance", current_user, "Cleared", None)
@@ -716,6 +762,7 @@ def sign_off(req_id: int, db: Session = Depends(get_db),
 def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Session = Depends(get_db),
                         current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can confirm this")
     _require(obj, "REQUESTER_VERIFICATION", "Requester decision")
@@ -751,7 +798,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
     def uname(uid):
         if not uid:
             return None
-        u = db.query(models.User).get(uid)
+        u = db.get(models.User, uid)
         return u.full_name if u else None
 
     sections = [
@@ -915,6 +962,7 @@ def list_performance_documents(req_id: int, db: Session = Depends(get_db), curre
 def upload_performance_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                                   current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     if not _can_upload_documents(db, obj, current_user):
         raise HTTPException(403, "Only the requester, central QA team, or the SM/Department Head currently reviewing the request can upload documents")
     return doc_store.save_documents(db, "PERFORMANCE", req_id, obj.request_id, files, current_user.id,
@@ -936,6 +984,7 @@ def download_performance_document(req_id: int, doc_id: int, db: Session = Depend
 def delete_performance_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                                  current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     doc = doc_store.get_document_or_404(db, "PERFORMANCE", req_id, doc_id)
     if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(db, obj, current_user)):
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
@@ -979,6 +1028,7 @@ def upload_performance_checklist_documents(req_id: int, item_id: int, files: Lis
                                             db: Session = Depends(get_db),
                                             current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     item = _performance_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
@@ -1009,6 +1059,7 @@ def delete_performance_checklist_document(req_id: int, item_id: int, doc_id: int
                                            db: Session = Depends(get_db),
                                            current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     item = _performance_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")

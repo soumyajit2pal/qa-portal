@@ -1,7 +1,7 @@
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation } from 'react-router-dom'
+import { RequestViewerContext, useInternalNavigate } from '../hooks/useRequestNavigation'
 import { api, HttpError } from '../api'
-import { RequestViewerContext } from '../hooks/useRequestNavigation'
 import { RequestLookupError, RequestTarget, requestRoutes, requestTarget, resolveRequestId } from '../requestNavigation'
 import { QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut, SuppressionOut, SignOffOut, UserOption } from '../types'
 import { Modal } from './Common'
@@ -19,7 +19,7 @@ type RequestRecord = QARequestOut | FunctionalOut | SASTOut | DASTOut | Performa
 
 export default function RequestViewer({ children }: { children: React.ReactNode }) {
   const location = useLocation()
-  const navigate = useNavigate()
+  const navigate = useInternalNavigate()
   const [target, setTarget] = useState<RequestTarget | null>(null)
   const [record, setRecord] = useState<RequestRecord | null>(null)
   const [users, setUsers] = useState<UserOption[]>([])

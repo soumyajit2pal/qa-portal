@@ -1,0 +1,25 @@
+# Keep local dependencies, build output, tests, editor files, and any
+# environment-specific settings out of both local and remote build contexts.
+**
+
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.node.json
+!vite.config.ts
+!proxyHeaders.ts
+!index.html
+!nginx.conf
+!src/
+!src/**
+!public/
+!public/**
+
+src/**/.DS_Store
+public/**/.DS_Store
+node_modules/
+dist/
+tests/
+.env
+.env.*
+*.tsbuildinfo

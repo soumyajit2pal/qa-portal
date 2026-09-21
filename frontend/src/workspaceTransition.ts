@@ -1,6 +1,17 @@
 export const WORKSPACE_TRANSITION_EVENT = 'qa-workspace-transition'
+export const WORKSPACE_SELECTION_STORAGE_KEYS = ['active_workspace_id', 'qa_active_workspace_id'] as const
 const KEY = 'qa_workspace_transition'
 export interface WorkspaceTransition { name: string; phase: 'switching' | 'opening'; startedAt: number }
+
+export function isWorkspaceSelectionStorageChange(event: Pick<StorageEvent, 'key' | 'oldValue' | 'newValue'>): boolean {
+  return !!event.key
+    && WORKSPACE_SELECTION_STORAGE_KEYS.includes(event.key as typeof WORKSPACE_SELECTION_STORAGE_KEYS[number])
+    && event.oldValue !== event.newValue
+}
+
+export function selectedWorkspaceStorageId(storage: Pick<Storage, 'getItem'>): string {
+  return storage.getItem('active_workspace_id') || storage.getItem('qa_active_workspace_id') || ''
+}
 export function readWorkspaceTransition(): WorkspaceTransition | null {
   try {
     const value = JSON.parse(sessionStorage.getItem(KEY) || 'null')

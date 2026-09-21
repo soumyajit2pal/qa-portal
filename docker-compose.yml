@@ -10,6 +10,16 @@ services:
 
     command: ["alembic", "upgrade", "head"]
 
+    # Migration needs database access, not a writable image filesystem or
+    # Linux capabilities. Keep any compromise inside the smallest boundary.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+
     restart: "no"
 
   backend:
@@ -29,6 +39,10 @@ services:
       DOCUMENT_PORTAL_EMBEDDED: "false"
       DOCUMENT_PORTAL_STORAGE_HOST_PATH: /data/qualityops/document-storage/repository
       LOGIN_ENCRYPTION_PRIVATE_KEY_FILE: /run/secrets/qualityops/login-private.pem
+      # The bundled Redis service is the shared cache for every API worker.
+      # Without this explicit URL the application silently falls back to a
+      # separate no-op cache in each process even though Redis is healthy.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
 
     # Read the trust list from the selected service env_file at runtime.
     # Nginx terminates TLS; Uvicorn must trust that proxy's source IP to
@@ -45,6 +59,17 @@ services:
       # Workspace administration and the document service must see the same
       # files and quota locks. Lowercase z permits both SELinux containers.
       - ${DOCUMENT_PORTAL_STORAGE_HOST_PATH:-./storage/document-portal}:/data/qualityops/document-storage:z
+
+    # Runtime state is restricted to the explicit storage/log mounts above.
+    # The application image itself is immutable and needs no Linux
+    # capabilities (port 8000 is unprivileged).
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
 
     depends_on:
       migrate:
@@ -94,6 +119,14 @@ services:
     volumes:
       - ${DOCUMENT_PORTAL_STORAGE_HOST_PATH:-./storage/document-portal}:/data/qualityops/document-storage:z
       - qa_portal_document_logs:/app/logs
+
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
 
     depends_on:
       migrate:

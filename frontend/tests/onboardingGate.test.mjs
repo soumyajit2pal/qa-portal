@@ -17,7 +17,13 @@ const compiled = ts.transpileModule(code, { compilerOptions: { jsx: ts.JsxEmit.R
 function render(user, entry = 'AuthenticatedChrome') {
   const mounted = []
   const component = name => ({ children }) => { mounted.push(name); return React.createElement('div', null, children) }
-  const context = { React, useAuth: () => ({user, loading:false}), isDocumentPortalOnly: () => false, uniqueWorkspaceAccess: user => [...(user.workspace_access || user.qa_workspace_access || [])].filter(row => row.is_active) }
+  const context = {
+    React,
+    useAuth: () => ({user, loading:false}),
+    useLocation: () => ({ pathname: '/test-projects', search: '', hash: '' }),
+    isDocumentPortalOnly: () => false,
+    uniqueWorkspaceAccess: user => [...(user.workspace_access || user.qa_workspace_access || [])].filter(row => row.is_active),
+  }
   for (const name of ['RequestViewer','Layout','DepartmentPrompt','EmailCompletionPrompt','AccessApprovalPending','WorkspaceAccessRequired','PendingApprovalsNotice','DocumentOnlyAccessGuard','Outlet','Help','PublicHelp']) context[name] = component(name)
   vm.createContext(context)
   vm.runInContext(compiled, context)

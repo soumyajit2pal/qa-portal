@@ -16,6 +16,9 @@ function harness(bodyKind, status = 200) {
   const context = {
     exports: {}, AbortController, DOMException, console,
     sessionStorage: { getItem: () => null }, localStorage: { getItem: () => null },
+    // api.ts imports this helper in production. Imports are removed in this
+    // focused VM harness, so provide the no-workspace result explicitly.
+    selectedWorkspaceStorageId: () => '',
     window: { setTimeout: fn => { timers.set(++next, fn); return next }, clearTimeout: id => timers.delete(id) },
     fetch: async (_url, opts) => {
       signal = opts.signal

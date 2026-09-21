@@ -8,9 +8,10 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisi
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_TERMINAL_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, QA_REQUEST_CREATOR_ROLES, hasWorkflowRole as hasRole, hasDepartment, isViewOnly } from '../../constants'
-import { SASTListOut, DASTListOut, SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOption, ApprovalActionOut, PageOut } from '../../types'
+import { SASTListOut, DASTListOut, SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOption, ApprovalActionOut } from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import InfoModal from '../../components/InfoModal'
+import { isKeyboardActivationKey } from '../../keyboard'
 
 function userName(users: UserOption[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -87,11 +88,12 @@ function RequestIdSearch({ requests, selected, onSelect, onClear }: {
       />
       {open && (
         <div className="searchable-select-panel">
-          <div className="searchable-select-list">
+          <div className="searchable-select-list" role="listbox" aria-label="Matching SAST and DAST requests">
             {matches.length === 0 && <div className="searchable-select-empty">No SAST/DAST requests found.</div>}
             {matches.map((r) => (
-              <div key={`${r._kind}-${r.id}`} className="searchable-select-option"
-                   onClick={() => { onSelect(r); setQuery(''); setOpen(false) }}>
+              <div key={`${r._kind}-${r.id}`} className="searchable-select-option" role="option" aria-selected={false} tabIndex={0}
+                   onClick={() => { onSelect(r); setQuery(''); setOpen(false) }}
+                   onKeyDown={(event) => { if (isKeyboardActivationKey(event.key)) { event.preventDefault(); onSelect(r); setQuery(''); setOpen(false) } }}>
                 <div>
                   <span className={`badge ${r._kind === 'SAST' ? 'badge-blue' : 'badge-yellow'}`} style={{ marginRight: 8 }}>{r._kind}</span>
                   {r.request_id} — {(r as any).application_name || (r as any).application_url}
@@ -138,10 +140,10 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
     // see the separate direct-fetch effect below for the initialRequest
     // (deep-linked) case.
     Promise.all([
-      api.get<PageOut<SASTListOut>>('/api/sast-requests?page_size=100'),
-      api.get<PageOut<DASTListOut>>('/api/dast-requests?page_size=100'),
+      api.getAll<SASTListOut>('/api/sast-requests'),
+      api.getAll<DASTListOut>('/api/dast-requests'),
     ])
-      .then(([sast, dast]) => { setSastRequests(sast.items); setDastRequests(dast.items) })
+      .then(([sast, dast]) => { setSastRequests(sast); setDastRequests(dast) })
       .catch(() => { /* autosuggest is a convenience -- fields stay manually editable if this fails */ })
   }, [])
 
@@ -391,10 +393,10 @@ function RelinkSuppressionModal({ sup, onClose, onRelinked }: {
 
   useEffect(() => {
     Promise.all([
-      api.get<PageOut<SASTListOut>>('/api/sast-requests?page_size=100'),
-      api.get<PageOut<DASTListOut>>('/api/dast-requests?page_size=100'),
+      api.getAll<SASTListOut>('/api/sast-requests'),
+      api.getAll<DASTListOut>('/api/dast-requests'),
     ])
-      .then(([sast, dast]) => { setSastRequests(sast.items); setDastRequests(dast.items) })
+      .then(([sast, dast]) => { setSastRequests(sast); setDastRequests(dast) })
       .catch(() => { /* picker is a convenience -- fails closed with an empty list */ })
   }, [])
 

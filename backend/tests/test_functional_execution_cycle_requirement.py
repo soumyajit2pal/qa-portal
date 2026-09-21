@@ -19,6 +19,8 @@ class FunctionalExecutionCycleRequirementTests(unittest.TestCase):
             name="Regression",
             start_date=datetime.date(2026, 9, 5),
             end_date=datetime.date(2026, 9, 6),
+            environment="UAT",
+            build="2026.09.05",
         )
         self.assertIsNone(cycle.linked_request_id)
         self.assertIsNone(cycle.linked_request_type)
@@ -29,6 +31,8 @@ class FunctionalExecutionCycleRequirementTests(unittest.TestCase):
                 name="Regression",
                 start_date=datetime.date(2026, 9, 5),
                 end_date=datetime.date(2026, 9, 6),
+                environment="UAT",
+                build="2026.09.05",
                 linked_request_id=12,
             )
 
@@ -38,6 +42,8 @@ class FunctionalExecutionCycleRequirementTests(unittest.TestCase):
                 name="Security",
                 start_date=datetime.date(2026, 9, 5),
                 end_date=datetime.date(2026, 9, 6),
+                environment="UAT",
+                build="2026.09.05",
                 linked_request_type="SAST",
                 linked_request_id=12,
             )
@@ -47,6 +53,8 @@ class FunctionalExecutionCycleRequirementTests(unittest.TestCase):
             name="Regression",
             start_date=datetime.date(2026, 9, 5),
             end_date=datetime.date(2026, 9, 6),
+            environment="UAT",
+            build="2026.09.05",
             linked_request_type="Functional",
             linked_request_id=12,
         )

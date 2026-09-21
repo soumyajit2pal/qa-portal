@@ -15,10 +15,7 @@ from ..session_security import (
     create_session, clear_session_cookies, resolve_session, revoke_presented_session,
     reject_cross_site_request, revoke_session, revoke_user_sessions, set_session_cookies,
 )
-from ..deps import (
-    get_current_user, require_roles, active_qa_workspace_scope,
-    active_qa_workspace_scope_ids,
-)
+from ..deps import get_current_user, require_roles, active_qa_workspace_scope_ids
 from ..constants import (
     Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES,
     DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES, CONFIDENTIAL_ROLES,
@@ -81,7 +78,13 @@ def send_admin_test_email(payload: schemas.AdminTestEmailRequest, request: Reque
             target_type="EMAIL", target_name=recipient,
             details={"recipient": recipient, "error_type": type(exc).__name__},
         )
-        raise HTTPException(502, f"Test email could not be sent: {exc}")
+        # SMTP/TLS exceptions often contain internal relay hostnames, account
+        # names, or certificate paths. Keep those details in server logs and
+        # the audit error type; the browser only needs a stable action message.
+        raise HTTPException(
+            502,
+            "Test email could not be sent. Check the server mail configuration and logs.",
+        ) from exc
     write_audit(
         db, event_type="SYSTEM_CONFIGURATION", action="SMTP_TEST_EMAIL",
         actor=current_user, request=request, status_code=200,
@@ -225,12 +228,12 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
         if user.login_type == LoginType.LDAP:
             try:
                 authenticated = ldap_authenticate(username, form_data.password)
-            except LDAPAuthError as e:
+            except LDAPAuthError as exc:
                 write_audit(db, event_type="AUTHENTICATION", action="LOGIN_ERROR", outcome="FAILED",
                             actor=user, request=request, status_code=503,
                             details={"reason": "LDAP authentication unavailable"})
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                     detail=f"LDAP authentication unavailable: {e}")
+                                     detail="LDAP authentication unavailable. Please try again later.") from exc
             if not authenticated:
                 _record_login_failure(request, username)
                 write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
@@ -718,7 +721,7 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
 def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.ADMIN))):
     """Admin section (Module 9): reassign role(s)/department(s), change login type, activate/deactivate, edit profile fields."""
-    user = db.query(models.User).get(user_id)
+    user = db.get(models.User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     before = user_snapshot(user)
@@ -827,7 +830,7 @@ def reset_password(user_id: int, payload: schemas.PasswordReset, request: Reques
                     current_user: models.User = Depends(require_roles(Role.ADMIN))):
     """Admin section (Module 9): set/reset a Standard account's local password."""
     from ..auth import hash_password
-    user = db.query(models.User).get(user_id)
+    user = db.get(models.User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if user.login_type != LoginType.STANDARD:
@@ -1163,7 +1166,7 @@ def add_local_admin_workspace_member(
 def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate, request: Request,
                              db: Session = Depends(get_db),
                              current_user: models.User = Depends(get_current_user)):
-    user = db.query(models.User).get(user_id)
+    user = db.get(models.User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     was_pending_review = bool(user.needs_role_review)

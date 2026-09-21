@@ -29,7 +29,7 @@ from .database import SessionLocal, AuditSessionLocal, main_pool_metrics
 from . import cache, models, email_notifications  # noqa: F401  (models ensures models are registered before create_all)
 from .session_security import resolve_session
 from .constants import is_document_portal_only
-from .audit_service import write_audit
+from .audit_service import request_audit_target, write_audit
 from .documents import migrate_legacy_document_layout
 from .resilience import CircuitOpenError, database_circuit, is_transient_database_error, snapshot as resilience_snapshot
 from .routers import (
@@ -237,6 +237,8 @@ _MODULE_PATH_PREFIXES = [
     ("/api/auth/users", "USER_MANAGEMENT"),
     ("/api/auth/local-admin", "USER_MANAGEMENT"),
     ("/api/auth", "AUTH"),
+    ("/api/qa-workspaces", "WORKSPACE"),
+    ("/api/workspaces", "WORKSPACE"),
     ("/api/qa-requests", "QA_REQUEST"),
     ("/api/functional-requests", "FUNCTIONAL_REQUEST"),
     ("/api/sast-requests", "SAST_REQUEST"),
@@ -334,6 +336,8 @@ def _write_request_audit(request, request_id, status_code, duration_ms, error_na
             or request.url.path.startswith("/api/auth/local-admin")
             or request.url.path == "/api/auth/me"
         )
+        module = _classify_module(request.url.path)
+        target_type, target_id, target_name = request_audit_target(request, module)
         # AUD-005 -- structured event content: module/method/path alongside
         # the existing duration_ms/error_type, so a reviewer working from
         # AuditLog.tsx's "Event details" JSON panel doesn't have to
@@ -353,8 +357,11 @@ def _write_request_audit(request, request_id, status_code, duration_ms, error_na
             actor_roles=actor_roles,
             request=request,
             status_code=status_code,
+            target_type=target_type,
+            target_id=target_id,
+            target_name=target_name,
             details={
-                "module": _classify_module(request.url.path),
+                "module": module,
                 "method": method,
                 "path": request.url.path,
                 "duration_ms": duration_ms,
@@ -757,7 +764,7 @@ def health():
     except Exception:
         db_ok = False
     cache_status = "connected" if cache.available() else ("disabled" if not cache.REDIS_URL else "unreachable")
-    return {
+    payload = {
         "status": "ok" if db_ok else "degraded",
         "profile": settings.app_env,
         "database": "ok" if db_ok else "unreachable",
@@ -768,6 +775,12 @@ def health():
         "database_pool": main_pool_metrics(),
         "circuits": resilience_snapshot(),
     }
+    # A degraded readiness probe must also fail at the HTTP layer.  Docker's
+    # current probe inspects the JSON body, but load balancers and orchestrators
+    # conventionally decide readiness from the status code alone.
+    if not db_ok:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 # Register last so cleartext requests are rejected before auth/database work.
 app.middleware("http")(enforce_https)

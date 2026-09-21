@@ -14,6 +14,7 @@ import InfoModal from "../../components/InfoModal";
 import { IconContract, IconExpand } from "../../components/Icons";
 import { useAuth } from "../../context/AuthContext";
 import AppVersion from "../../components/AppVersion";
+import { createLatestRequestGate } from "../../latestRequest";
 
 type Sort = "name" | "type" | "size" | "modified";
 type Item = {
@@ -268,6 +269,7 @@ export default function DocumentPortal() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set([""]));
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState("");
+  const contentRequests = useRef(createLatestRequestGate()).current;
   const [downloadStatus, setDownloadStatus] = useState("");
   const [dialog, setDialog] = useState<
     "folder" | "upload" | "rename" | "move" | null
@@ -370,6 +372,7 @@ export default function DocumentPortal() {
       nextOrder = order,
       showGlobalActivity = true,
     ) => {
+      const generation = contentRequests.begin();
       setBusy("Loading documents…");
       setError(null);
       try {
@@ -377,16 +380,18 @@ export default function DocumentPortal() {
         const response = showGlobalActivity
           ? await api.get<Browse>(requestPath)
           : await api.getWithoutActivity<Browse>(requestPath);
-        setData(response);
-        setPath(response.path);
-        setSelected(new Set());
+        if (contentRequests.isCurrent(generation)) {
+          setData(response);
+          setPath(response.path);
+          setSelected(new Set());
+        }
       } catch (caught) {
-        setError(caught);
+        if (contentRequests.isCurrent(generation)) setError(caught);
       } finally {
-        setBusy("");
+        if (contentRequests.isCurrent(generation)) setBusy("");
       }
     },
-    [path, sort, order],
+    [path, sort, order, contentRequests],
   );
   useEffect(() => {
     void load("", sort, order);
@@ -429,9 +434,11 @@ export default function DocumentPortal() {
   async function search(event?: React.FormEvent) {
     event?.preventDefault();
     if (!query.trim()) {
+      contentRequests.invalidate();
       setSearchItems(null);
       return;
     }
+    const generation = contentRequests.begin();
     setBusy("Searching documents…");
     setError(null);
     setSelected(new Set());
@@ -439,12 +446,14 @@ export default function DocumentPortal() {
       const response = await api.get<{ items: Item[]; truncated?: boolean }>(
         `/api/document-portal/search?q=${encodeURIComponent(query)}`,
       );
-      setSearchItems(response.items);
-      setSearchTruncated(!!response.truncated);
+      if (contentRequests.isCurrent(generation)) {
+        setSearchItems(response.items);
+        setSearchTruncated(!!response.truncated);
+      }
     } catch (caught) {
-      setError(caught);
+      if (contentRequests.isCurrent(generation)) setError(caught);
     } finally {
-      setBusy("");
+      if (contentRequests.isCurrent(generation)) setBusy("");
     }
   }
   async function createFolder() {

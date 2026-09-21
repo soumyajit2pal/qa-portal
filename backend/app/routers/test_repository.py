@@ -18,9 +18,9 @@ from ..deps import (
     require_project_visibility,
 )
 from ..constants import (
-    Role, TEST_CASE_PRIORITIES, TEST_CASE_STATUSES,
+    Role, TEST_CASE_PRIORITIES,
 )
-from ..workspace_service import selectable_workspace_ids
+from ..workspace_service import active_workspace_scope_ids, workspace_context
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 from ..testcase_imports import TEST_CASE_IMPORT_CONTENT_FIELDS, build_test_case_import_fingerprint
 from . import jobs
@@ -331,6 +331,7 @@ def _create_case_with_first_draft(
 @router.get("/projects/{project_id}/folders", response_model=List[schemas.TestFolderOut])
 def list_folders(project_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     _get_project_or_404(db, project_id)
+    require_project_visibility(db, project_id, current_user)
     return db.query(models.TestFolder).filter_by(project_id=project_id).order_by(models.TestFolder.name).all()
 
 
@@ -561,6 +562,7 @@ def list_test_cases(
     below for the folder-tree counts/tag list/project-wide stats this list
     endpoint no longer has enough data in hand to compute on its own."""
     _get_project_or_404(db, project_id)
+    require_project_visibility(db, project_id, current_user)
     # 2026-08 "Recycle Bin" requirement -- a soft-deleted case is never part
     # of this normal list, regardless of any status/folder/search filter --
     # it only ever shows up via the dedicated Recycle Bin view/endpoint
@@ -652,6 +654,7 @@ def get_test_case_summary(
     reported as confusing (see the folder_id param above) -- it's now scoped
     separately via scoped_total/scoped_approved_count/etc below."""
     _get_project_or_404(db, project_id)
+    require_project_visibility(db, project_id, current_user)
     # 2026-08 "Recycle Bin" requirement -- every count here mirrors what the
     # default (non-Archived, non-deleted) list actually shows; a soft-
     # deleted case is excluded the same way list_test_cases excludes it, and
@@ -740,6 +743,7 @@ def list_all_test_cases_for_project(project_id: int, db: Session = Depends(get_d
     review, not just whatever page happened to be loaded. Same eager-loads
     and response shape as the paginated endpoint -- just no page/limit."""
     _get_project_or_404(db, project_id)
+    require_project_visibility(db, project_id, current_user)
     return (
         db.query(models.TestCase)
         .filter(models.TestCase.project_id == project_id, models.TestCase.is_deleted == False)  # noqa: E712 - Oracle requires = 0, not IS 0
@@ -761,6 +765,7 @@ def export_test_repository(
     retained step and review event.
     """
     project = _get_project_or_404(db, project_id)
+    require_project_visibility(db, project_id, current_user)
     folders = (db.query(models.TestFolder).filter_by(project_id=project_id)
                .order_by(models.TestFolder.name).all())
     cases = (db.query(models.TestCase).filter_by(project_id=project_id)
@@ -871,18 +876,25 @@ def queue_test_repository_export(
     current_user: models.User = Depends(get_current_user),
 ):
     project = _get_project_or_404(db, project_id)
+    require_project_visibility(db, project_id, current_user)
     filename = f"{project.project_key}_test_repository.xlsx"
     user_id = current_user.id
     actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
 
     def build(job_id: str):
         with SessionLocal() as worker_db:
-            worker_user = worker_db.query(models.User).get(user_id)
-            if not worker_user:
-                raise RuntimeError("The user who started this export no longer exists")
+            worker_user = worker_db.get(models.User, user_id)
+            if not worker_user or not worker_user.is_active:
+                raise RuntimeError("The user who started this export no longer exists or is inactive")
             worker_user.active_qa_workspace_id = actor_workspace_id
+            worker_scope_ids = active_workspace_scope_ids(
+                worker_db, worker_user, actor_workspace_id,
+            )
+            if actor_workspace_id is None or actor_workspace_id not in worker_scope_ids:
+                raise HTTPException(403, "The workspace used to start this export is no longer available")
+            worker_user.active_workspace_scope_ids = tuple(sorted(worker_scope_ids))
             from ..workflow_authority import workflow_context
-            with workflow_context(worker_user):
+            with workspace_context(actor_workspace_id, worker_scope_ids), workflow_context(worker_user):
                 from ..project_workspace_ownership import bind_actor
                 bind_actor(worker_db, worker_user)
                 worker_db.info['workflow_actor'] = worker_user
@@ -1704,6 +1716,7 @@ def clone_test_case(case_id: int, payload: schemas.TestCaseCloneIn, db: Session 
     the same project/folder as the source; either may be overridden
     (project reuse across authorized projects, PRJ-006)."""
     source = get_or_404(db, models.TestCase, case_id, "Test Case")
+    require_project_visibility(db, source.project_id, current_user)
     target_project_id = payload.project_id or source.project_id
     target_project = _get_project_or_404(db, target_project_id)
     _require_active_project(target_project)
@@ -1948,6 +1961,7 @@ def list_recycle_bin(project_id: int, params: pagination.PageParams = Depends(),
     access as the main list (no extra role gate) -- restore/purge below are
     where the actual authorization differences live."""
     _get_project_or_404(db, project_id)
+    require_project_visibility(db, project_id, current_user)
     q = (
         db.query(models.TestCase)
         .filter(models.TestCase.project_id == project_id, models.TestCase.is_deleted == True)  # noqa: E712 - Oracle requires = 1, not IS 1
@@ -2303,10 +2317,11 @@ def bulk_return_test_cases(project_id: int, payload: schemas.TestCaseBulkReturn,
     for row in rows:
         draft = row.current_draft_version
         draft.status = new_state
-        draft.reviewed_by_id = current_user.id
-        draft.reviewed_at = models.now()
-        draft.review_comments = comments
-        if not is_stage1:
+        if is_stage1:
+            draft.reviewed_by_id = current_user.id
+            draft.reviewed_at = models.now()
+            draft.review_comments = comments
+        else:
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
             draft.qa_lead_decision_comments = comments
@@ -2338,10 +2353,11 @@ def bulk_reject_test_cases(project_id: int, payload: schemas.TestCaseBulkReject,
     for row in rows:
         draft = row.current_draft_version
         draft.status = "Rejected"
-        draft.reviewed_by_id = current_user.id
-        draft.reviewed_at = models.now()
-        draft.review_comments = comments
-        if not is_stage1:
+        if is_stage1:
+            draft.reviewed_by_id = current_user.id
+            draft.reviewed_at = models.now()
+            draft.review_comments = comments
+        else:
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
             draft.qa_lead_decision_comments = comments
@@ -2637,7 +2653,7 @@ async def queue_test_case_import(
 
     def process(job_id: str):
         with SessionLocal() as worker_db:
-            worker_user = worker_db.query(models.User).get(user_id)
+            worker_user = worker_db.get(models.User, user_id)
             if not worker_user:
                 raise RuntimeError("The user who started this import no longer exists")
             worker_user.active_qa_workspace_id = actor_workspace_id

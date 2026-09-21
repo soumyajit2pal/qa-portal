@@ -2476,6 +2476,22 @@ class QASignOff(Base):
 # ---------------------------------------------------------------------------
 class TestProject(Base):
     __tablename__ = "qap_test_projects"
+    # Project-name uniqueness is case/whitespace insensitive, matching the
+    # router validation, and must be enforced by the database to close the
+    # concurrent check-then-insert window.  The second function-based index
+    # implements "one non-archived project per Application": archived rows
+    # evaluate to NULL and are therefore omitted from Oracle's unique index.
+    # COALESCE treats legacy NULL is_archived values as non-archived, matching
+    # the Python-side lifecycle checks.  Both expressions are also supported
+    # by SQLite, keeping metadata-backed tests representative.
+    __table_args__ = (
+        Index("uq_qap_tproj_name_norm", text("UPPER(TRIM(name))"), unique=True),
+        Index(
+            "uq_qap_tproj_open_app",
+            text("CASE WHEN COALESCE(is_archived, 0) = 0 THEN application_master_id END"),
+            unique=True,
+        ),
+    )
     id = pk_column()
     project_key = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["TEST_PROJECT"]))
     name = Column(String(150), nullable=False)

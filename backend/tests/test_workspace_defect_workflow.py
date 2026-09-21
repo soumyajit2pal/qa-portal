@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from app.defect_workflow import policy, stages, transitions, verified_for, state, WorkflowPolicy
-from app import models, schemas
+from app import schemas
 from app.routers.defect_workflow_actions import apply_action
 
 

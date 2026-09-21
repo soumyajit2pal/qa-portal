@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useInternalNavigate } from '../../hooks/useRequestNavigation'
 import { api } from '../../api'
 import { PageHeader, Field, ErrorText, Badge, Table, EmptyState } from '../../components/Common'
 import { formatDateIST } from '../../time'
@@ -83,7 +83,7 @@ function Pager({ offset, limit, total, onOffset }: { offset: number; limit: numb
 const PAGE_SIZE = 5
 
 function RequirementsTraceabilityPanel({ projectId, onExportPath }: { projectId: number; onExportPath: (path: string | null) => void }) {
-  const navigate = useNavigate()
+  const navigate = useInternalNavigate()
   const [data, setData] = useState<RequirementTraceabilityOut | null>(null)
   const [search, setSearch] = useState('')
   const [appliedSearch, setAppliedSearch] = useState('')
@@ -255,8 +255,7 @@ function CycleProgressPanel({ projectId, onExportPath }: { projectId: number; on
   useEffect(() => {
     setCycleId(''); setData(null)
 
-    api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${projectId}/cycles?page_size=100`).then((page) => {
-      const c = page.items
+    api.getAll<TestCycleOut>(`/api/test-execution/projects/${projectId}/cycles`).then((c) => {
       setCycles(c)
       if (c.length) setCycleId(c[0].id)
     }).catch(setError)
@@ -301,7 +300,7 @@ function CycleProgressPanel({ projectId, onExportPath }: { projectId: number; on
 }
 
 function DefectQualityPanel({ projectId, onExportPath }: { projectId: number; onExportPath: (path: string | null) => void }) {
-  const navigate = useNavigate()
+  const navigate = useInternalNavigate()
   const [data, setData] = useState<DefectQualityOut | null>(null)
   const [offset, setOffset] = useState(0)
   const [resolverFilter, setResolverFilter] = useState<{ id: number; name: string; reopened: boolean } | null>(null)
@@ -442,7 +441,7 @@ function ProjectPortfolioPanel() {
 }
 
 function IncompleteDefectTraceabilityPanel({ onExportPath }: { onExportPath: (path: string | null) => void }) {
-  const navigate = useNavigate()
+  const navigate = useInternalNavigate()
   const [data, setData] = useState<PageOut<DefectListOut> | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [page, setPage] = useState(1)
@@ -497,7 +496,7 @@ export default function TestReports() {
 
   const load = useCallback(async () => {
     try {
-      const p = await api.get<PageOut<TestProjectOut>>('/api/test-projects?page_size=100').then((page) => page.items)
+      const p = await api.getAll<TestProjectOut>('/api/test-projects')
       setProjects(p)
       if (p.length) setProjectId(p[0].id)
     } catch (err) { setError(err) }
@@ -518,9 +517,9 @@ export default function TestReports() {
         path += `?project_id=${projectId}`
       }
       if (report.id === 'cycle-progress' && !path.includes('cycle_id=')) {
-        const page = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${projectId}/cycles?page_size=100`)
-        if (!page.items.length) throw new Error('This project has no Test Cycle to export.')
-        path += `${path.includes('?') ? '&' : '?'}cycle_id=${page.items[0].id}`
+        const cycles = await api.getAll<TestCycleOut>(`/api/test-execution/projects/${projectId}/cycles`)
+        if (!cycles.length) throw new Error('This project has no Test Cycle to export.')
+        path += `${path.includes('?') ? '&' : '?'}cycle_id=${cycles[0].id}`
       }
       await api.downloadFile(path, `test-report-${report.id}.xlsx`)
     } catch (err) { setError(err) }

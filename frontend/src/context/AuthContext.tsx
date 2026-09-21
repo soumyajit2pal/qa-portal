@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, Rea
 import { api, setToken } from '../api'
 import { UserOut } from '../types'
 import { uniqueWorkspaceAccess } from '../constants'
+import { isWorkspaceSelectionStorageChange } from '../workspaceTransition'
 
 interface LoginResult {
   roles: string[]
@@ -88,6 +89,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const expired = () => { setUser(null); setJustLoggedIn(false) }
     const storageChanged = (event: StorageEvent) => {
       if (event.key === 'qa_session_logout' && event.newValue) expired()
+      if (isWorkspaceSelectionStorageChange(event)) {
+        // The workspace header is read from shared localStorage for every API
+        // request. Reload this tab immediately so its mounted records cannot
+        // remain from the old workspace while new requests use the new one.
+        window.location.reload()
+      }
     }
     window.addEventListener('qa-session-expired', expired)
     window.addEventListener('storage', storageChanged)

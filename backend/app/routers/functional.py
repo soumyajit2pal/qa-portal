@@ -20,6 +20,7 @@ from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
 from .. import reassignment
+from ..workflow_authority import is_system_admin
 from ..execution_cycles import (
     execution_cycle_choice,
     require_cycle_startable,
@@ -99,8 +100,43 @@ def _require_visible(db: Session, obj: "models.FunctionalRequest", user: models.
         )
 
 
+def _require_distinct_department_head_approver(
+    db: Session, obj: "models.FunctionalRequest", user: models.User,
+) -> None:
+    """Keep the SM and Department Head checkpoints independent.
+
+    A multi-role user may legitimately be eligible for both stages, but may
+    not approve both stages on the same request.  Use the append-only audit
+    trail as the source of truth because FunctionalRequest has no dedicated
+    ``sm_approved_by_id`` column.  Administrators retain the workflow's
+    existing explicit oversight bypass.
+    """
+    # Workflow dependencies deliberately hide ADMIN from the actor's
+    # effective roles.  The maker-checker exception is based on the stored
+    # system-administrator assignment, so inspect that assignment directly.
+    if is_system_admin(user):
+        return
+    sm_approval = (
+        db.query(models.ApprovalAction)
+        .filter_by(
+            entity_type="FUNCTIONAL_REQUEST",
+            entity_id=obj.id,
+            step_name="SM Approval",
+            decision="Approved",
+            actor_id=user.id,
+        )
+        .first()
+    )
+    if sm_approval:
+        raise HTTPException(
+            403,
+            "Department Head approval must be completed by a different approver; "
+            "your SM approval is already recorded on this request.",
+        )
+
+
 def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str, workspace_id: int | None = None) -> models.User:
-    user = db.query(models.User).get(user_id) if user_id else None
+    user = db.get(models.User, user_id) if user_id else None
     if user and not user.show_in_user_dropdowns:
         raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
     if not user or not user.is_active or not user.has_qa_workspace_role(role, workspace_id=workspace_id):
@@ -313,6 +349,7 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
     Number/CR Number are further restricted to Admins only -- see
     _ADMIN_ONLY_FIELDS."""
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     # See _can_edit_details's own docstring below for the full permission
     # model (requester while it's theirs/returned to them; SM/Department
     # Head only while it's genuinely pending their own decision).
@@ -397,6 +434,7 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
 def submit_request(req_id: int, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(*QA_REQUEST_CREATOR_ROLES))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this request")
     _require(obj, QAStatus.DRAFT, "Submit")
@@ -434,6 +472,7 @@ def resubmit_request(req_id: int, db: Session = Depends(get_db),
     then call this endpoint to send it straight back to SM_APPROVAL_PENDING
     for a fresh decision."""
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
     if obj.active_delegation:
@@ -518,6 +557,7 @@ def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisio
     )
     require_not_requester(current_user, obj.requester_id)
     _require(obj, QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, "Department Head decision")
+    _require_distinct_department_head_approver(db, obj, current_user)
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
         raise HTTPException(400, application_name_block_message(obj.application_master_status, "department_head"))
     obj.department_head_id = current_user.id
@@ -543,6 +583,7 @@ def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisio
 def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
                                   current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.QA_LEAD_ASSIGNED, "Start readiness verification")
     _require_assigned_qa_lead(obj, current_user)
     obj.status = QAStatus.READINESS_VERIFICATION
@@ -556,6 +597,7 @@ def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
 def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.READINESS_VERIFICATION, "Readiness decision")
     _require_assigned_qa_lead(obj, current_user)
     if payload.decision == "Passed":
@@ -607,6 +649,7 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
 def begin_planning(req_id: int, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.QA_ACTIVITY_INITIATED, "Begin planning")
     _require_assigned_qa_lead(obj, current_user)
     obj.status = QAStatus.PLANNING
@@ -640,6 +683,7 @@ def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = De
     names and the reason) is written alongside the existing history log
     entry below."""
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, TESTER_REASSIGNABLE_STATUSES, "Assign tester")
     is_initial_assignment = obj.status == QAStatus.PLANNING
     previous_ids = _assigned_tester_ids(obj)
@@ -688,6 +732,7 @@ def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = De
 def start_test_design(req_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(require_roles( Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.TESTER_ASSIGNED, "Start test design")
     _require_assigned_tester(obj, current_user)
     obj.status = QAStatus.TEST_DESIGN
@@ -702,6 +747,7 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
                      db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.TEST_DESIGN, "Start execution")
     _require_assigned_tester(obj, current_user)
     # A link can be created from either side of the relationship. Resolve it
@@ -795,6 +841,7 @@ def eligible_test_cycles(req_id: int, db: Session = Depends(get_db),
 def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     can_manage = (current_user.has_role(Role.ADMIN) or obj.qa_lead_id == current_user.id
                   or current_user.id in _assigned_tester_ids(obj))
     if not can_manage:
@@ -831,6 +878,7 @@ def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
 def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.EXECUTION_IN_PROGRESS, "Raise defect")
     _require_assigned_tester(obj, current_user)
     raise HTTPException(
@@ -843,6 +891,7 @@ def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(
 def mark_waiting_for_fix(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                           current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.DEFECT_RAISED, "Mark waiting for fix")
     _require_assigned_tester(obj, current_user)
     obj.status = QAStatus.WAITING_FOR_FIX
@@ -856,6 +905,7 @@ def mark_waiting_for_fix(req_id: int, payload: schemas.CommentIn, db: Session = 
 def start_retesting(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.WAITING_FOR_FIX, "Start retesting")
     _require_assigned_tester(obj, current_user)
     obj.status = QAStatus.RETESTING
@@ -878,6 +928,7 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
     never depended on -- and now explicitly does not wait for -- a sibling
     request's own status."""
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, [QAStatus.EXECUTION_IN_PROGRESS, QAStatus.RETESTING], "Complete QA")
     _require_assigned_tester(obj, current_user)
 
@@ -903,6 +954,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
                      db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.QA_COMPLETED, "Request clearance")
     # 2026-08 -- reported directly: "'Request Sign Off' button is not
     # enable[d] for QA lead ... if tester [is] no[t] available then at
@@ -921,7 +973,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
     # rather than leaving it to confirm-signoff, so the certificate is
     # associated with this request from the moment sign-off is requested.
     if payload.signoff_id is not None:
-        cert = db.query(models.QASignOff).get(payload.signoff_id)
+        cert = db.get(models.QASignOff, payload.signoff_id)
         if not cert:
             raise HTTPException(400, "signoff_id does not reference an existing clearance certificate")
         obj.signoff_id = payload.signoff_id
@@ -949,9 +1001,10 @@ def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session 
     only while status is still QA_SIGNOFF_PENDING, which the auto-sync above
     already moves past for every certificate it successfully links."""
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     _require(obj, QAStatus.QA_SIGNOFF_PENDING, "Confirm clearance")
     if payload.signoff_id is not None:
-        cert = db.query(models.QASignOff).get(payload.signoff_id)
+        cert = db.get(models.QASignOff, payload.signoff_id)
         if not cert:
             raise HTTPException(400, "signoff_id does not reference an existing clearance certificate")
         obj.signoff_id = payload.signoff_id
@@ -969,6 +1022,7 @@ def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Se
                         current_user: models.User = Depends(require_roles(
                             *QA_REQUEST_CREATOR_ROLES, Role.APPLICATION_OWNER))):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can record this decision")
     _require(obj, QAStatus.REQUESTER_VERIFICATION, "Requester decision")
@@ -1009,7 +1063,7 @@ def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Se
         if not (payload.comments or "").strip():
             raise HTTPException(400, "A reason is required when requesting changes")
         obj.status = QAStatus.QA_SIGNOFF_PENDING
-        cert = db.query(models.QASignOff).get(obj.signoff_id) if obj.signoff_id else None
+        cert = db.get(models.QASignOff, obj.signoff_id) if obj.signoff_id else None
         if cert and cert.status == "ISSUED":
             cert.status = "RETURNED_BY_REQUESTER"
             db.add(models.ApprovalAction(
@@ -1040,7 +1094,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistI
     item = db.query(models.ReadinessChecklistItem).filter_by(id=item_id, functional_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")
-    parent = db.query(models.FunctionalRequest).get(req_id)
+    parent = db.get(models.FunctionalRequest, req_id)
     if not parent or parent.status != QAStatus.READINESS_VERIFICATION:
         raise HTTPException(
             400,
@@ -1048,6 +1102,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistI
             "Readiness Verification (i.e. by the QA Lead after Executive Approval) -- "
             "not while still in Draft or any other stage.",
         )
+    _require_visible(db, parent, current_user)
     _require_assigned_qa_lead(parent, current_user)
     # The QA Lead verifies the requester's own self-declaration -- they can't
     # tick an item the requester never declared ready in the first place (see
@@ -1092,7 +1147,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         uid = uid.strip()
         if not uid:
             continue
-        u = db.query(models.User).get(int(uid))
+        u = db.get(models.User, int(uid))
         if u:
             tester_names.append(u.full_name)
 
@@ -1119,8 +1174,8 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         ]),
         ("People", [
             ("Requester", obj.requester.full_name if obj.requester else None),
-            ("Department Head", db.query(models.User).get(obj.department_head_id).full_name if obj.department_head_id else None),
-            ("Assigned QA Lead", db.query(models.User).get(obj.qa_lead_id).full_name if obj.qa_lead_id else None),
+            ("Department Head", db.get(models.User, obj.department_head_id).full_name if obj.department_head_id else None),
+            ("Assigned QA Lead", db.get(models.User, obj.qa_lead_id).full_name if obj.qa_lead_id else None),
             ("Assigned Tester(s)", ", ".join(tester_names) if tester_names else None),
         ]),
         ("Readiness Checklist", [
@@ -1135,7 +1190,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
                      .order_by(models.ApprovalAction.created_at).all())
     history = []
     for h in history_rows:
-        actor = db.query(models.User).get(h.actor_id) if h.actor_id else None
+        actor = db.get(models.User, h.actor_id) if h.actor_id else None
         history.append((h.step_name or "—", h.decision or "—", actor.full_name if actor else "—",
                          h.actor_role or "—", h.comments or "—",
                          h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
@@ -1253,6 +1308,7 @@ def list_functional_documents(req_id: int, db: Session = Depends(get_db), curren
 def upload_functional_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                                  current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     if not _can_upload_documents(db, obj, current_user):
         raise HTTPException(403, "Only the requester, central QA team, assigned tester, or the SM/Department Head currently reviewing the request can upload documents")
     return doc_store.save_documents(db, "FUNCTIONAL", req_id, obj.request_id, files, current_user.id,
@@ -1274,6 +1330,7 @@ def download_functional_document(req_id: int, doc_id: int, db: Session = Depends
 def delete_functional_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                                 current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     doc = doc_store.get_document_or_404(db, "FUNCTIONAL", req_id, doc_id)
     if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(db, obj, current_user)):
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
@@ -1320,6 +1377,7 @@ def upload_functional_checklist_documents(req_id: int, item_id: int, files: List
                                            db: Session = Depends(get_db),
                                            current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     item = _functional_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
@@ -1350,6 +1408,7 @@ def delete_functional_checklist_document(req_id: int, item_id: int, doc_id: int,
                                           db: Session = Depends(get_db),
                                           current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     item = _functional_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")

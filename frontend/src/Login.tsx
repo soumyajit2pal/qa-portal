@@ -1,9 +1,11 @@
 import React, { useState } from 'react'
-import { useLocation, useNavigate, Link } from 'react-router-dom'
+import { useLocation, Link } from 'react-router-dom'
+import { useInternalNavigate } from './hooks/useRequestNavigation'
 import { useAuth } from './context/AuthContext'
 import { IconApprove, IconCertificate, IconEyeOff, IconLock, IconShield, IconUsers, IconWorkflow } from './components/Icons'
 import { ErrorText } from './components/Common'
 import AppVersion from './components/AppVersion'
+import { internalNavigationPath } from './requestNavigation'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -12,10 +14,9 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const { login } = useAuth()
-  const navigate = useNavigate()
+  const navigate = useInternalNavigate()
   const location = useLocation()
-  const requested = typeof location.state?.from === 'string' && location.state.from.startsWith('/')
-    && !location.state.from.startsWith('//') ? location.state.from : '/'
+  const requested = internalNavigationPath(typeof location.state?.from === 'string' ? location.state.from : null) || '/'
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()

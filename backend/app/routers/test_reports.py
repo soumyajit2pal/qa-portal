@@ -159,7 +159,7 @@ def cycle_progress(cycle_id: int, db: Session = Depends(get_db),
     reads TestExecution's own mirror columns (each mirrors its slot's
     latest immutable TestExecutionRun, see models.py), so this is accurate
     for an active or Completed cycle alike (RPT-003)."""
-    cycle = db.query(models.TestCycle).get(cycle_id)
+    cycle = db.get(models.TestCycle, cycle_id)
     if not cycle:
         raise HTTPException(404, "Test Cycle not found")
     require_project_visibility(db, cycle.project_id, current_user)
@@ -760,7 +760,7 @@ def export_catalogue_report(
     elif report_id == "cycle-progress":
         data = cycle_progress(cycle_id, db, current_user)
         if project_id is not None:
-            cycle = db.query(models.TestCycle).get(cycle_id)
+            cycle = db.get(models.TestCycle, cycle_id)
             if cycle.project_id != project_id:
                 raise HTTPException(400, "Selected cycle does not belong to the selected project")
         title, scope_key, population_note = "Cycle Progress", data["cycle_key"], data["population_note"]

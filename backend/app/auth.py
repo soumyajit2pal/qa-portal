@@ -5,8 +5,8 @@ import hmac
 import ssl
 
 import bcrypt
-from jose import jwt
-from jose import JWTError
+import jwt
+from jwt import PyJWTError as JWTError
 from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE, Tls
 from ldap3.core.exceptions import LDAPException
 from ldap3.utils.conv import escape_filter_chars
@@ -64,8 +64,7 @@ def decode_access_token(token: str) -> dict:
     payload = jwt.decode(
         token, SECRET_KEY, algorithms=[ALGORITHM],
         issuer=settings.jwt_issuer, audience=settings.jwt_audience,
-        options={"require_exp": True, "require_iat": True, "require_sub": True,
-                 "require_jti": True, "require_iss": True, "require_aud": True},
+        options={"require": ["exp", "iat", "sub", "jti", "iss", "aud"]},
     )
     if "session_exp" in payload and (
         not isinstance(payload["session_exp"], (int, float))
@@ -168,6 +167,15 @@ def _ldap_bind_and_fetch(username: str, password: str):
     mock_profile, handled_by_mock = _mock_ldap_profile(username, password)
     if handled_by_mock:
         return mock_profile
+    # In a mock-only UAT environment the configured mock namespace is the
+    # complete directory. A typo outside that namespace is an ordinary
+    # invalid identity, not an attempt to contact a real LDAP service that is
+    # intentionally absent. Without this guard every such typo fell through
+    # to the missing LDAP_SERVER_URI check and was incorrectly reported as a
+    # temporary service outage. When a real server is configured, non-mock
+    # usernames continue to fall through to that server as before.
+    if settings.ldap_mock_enabled and not LDAP_SERVER_URI:
+        return None
     if not LDAP_SERVER_URI:
         raise LDAPAuthError("LDAP_SERVER_URI is not configured on the server")
     if settings.app_env in {"uat", "prod", "production"} and not LDAP_USE_SSL:

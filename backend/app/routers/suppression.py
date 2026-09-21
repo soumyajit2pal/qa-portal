@@ -18,6 +18,7 @@ from ..deps import (
 from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, SUPPRESSION_TERMINAL_STATUSES
 from ..pdf_export import StructuredTableValue, build_request_detail_pdf
 from .. import documents as doc_store
+from ..workflow_authority import is_system_admin
 
 router = APIRouter(prefix="/api/suppressions", tags=["suppression"])
 _PRIVATE_STATUSES = ("Draft",)
@@ -122,7 +123,7 @@ def _can_edit_details(obj: "models.SuppressionRequest", user: models.User,
     return False
 
 
-def _require_linked_request(db: Session, data: dict):
+def _require_linked_request(db: Session, data: dict, current_user: models.User):
     """Every field on the New/Edit Suppression form is now mandatory --
     including the SAST/DAST Request ID link itself (previously optional,
     allowing a "standalone" finding with no linked scan). Enforced here
@@ -148,13 +149,14 @@ def _require_linked_request(db: Session, data: dict):
     if bool(data.get("sast_request_id")) == bool(data.get("dast_request_id")):
         raise HTTPException(400, "Exactly one of SAST or DAST Request ID must be selected")
     if data.get("sast_request_id"):
-        linked = db.query(models.SASTRequest).get(data["sast_request_id"])
+        linked = db.get(models.SASTRequest, data["sast_request_id"])
         kind = "SAST"
     else:
-        linked = db.query(models.DASTRequest).get(data["dast_request_id"])
+        linked = db.get(models.DASTRequest, data["dast_request_id"])
         kind = "DAST"
     if not linked:
         raise HTTPException(400, f"Linked {kind} request not found")
+    _require_linked_request_workspace(db, linked, kind, current_user)
     if linked.status in SAST_DAST_PRE_SCANNING_STATUSES:
         raise HTTPException(
             400,
@@ -168,6 +170,13 @@ def _require_linked_request(db: Session, data: dict):
             f"longer be raised against it once the security review is complete.",
         )
     return linked, kind
+
+
+def _require_linked_request_workspace(
+    db: Session, linked, kind: str, current_user: models.User,
+) -> None:
+    """Reject a crafted link outside the caller's selected workspace scope."""
+    require_entity_workspace_visibility(db, current_user, kind, linked.id)
 
 
 def _apply_linked_request_identity(data: dict, linked, kind: str) -> None:
@@ -316,7 +325,7 @@ def create_suppression(payload: schemas.SuppressionCreate, db: Session = Depends
     items_data = data.pop("items")
     if not items_data:
         raise HTTPException(400, "At least one finding/issue is required")
-    linked, kind = _require_linked_request(db, data)
+    linked, kind = _require_linked_request(db, data, current_user)
     _require_requester_of_linked(linked, current_user)
     _require_no_existing_pending_suppression(db, linked, kind)
     _apply_linked_request_identity(data, linked, kind)
@@ -332,7 +341,7 @@ def create_suppression(payload: schemas.SuppressionCreate, db: Session = Depends
 
 @router.get("/{sup_id}", response_model=schemas.SuppressionOut)
 def get_suppression(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.SuppressionRequest).get(sup_id)
+    obj = db.get(models.SuppressionRequest, sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
@@ -360,7 +369,7 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
     items_data = data.pop("items", None)
     if not items_data:
         raise HTTPException(400, "At least one finding/issue is required")
-    linked, kind = _require_linked_request(db, data)
+    linked, kind = _require_linked_request(db, data, current_user)
     # Re-checked here too, not just in create_suppression -- an edit can
     # re-point sast_request_id/dast_request_id at a different request
     # entirely, so the *new* link's requester must still be this same
@@ -411,12 +420,13 @@ def relink_suppression(sup_id: int, payload: schemas.SuppressionRelinkIn, db: Se
     obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    _require_visible(db, obj, current_user)
     if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can relink this request")
     if obj.status in SUPPRESSION_TERMINAL_STATUSES:
         raise HTTPException(400, f"Cannot relink a suppression request that has already reached '{obj.status}'")
     data = payload.model_dump()
-    linked, kind = _require_linked_request(db, data)
+    linked, kind = _require_linked_request(db, data, current_user)
     _require_requester_of_linked(linked, current_user)
     _require_no_existing_pending_suppression(db, linked, kind, exclude_id=obj.id)
     obj.sast_request_id = data.get("sast_request_id")
@@ -427,6 +437,7 @@ def relink_suppression(sup_id: int, payload: schemas.SuppressionRelinkIn, db: Se
     obj.application_name = identity["application_name"]
     obj.department = identity["department"]
     obj.application_owner = identity["application_owner"]
+    obj.qa_workspace_id = identity["qa_workspace_id"]
     _log(db, obj.id, "Requester", current_user, "Relinked", f"Relinked to {kind} request {linked.request_id}")
     db.commit()
     db.refresh(obj)
@@ -528,6 +539,15 @@ def dept_head_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Sessi
     )
     require_not_requester(current_user, obj.created_by_id)
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
+    # Maker-checker separation is per request, not merely per role. A person
+    # may legitimately hold both SM and Department Head roles, but must not
+    # approve both consecutive stages of the same suppression request.
+    if obj.sm_id == current_user.id and not is_system_admin(current_user):
+        raise HTTPException(
+            403,
+            "Department Head approval must be completed by a different approver; "
+            "your SM decision is already recorded on this request.",
+        )
     obj.dept_head_decision = payload.decision
     obj.dept_head_id = current_user.id
     obj.dept_head_decided_at = models.now()
@@ -557,6 +577,7 @@ def security_team_decision(sup_id: int, payload: schemas.WorkflowDecision, db: S
     obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    require_not_requester(current_user, obj.created_by_id)
     _require(obj, "SECURITY_TEAM_VERIFICATION", "Security team decision")
     decision = payload.decision
     if decision not in ("Accepted", "Approved", "Rejected", "Returned"):
@@ -584,7 +605,7 @@ def security_team_decision(sup_id: int, payload: schemas.WorkflowDecision, db: S
 
 @router.get("/{sup_id}/history", response_model=List[schemas.ApprovalActionOut])
 def suppression_history(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.SuppressionRequest).get(sup_id)
+    obj = db.get(models.SuppressionRequest, sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
@@ -599,7 +620,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
     finding it covers, and its full approval/workflow history -- who
     submitted, decided (SM/Department Head/Security Team), etc., and when --
     as one downloadable PDF."""
-    obj = db.query(models.SuppressionRequest).get(sup_id)
+    obj = db.get(models.SuppressionRequest, sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
@@ -607,7 +628,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
     def uname(uid):
         if not uid:
             return None
-        u = db.query(models.User).get(uid)
+        u = db.get(models.User, uid)
         return u.full_name if u else None
 
     sections = [
@@ -705,7 +726,7 @@ def _can_upload_documents(db: Session, obj: "models.SuppressionRequest", user: m
 # request has been raised) -- see documents.py for the shared implementation. ----
 @router.get("/{sup_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_suppression_documents(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.SuppressionRequest).get(sup_id)
+    obj = db.get(models.SuppressionRequest, sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
@@ -718,6 +739,7 @@ def upload_suppression_documents(sup_id: int, files: List[UploadFile] = File(...
     obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    _require_visible(db, obj, current_user)
     if not _can_upload_documents(db, obj, current_user):
         raise HTTPException(403, "Only the requester or this request's current stage owner (Security Team, or the SM/Department Head currently reviewing it) can upload documents")
     return doc_store.save_documents(db, "SUPPRESSION", sup_id, obj.suppression_id, files, current_user.id,
@@ -727,7 +749,7 @@ def upload_suppression_documents(sup_id: int, files: List[UploadFile] = File(...
 @router.get("/{sup_id}/documents/{doc_id}/download")
 def download_suppression_document(sup_id: int, doc_id: int, db: Session = Depends(get_db),
                                    current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.SuppressionRequest).get(sup_id)
+    obj = db.get(models.SuppressionRequest, sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
@@ -744,6 +766,7 @@ def delete_suppression_document(sup_id: int, doc_id: int, db: Session = Depends(
     obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    _require_visible(db, obj, current_user)
     doc = doc_store.get_document_or_404(db, "SUPPRESSION", sup_id, doc_id)
     if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(db, obj, current_user)):
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")

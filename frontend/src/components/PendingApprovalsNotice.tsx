@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import InfoModal from './InfoModal'
+import { boundedRetryDelay } from '../retryPolicy'
 
 // Reported directly: "also show one info on login if there are any pending
 // approval pending." Fires once per sign-in (see AuthContext.tsx's own
@@ -12,26 +13,35 @@ import InfoModal from './InfoModal'
 // and hydrate the full approval feed merely to display one number. Detailed
 // records load only when the user opens Pending Approvals. If anything is
 // genuinely awaiting this person's decision, this shows one pop-up with the
-// count and a link straight to that page. Silently
-// acknowledges itself (no pop-up at all) when the count is zero or the
-// fetch fails, rather than showing an empty/broken notice.
+// count and a link straight to that page. A zero count acknowledges the
+// login. A transient lookup failure retries in the background; it must not
+// permanently suppress a real pending-approval notice for this session.
 export default function PendingApprovalsNotice() {
   const { justLoggedIn, acknowledgeLogin } = useAuth()
   const [count, setCount] = useState<number | null>(null)
 
   useEffect(() => {
-    if (!justLoggedIn) return
+    if (!justLoggedIn) { setCount(null); return }
     let cancelled = false
-    api.get<{ count: number }>('/api/pending-approvals/count')
-      .then((summary) => {
+    let retryTimer: number | undefined
+    let attempt = 0
+    setCount(null)
+    async function check() {
+      try {
+        const summary = await api.get<{ count: number }>('/api/pending-approvals/count')
         if (cancelled) return
         if (summary.count > 0) setCount(summary.count)
         else acknowledgeLogin()
-      })
-      .catch(() => {
-        if (!cancelled) acknowledgeLogin()
-      })
-    return () => { cancelled = true }
+      } catch {
+        if (cancelled) return
+        retryTimer = window.setTimeout(() => { void check() }, boundedRetryDelay(attempt++))
+      }
+    }
+    void check()
+    return () => {
+      cancelled = true
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [justLoggedIn])
 

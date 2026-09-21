@@ -3,10 +3,11 @@ import json
 from unittest.mock import patch
 from pathlib import Path
 import pytest
-from fastapi import HTTPException, FastAPI
+from fastapi import HTTPException
 import asyncio
 from starlette.responses import JSONResponse
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError as JWTError
 from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session

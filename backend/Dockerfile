@@ -11,13 +11,14 @@ COPY app ./app
 
 ENV UPLOAD_STORAGE_ROOT=/data/qualityops/uploads
 ENV DOCUMENT_PORTAL_STORAGE_HOST_PATH=/data/qualityops/uploads/document-portal
+ENV PYTHONDONTWRITEBYTECODE=1
 
 # All runtime uploads live below one stable container path. Docker Compose
-# backs this with either the qa_portal_uploads named volume or the host path
-# supplied through UPLOAD_STORAGE_HOST_PATH.
+# supplies the explicit durable bind mount. Do not declare an image VOLUME
+# here: that would silently create writable anonymous volumes for the migrate
+# and Document Portal containers and leave orphaned data behind.
 RUN mkdir -p /data/qualityops/uploads/document-portal \
     && chown -R root:root /data/qualityops/uploads
-VOLUME ["/data/qualityops/uploads"]
 
 EXPOSE 8000
 

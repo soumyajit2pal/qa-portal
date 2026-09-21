@@ -1,8 +1,10 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from fastapi import HTTPException
 from app import schemas
-from app.routers.suppression import resubmit_suppression, security_team_decision
+from app.routers.suppression import dept_head_decision, resubmit_suppression, security_team_decision
 
 
 class _Query:
@@ -82,6 +84,22 @@ class SuppressionSecurityReturnTests(unittest.TestCase):
         self.assertEqual(request.status, "RETURNED_BY_SECURITY_TEAM")
         self.assertTrue(request.needs_dept_head_reapproval)
 
+    def test_security_analyst_cannot_decide_own_suppression(self):
+        request = self.request()
+        actor = _User(request.created_by_id)
+        db = _Db(request)
+
+        with self.assertRaises(HTTPException) as denied:
+            security_team_decision(
+                request.id,
+                schemas.WorkflowDecision(decision="Accepted", comments="Self approved"),
+                db,
+                actor,
+            )
+
+        self.assertEqual(denied.exception.status_code, 403)
+        self.assertEqual(request.status, "SECURITY_TEAM_VERIFICATION")
+
     def test_security_return_with_reapproval_routes_resubmit_to_department_head(self):
         request = self.request()
         request.status = "RETURNED_BY_SECURITY_TEAM"
@@ -102,6 +120,61 @@ class SuppressionSecurityReturnTests(unittest.TestCase):
 
         self.assertEqual(request.status, "SECURITY_TEAM_VERIFICATION")
         self.assertFalse(request.needs_dept_head_reapproval)
+
+    def test_department_head_cannot_approve_after_own_sm_decision(self):
+        actor = _User(20)
+        request = SimpleNamespace(
+            id=4,
+            status="DEPARTMENT_HEAD_APPROVAL_PENDING",
+            created_by_id=10,
+            department="Operations",
+            sm_id=actor.id,
+        )
+        db = _Db(request)
+
+        with patch("app.routers.suppression._require_visible"), \
+             patch("app.routers.suppression.require_same_department"), \
+             patch("app.routers.suppression.require_department_unit_action_scope"), \
+             patch("app.routers.suppression._request_department_unit_id", return_value=None):
+            with self.assertRaises(HTTPException) as raised:
+                dept_head_decision(
+                    request.id,
+                    schemas.WorkflowDecision(decision="Approved"),
+                    db,
+                    actor,
+                )
+
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertIn("different approver", raised.exception.detail)
+        self.assertEqual(request.status, "DEPARTMENT_HEAD_APPROVAL_PENDING")
+
+    def test_system_admin_with_explicit_role_retains_second_stage_oversight(self):
+        actor = _User(20)
+        actor.role_assignments = [SimpleNamespace(role="ADMIN")]
+        request = SimpleNamespace(
+            id=5,
+            status="DEPARTMENT_HEAD_APPROVAL_PENDING",
+            created_by_id=10,
+            department="Operations",
+            sm_id=actor.id,
+            dept_head_decision=None,
+            dept_head_id=None,
+            dept_head_decided_at=None,
+        )
+        db = _Db(request)
+
+        with patch("app.routers.suppression._require_visible"), \
+             patch("app.routers.suppression.require_same_department"), \
+             patch("app.routers.suppression.require_department_unit_action_scope"), \
+             patch("app.routers.suppression._request_department_unit_id", return_value=None):
+            dept_head_decision(
+                request.id,
+                schemas.WorkflowDecision(decision="Approved"),
+                db,
+                actor,
+            )
+
+        self.assertEqual(request.status, "SECURITY_TEAM_VERIFICATION")
 
 
 if __name__ == "__main__":

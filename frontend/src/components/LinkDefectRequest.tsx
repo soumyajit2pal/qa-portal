@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api'
-import { DefectOut, PageOut, QARequestListOut } from '../types'
+import { DefectOut, QARequestListOut } from '../types'
 import { ErrorText, Field, Modal } from './Common'
 import SearchableSelect from './SearchableSelect'
 
@@ -16,8 +16,8 @@ export default function LinkDefectRequest({ defect, onChanged }: { defect: Defec
     if (!open) return
     let active = true
     setLoading(true); setError(null); setRequestId('')
-    api.get<PageOut<QARequestListOut>>(`/api/qa-requests?page_size=100&search=${encodeURIComponent(search)}`)
-      .then(page => { if (active) setRows(page.items.filter(r => r.application_name.toLowerCase() === defect.application_name.toLowerCase() && r.department === defect.department && r.qa_workspace_id === defect.qa_workspace_id)) })
+    api.getAll<QARequestListOut>(`/api/qa-requests?search=${encodeURIComponent(search)}`)
+      .then(options => { if (active) setRows(options.filter(r => r.application_name.toLowerCase() === defect.application_name.toLowerCase() && r.department === defect.department && r.qa_workspace_id === defect.qa_workspace_id)) })
       .catch(e => { if (active) { setError(e); setRows([]) } })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }

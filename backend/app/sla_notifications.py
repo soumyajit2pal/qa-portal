@@ -5,7 +5,6 @@ last update. SMTP enablement controls this worker too. No business data is
 modified; only an audit marker and durable outbox messages are committed.
 """
 from . import models as m
-from .constants import Role
 from . import email_notifications as mail
 from .workspace_service import selectable_workspace_ids
 from .reassignment import department_head_user_ids

@@ -1,9 +1,10 @@
 import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useRequestNavigation, useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useRef } from 'react'
 import {useSearchParams} from 'react-router-dom'
 import { api } from '../../api'
+import { createLatestRequestGate } from '../../latestRequest'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, RepeatableRows, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel, EmptyState } from '../../components/Common'
@@ -768,7 +769,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
             <DetailField label="Requester">{userName(users, req.requester_id) || '—'}</DetailField>
             <DetailField label="Assigned Group">{(() => {
               const assigned = assignedGroupFor(req.status, req.application_master_status, req.department)
-              return assigned ? <RoleGroupLink users={users} role={assigned.role} label={assigned.label} department={assigned.department} /> : '—'
+              return assigned ? <RoleGroupLink role={assigned.role} label={assigned.label} department={assigned.department} /> : '—'
             })()}</DetailField>
             <DetailField label="Assigned Security Analyst">{userName(users, req.security_analyst_id) || 'Not assigned'}</DetailField>
           </DetailSection>
@@ -866,7 +867,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
                       : undefined
                   }
                   extraControlLabel="Assign to group"
-                  extraControl={<RoleGroupLink users={users} role="QA_LEAD" label="QA Lead" />}
+                  extraControl={<RoleGroupLink role="QA_LEAD" label="QA Lead" />}
                   extraReady
                   onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed })}
                   onReturn={(actionNote) => act('department-head-decision', { decision: 'Returned', comments: actionNote })}
@@ -1166,6 +1167,7 @@ export default function DAST() {
   // including unmasked test_credentials where authorized) is shown.
   const [selected, setSelected] = useState<DASTOut | null>(null)
   const [openingId, setOpeningId] = useState<number | null>(null)
+  const detailRequests = useRef(createLatestRequestGate()).current
   const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
@@ -1188,11 +1190,17 @@ export default function DAST() {
 
   const openRequest = useCallback(async (idOrRow: number | DASTListOut) => {
     const id = typeof idOrRow === 'number' ? idOrRow : idOrRow.id
+    const generation = detailRequests.begin()
     setOpeningId(id)
     try {
-      setSelected(await api.get<DASTOut>(`/api/dast-requests/${id}`))
-    } catch (err) { setError(err) } finally { setOpeningId(null) }
-  }, [])
+      const detail = await api.get<DASTOut>(`/api/dast-requests/${id}`)
+      if (detailRequests.isCurrent(generation)) setSelected(detail)
+    } catch (err) {
+      if (detailRequests.isCurrent(generation)) setError(err)
+    } finally {
+      if (detailRequests.isCurrent(generation)) setOpeningId(null)
+    }
+  }, [detailRequests])
 
   // Deep-link support -- see the matching effect in Functional.tsx for the
   // full reasoning; the gateway's "Linked Requests" table opens a specific

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
+import { useInternalNavigate } from '../../hooks/useRequestNavigation'
 import { api } from '../../api'
 import { formatDateIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
@@ -9,7 +10,7 @@ import UserAssignSelect from '../../components/UserAssignSelect'
 import { hasRole, isSelectableUser, QA_LEAD_GROUP_ROLES } from '../../constants'
 import {
   ApplicationMasterOut, TestProjectOut, TestProjectSummaryCountsOut, ApprovalActionOut, DepartmentOut,
-  UserOut, UserOption, PageOut, TestProjectViewGrantOut, TestProjectWorkspaceOptionOut,
+  UserOut, UserOption, TestProjectViewGrantOut, TestProjectWorkspaceOptionOut,
 } from '../../types'
 import JiraActivity from '../../components/JiraActivity'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
@@ -419,7 +420,7 @@ function UnarchiveProjectModal({ project, onClose, onDone }: {
 }
 
 export default function TestProjects() {
-  const navigate = useNavigate()
+  const navigate = useInternalNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const { user } = useAuth()
   const canManage = hasRole(user, ...CAN_MANAGE_ROLES)
@@ -463,11 +464,9 @@ export default function TestProjects() {
 
   const load = useCallback(async () => {
     try {
-      const [pPage, a, d, u, summaryCounts] = await Promise.all([
-        // SRS 7.2 pagination rollout -- /api/test-projects is now wrapped in
-        // Page[T] for API-contract consistency (task #82); page_size=100 +
-        // .items since this gallery still wants the complete list.
-        api.get<PageOut<TestProjectOut>>('/api/test-projects?include_inactive=true&page_size=100'),
+      const [p, a, d, u, summaryCounts] = await Promise.all([
+        // This client-filtered gallery must include every project.
+        api.getAll<TestProjectOut>('/api/test-projects?include_inactive=true'),
         api.get<ApplicationMasterOut[]>('/api/application-names'),
         api.get<DepartmentOut[]>('/api/departments'),
         // Test Management-scoped picker -- see constants.
@@ -476,7 +475,6 @@ export default function TestProjects() {
         api.get<UserOption[]>('/api/test-projects/eligible-users'),
         api.get<TestProjectSummaryCountsOut[]>('/api/test-projects/summary-counts?include_inactive=true'),
       ])
-      const p = pPage.items
       setProjects(p); setApplications(a); setDepartments(d); setUsers(u)
       setSummaries(Object.fromEntries(summaryCounts.map((summary) => [
         summary.project_id,

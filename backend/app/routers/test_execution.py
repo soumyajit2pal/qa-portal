@@ -20,7 +20,10 @@ from ..deps import (
     require_project_visibility,
 )
 from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES
-from ..workspace_service import current_workspace_id, selectable_workspace_ids
+from ..workspace_service import (
+    active_workspace_scope_ids, current_workspace_id, selectable_workspace_ids,
+    workspace_context,
+)
 from .. import documents as doc_store
 from .. import reassignment
 from . import jobs
@@ -56,10 +59,10 @@ _LIST_EXECUTION_EAGER_LOADS = [
 
 router = APIRouter(prefix="/api/test-execution", tags=["test-management"])
 
-# Same access as the Test Repository (test_repository.py) -- QA Engineer +
-# QA Lead both create cycles, add test cases to them, and record results.
+# Same access as the Test Repository (test_repository.py): the QA Group and
+# QA Lead Group (including CM QA and AGM QA) can manage execution work.
 # Admin always bypasses via require_roles.
-_EXEC_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA)
+_EXEC_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
 _RESULT_IMAGE_MODULE = "TEST_EXEC_IMAGE"  # <= qap_module_documents.module VARCHAR2(20)
 _RESULT_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 _RESULT_IMAGE_LIMIT = 8
@@ -121,17 +124,42 @@ def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
 
 
 def _get_cycle_or_404(db: Session, cycle_id: int) -> models.TestCycle:
-    obj = db.query(models.TestCycle).get(cycle_id)
+    obj = db.get(models.TestCycle, cycle_id)
     if not obj:
         raise HTTPException(404, "Test Cycle not found")
     return obj
+
+
+def _require_cycle_visibility(
+    db: Session, cycle: models.TestCycle, current_user: models.User,
+) -> None:
+    """Apply both project and optional folder visibility to every cycle route.
+
+    Cycle-folder grants are restrictive, so checking only the project leaves
+    every child URL (executions, exports, runs, and evidence) as a direct-ID
+    bypass.  Keep the two checks together so new cycle child routes have one
+    canonical guard to call.
+    """
+    require_project_visibility(db, cycle.project_id, current_user)
+    folder_id = getattr(cycle, "folder_id", None)
+    if folder_id:
+        folder = getattr(cycle, "folder", None) or _get_cycle_folder_or_404(db, folder_id)
+        require_can_view_cycle_folder(folder, current_user)
+
+
+def _require_execution_visibility(
+    db: Session, execution: models.TestExecution, current_user: models.User,
+) -> models.TestCycle:
+    cycle = getattr(execution, "cycle", None) or _get_cycle_or_404(db, execution.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
+    return cycle
 
 
 def _require_cycle_request_link_change_allowed(db: Session, link) -> None:
     """Protect a Functional execution link regardless of which UI changes it."""
     if not link or link.child_type != "Functional":
         return
-    functional_request = db.query(models.FunctionalRequest).get(link.child_id)
+    functional_request = db.get(models.FunctionalRequest, link.child_id)
     if functional_request:
         require_cycle_unlinkable(functional_request.status)
 
@@ -160,7 +188,7 @@ def _attach_request_link_permissions(db: Session, cycles) -> None:
 
 
 def _get_cycle_folder_or_404(db: Session, folder_id: int) -> models.TestCycleFolder:
-    obj = db.query(models.TestCycleFolder).get(folder_id)
+    obj = db.get(models.TestCycleFolder, folder_id)
     if not obj:
         raise HTTPException(404, "Test Cycle Folder not found")
     return obj
@@ -229,7 +257,7 @@ def _sync_linked_functional_request_status(db: Session, cycle: "models.TestCycle
     link = cycle.child_request_link
     if not link or link.child_type != "Functional":
         return
-    freq = db.query(models.FunctionalRequest).get(link.child_id)
+    freq = db.get(models.FunctionalRequest, link.child_id)
     if not freq:
         return
     if transition_action == "Block Execution":
@@ -310,7 +338,7 @@ def _validate_cycle_ready(db: Session, cycle: models.TestCycle, start_date, end_
     if link:
         if link.child_type != "Functional":
             raise HTTPException(400, "Only Functional QA Requests can be linked to Test Cycles")
-        linked_request = db.query(models.FunctionalRequest).get(link.child_id)
+        linked_request = db.get(models.FunctionalRequest, link.child_id)
         if not linked_request or not linked_request.request_id:
             raise HTTPException(400, "This cycle's Functional QA Request is no longer valid. Replace or remove the link before continuing")
         request_workspace_id = linked_request.qa_request.qa_workspace_id if linked_request.qa_request else None
@@ -418,7 +446,7 @@ def _execution_or_404(db: Session, execution_id: int, *, lock: bool = False) -> 
 
 
 def _runner_or_404(db: Session, user_id: int, *, workspace_id: int | None = None, project: models.TestProject | None = None, cycle_owner: bool = False) -> models.User:
-    target = db.query(models.User).get(user_id)
+    target = db.get(models.User, user_id)
     if not target or not target.is_active:
         raise HTTPException(404, "Selected runner was not found or is inactive")
     if not target.show_in_user_dropdowns:
@@ -451,6 +479,7 @@ def cycle_owner_candidates(project_id: int, cycle_id: int | None = None,
         cycle = _get_cycle_or_404(db, cycle_id)
         if cycle.project_id != project_id:
             raise HTTPException(400, "Cycle does not belong to this project")
+        _require_cycle_visibility(db, cycle, current_user)
         workspace_id = cycle.origin_workspace_id or project.qa_workspace_id
     eligible = []
     for candidate in db.query(models.User).filter(models.User.is_active == True).order_by(models.User.full_name).all():
@@ -633,6 +662,7 @@ def _prepare_execution_update(db: Session, obj: models.TestExecution, status_val
                               current_user: models.User, defect_key: str = "") -> models.TestCycle:
     _execution_or_404(db, obj.id, lock=True)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
@@ -836,6 +866,7 @@ def list_cycle_folders(project_id: int, db: Session = Depends(get_db),
     what it restricts, same as this app's other access boundaries fail
     closed rather than half-revealing what's hidden."""
     _get_project_or_404(db, project_id)
+    require_project_visibility(db, project_id, current_user)
     all_folders = (
         db.query(models.TestCycleFolder).filter_by(project_id=project_id)
         .options(selectinload(models.TestCycleFolder.access_grants))
@@ -878,6 +909,7 @@ def create_cycle_folder(project_id: int, payload: schemas.TestCycleFolderCreate,
 def rename_cycle_folder(folder_id: int, payload: schemas.TestCycleFolderCreate, db: Session = Depends(get_db),
                          current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _get_cycle_folder_or_404(db, folder_id)
+    require_project_visibility(db, obj.project_id, current_user)
     _require_active_project(db, obj.project_id)
     require_can_execute_project(db, obj.project_id, current_user)
     require_can_view_cycle_folder(obj, current_user)
@@ -899,6 +931,8 @@ def delete_cycle_folder(folder_id: int, db: Session = Depends(get_db),
     move its cycles out first, same "never silently orphan/cascade-delete
     real content just by removing its folder" convention."""
     obj = _get_cycle_folder_or_404(db, folder_id)
+    require_project_visibility(db, obj.project_id, current_user)
+    require_can_view_cycle_folder(obj, current_user)
     _require_active_project(db, obj.project_id)
     require_can_manage_execution_governance(db, obj.project_id, current_user)
     has_cycles = db.query(models.TestCycle).filter_by(folder_id=folder_id).first()
@@ -912,6 +946,7 @@ def delete_cycle_folder(folder_id: int, db: Session = Depends(get_db),
 def list_cycle_folder_access(folder_id: int, db: Session = Depends(get_db),
                               current_user: models.User = Depends(get_current_user)):
     obj = _get_cycle_folder_or_404(db, folder_id)
+    require_project_visibility(db, obj.project_id, current_user)
     require_can_view_cycle_folder(obj, current_user)
     return (
         db.query(models.TestCycleFolderAccess).filter_by(folder_id=obj.id)
@@ -933,6 +968,8 @@ def create_cycle_folder_access(folder_id: int, payload: schemas.TestCycleFolderA
     revoking access is treated as an ordinary authoring action on a folder
     someone with execute access already made, not a governance-tier one."""
     obj = _get_cycle_folder_or_404(db, folder_id)
+    require_project_visibility(db, obj.project_id, current_user)
+    require_can_view_cycle_folder(obj, current_user)
     _require_active_project(db, obj.project_id)
     require_can_execute_project(db, obj.project_id, current_user)
     department = (payload.department or "").strip() or None
@@ -951,7 +988,7 @@ def create_cycle_folder_access(folder_id: int, payload: schemas.TestCycleFolderA
         if existing:
             raise HTTPException(409, f"{department} already has access to this folder")
     else:
-        target_user = db.query(models.User).get(user_id)
+        target_user = db.get(models.User, user_id)
         if not target_user:
             raise HTTPException(404, "User not found")
         who = target_user.full_name
@@ -986,6 +1023,8 @@ def delete_cycle_folder_access(folder_id: int, grant_id: int, db: Session = Depe
     """Same gate as create_cycle_folder_access above -- see that function's
     own docstring."""
     obj = _get_cycle_folder_or_404(db, folder_id)
+    require_project_visibility(db, obj.project_id, current_user)
+    require_can_view_cycle_folder(obj, current_user)
     _require_active_project(db, obj.project_id)
     require_can_execute_project(db, obj.project_id, current_user)
     grant = db.query(models.TestCycleFolderAccess).filter_by(id=grant_id, folder_id=obj.id).first()
@@ -1017,6 +1056,7 @@ def list_cycles(project_id: int, params: pagination.PageParams = Depends(),
     # API-contract consistency -- frontend consumers request
     # page_size=100 and unwrap .items rather than getting a real pager UI.
     _get_project_or_404(db, project_id)
+    require_project_visibility(db, project_id, current_user)
     q = db.query(models.TestCycle).filter_by(project_id=project_id)
     if folder_id == "unfiled":
         q = q.filter(models.TestCycle.folder_id.is_(None))
@@ -1096,7 +1136,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
     project = _get_project_or_404(db, project_id)
     linked_request = None
     if payload.linked_request_id is not None:
-        linked_request = db.query(models.FunctionalRequest).get(payload.linked_request_id)
+        linked_request = db.get(models.FunctionalRequest, payload.linked_request_id)
         if not linked_request or not linked_request.request_id:
             raise HTTPException(404, "Functional QA Request not found")
         if (project.application_master_id is not None
@@ -1137,18 +1177,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
 @router.get("/cycles/{cycle_id}", response_model=schemas.TestCycleOut)
 def get_cycle(cycle_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_cycle_or_404(db, cycle_id)
-    require_project_visibility(db, obj.project_id, current_user)
-    # Folder-restriction check lives here (the main read entry point the
-    # frontend uses to open a cycle) rather than inside _get_cycle_or_404
-    # itself, which dozens of execution/export/bulk-action endpoints also
-    # call -- threading current_user through every one of those for a
-    # feature this narrowly scoped ("give a folder department/user access
-    # control") was judged not worth the blast radius. A restricted folder's
-    # cycles are hidden from list_cycles/list_cycle_folders either way; this
-    # closes the "already know the cycle_id" gap for the one endpoint the
-    # UI itself uses to open a cycle.
-    if obj.folder_id:
-        require_can_view_cycle_folder(obj.folder, current_user)
+    _require_cycle_visibility(db, obj, current_user)
     _attach_request_link_permissions(db, [obj])
     return obj
 
@@ -1158,6 +1187,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                   current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     """Edit cycle metadata and enforce the controlled five-state lifecycle."""
     obj = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, obj, current_user)
     _require_active_project(db, obj.project_id)
     require_can_execute_project(db, obj.project_id, current_user)
     data = payload.model_dump(exclude_unset=True)
@@ -1286,6 +1316,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         folder = db.query(models.TestCycleFolder).filter_by(id=data["folder_id"], project_id=obj.project_id).first()
         if not folder:
             raise HTTPException(404, "Destination folder not found in this project")
+        require_can_view_cycle_folder(folder, current_user)
     # 2026-08 Reassignment Requirement -- changing (or clearing) the cycle
     # owner once one is already set is a reassignment: only the current
     # owner, their Department Head, or an Admin may do it, and a reason is
@@ -1297,7 +1328,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     previous_owner = None
     owner_reason = None
     if is_owner_reassignment:
-        previous_owner = db.query(models.User).get(previous_owner_id)
+        previous_owner = db.get(models.User, previous_owner_id)
         reassignment.require_can_reassign(
             current_user, previous_owner_id,
             previous_owner.departments if previous_owner else None,
@@ -1346,7 +1377,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         if link_id is None:
             obj.child_request_link = None
         else:
-            linked_request = db.query(models.FunctionalRequest).get(link_id)
+            linked_request = db.get(models.FunctionalRequest, link_id)
             if not linked_request or not linked_request.request_id:
                 raise HTTPException(404, "Functional QA Request not found")
             if (obj.project.application_master_id is not None
@@ -1366,7 +1397,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     if obj.project.application_master_id is None:
         raise HTTPException(400, "Select an Application on this Test Project before continuing Test Lifecycle")
     if obj.child_request_link:
-        current_linked_request = db.query(models.FunctionalRequest).get(obj.child_request_link.child_id)
+        current_linked_request = db.get(models.FunctionalRequest, obj.child_request_link.child_id)
         if not current_linked_request or not current_linked_request.request_id:
             raise HTTPException(400, "This cycle's Functional QA Request is no longer valid. Replace or remove the link before continuing")
         if (obj.project.application_master_id is not None
@@ -1419,7 +1450,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
             decision="Updated", comments=f"Updated: {', '.join(changed_labels)}.",
         ))
     if is_owner_reassignment:
-        new_owner = db.query(models.User).get(obj.owner_id) if obj.owner_id else None
+        new_owner = db.get(models.User, obj.owner_id) if obj.owner_id else None
         reassignment.record_reassignment(
             db, "TEST_CYCLE", obj.id, current_user,
             previous_owner.full_name if previous_owner else "Unassigned",
@@ -1444,6 +1475,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
 def unlink_cycle_request(cycle_id: int, db: Session = Depends(get_db),
                          current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, obj, current_user)
     _require_active_project(db, obj.project_id)
     require_can_execute_project(db, obj.project_id, current_user)
     _require_open_cycle(obj)
@@ -1486,6 +1518,7 @@ def delete_cycle(cycle_id: int, db: Session = Depends(get_db),
     to the whole cycle here), logged as a single audit row before the cycle
     itself is removed."""
     obj = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, obj, current_user)
     _require_active_project(db, obj.project_id)
     _require_open_cycle(obj)
     require_can_manage_execution_governance(db, obj.project_id, current_user)
@@ -1555,7 +1588,8 @@ def list_executions(
     Mine / Unassigned" tab bar. See TestExecutionSummaryOut below for the
     progress bar / assignment stat / result tabs this list can no longer
     compute client-side from the complete cycle."""
-    _get_cycle_or_404(db, cycle_id)
+    cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     q = db.query(models.TestExecution).filter(models.TestExecution.cycle_id == cycle_id).options(*_LIST_EXECUTION_EAGER_LOADS)
     if assignment == "mine":
         if not current_user.has_qa_workspace_role(*_EXEC_ROLES, workspace_id=current_workspace_id()):
@@ -1584,7 +1618,8 @@ def get_execution_summary(cycle_id: int, db: Session = Depends(get_db),
     enough data on hand any more. Computed via SQL COUNT/GROUP BY against
     the whole cycle regardless of which page/status/assignment filter the
     main list currently has selected -- never a full-row fetch."""
-    _get_cycle_or_404(db, cycle_id)
+    cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     base = db.query(models.TestExecution).filter(models.TestExecution.cycle_id == cycle_id)
     total = base.count()
     status_counts = {
@@ -1652,6 +1687,10 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
     if project_ids is not None:
         q = q.filter(models.TestProject.id.in_(project_ids))
     executions = q.order_by(models.TestProject.id, models.TestCycle.id, models.TestExecution.id).all()
+    executions = [
+        execution for execution in executions
+        if not execution.cycle.folder_id or can_view_cycle_folder(execution.cycle.folder, current_user)
+    ]
     return [
         {"project": execution.cycle.project, "cycle": execution.cycle, "execution": execution}
         for execution in executions
@@ -1694,6 +1733,10 @@ def list_my_executions(db: Session = Depends(get_db),
     if project_ids is not None:
         q = q.filter(models.TestProject.id.in_(project_ids))
     executions = q.order_by(models.TestProject.name, models.TestCycle.name, models.TestExecution.id).all()
+    executions = [
+        execution for execution in executions
+        if not execution.cycle.folder_id or can_view_cycle_folder(execution.cycle.folder, current_user)
+    ]
     return [
         {"project": execution.cycle.project, "cycle": execution.cycle, "execution": execution}
         for execution in executions
@@ -1708,6 +1751,7 @@ def list_cycle_candidate_authors(
 ):
     """Creators of approved, unlinked testcases in this cycle's project."""
     cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     require_can_execute_project(db, cycle.project_id, current_user)
     rows = (
         _cycle_candidate_query(db, cycle)
@@ -1740,6 +1784,7 @@ def list_cycle_candidate_test_cases(
     transferred to the browser.
     """
     cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     require_can_execute_project(db, cycle.project_id, current_user)
     base = _cycle_candidate_query(db, cycle, search, priority, test_type, created_by_id)
     total = base.order_by(None).count()
@@ -1780,7 +1825,7 @@ def list_execution_case_ids(cycle_id: int, db: Session = Depends(get_db),
     execution rows -- just the ids, so this is far cheaper than the main
     list endpoint above even at full cycle size."""
     cycle = _get_cycle_or_404(db, cycle_id)
-    require_project_visibility(db, cycle.project_id, current_user)
+    _require_cycle_visibility(db, cycle, current_user)
     return [
         row[0] for row in
         db.query(models.TestExecution.test_case_id).filter(models.TestExecution.cycle_id == cycle_id).all()
@@ -1797,7 +1842,7 @@ def get_execution(execution_id: int, db: Session = Depends(get_db),
     defect traceability) needs this to open a specific slot even when it
     isn't on whatever page happens to be loaded."""
     obj = _execution_or_404(db, execution_id)
-    require_project_visibility(db, obj.cycle.project_id, current_user)
+    _require_execution_visibility(db, obj, current_user)
     return obj
 
 
@@ -1809,7 +1854,7 @@ def export_test_cycle(
 ):
     """Export one complete test lifecycle, including every retained run."""
     cycle = _get_cycle_or_404(db, cycle_id)
-    require_project_visibility(db, cycle.project_id, current_user)
+    _require_cycle_visibility(db, cycle, current_user)
     project = _get_project_or_404(db, cycle.project_id)
     executions = (db.query(models.TestExecution).filter_by(cycle_id=cycle_id)
                   .order_by(models.TestExecution.id).all())
@@ -2009,18 +2054,25 @@ def queue_test_cycle_export(
     current_user: models.User = Depends(get_current_user),
 ):
     cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     filename = f"{cycle.cycle_key}_test_lifecycle.xlsx"
     user_id = current_user.id
     actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
 
     def build(job_id: str):
         with SessionLocal() as worker_db:
-            worker_user = worker_db.query(models.User).get(user_id)
-            if not worker_user:
-                raise RuntimeError("The user who started this export no longer exists")
+            worker_user = worker_db.get(models.User, user_id)
+            if not worker_user or not worker_user.is_active:
+                raise RuntimeError("The user who started this export no longer exists or is inactive")
             worker_user.active_qa_workspace_id = actor_workspace_id
+            worker_scope_ids = active_workspace_scope_ids(
+                worker_db, worker_user, actor_workspace_id,
+            )
+            if actor_workspace_id is None or actor_workspace_id not in worker_scope_ids:
+                raise HTTPException(403, "The workspace used to start this export is no longer available")
+            worker_user.active_workspace_scope_ids = tuple(sorted(worker_scope_ids))
             from ..workflow_authority import workflow_context
-            with workflow_context(worker_user):
+            with workspace_context(actor_workspace_id, worker_scope_ids), workflow_context(worker_user):
                 from ..project_workspace_ownership import bind_actor
                 bind_actor(worker_db, worker_user)
                 worker_db.info['workflow_actor'] = worker_user
@@ -2039,6 +2091,7 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
     that are already in this cycle (the (cycle_id, test_case_id) unique
     constraint means re-adding one would otherwise 500)."""
     cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
@@ -2192,6 +2245,7 @@ def add_test_cases_from_server_selection(
     Oracle-safe NOT IN predicates before IDs are materialized server-side.
     """
     cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     if payload.selection_mode == "all_matching":
@@ -2210,7 +2264,7 @@ def add_test_cases_from_server_selection(
 
         def add_in_background(job_id: str):
             with SessionLocal() as worker_db:
-                worker_user = worker_db.query(models.User).get(user_id)
+                worker_user = worker_db.get(models.User, user_id)
                 if not worker_user:
                     raise RuntimeError("The user who started this job no longer exists")
                 worker_user.active_qa_workspace_id = actor_workspace_id
@@ -2279,6 +2333,7 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
     else assign fresh."""
     obj = _execution_or_404(db, execution_id, lock=True)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
@@ -2352,6 +2407,7 @@ def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssi
     unassigned and currently-assigned executions.
     """
     cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
@@ -2438,12 +2494,13 @@ def upgrade_execution_version(execution_id: int, payload: schemas.TestExecutionV
     once the caller has reviewed it)."""
     obj = _execution_or_404(db, execution_id, lock=True)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
     if obj.runs:
         raise HTTPException(400, "This testcase has already been executed in this cycle -- its pinned version cannot change")
-    target = db.query(models.TestCaseVersion).get(payload.target_version_id)
+    target = db.get(models.TestCaseVersion, payload.target_version_id)
     if not target or target.test_case_id != obj.test_case_id:
         raise HTTPException(404, "Target version not found on this testcase")
     if target.status != "Approved":
@@ -2504,6 +2561,7 @@ def bulk_update_execution_results(
     vague partial success and preserves the existing assigned-runner rule.
     """
     cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
@@ -2704,7 +2762,7 @@ def list_execution_runs(execution_id: int, db: Session = Depends(get_db),
     """Full attempt-by-attempt history for this test case's slot in this
     cycle, oldest first -- see models.TestExecutionRun."""
     obj = _execution_or_404(db, execution_id)
-    require_project_visibility(db, obj.cycle.project_id, current_user)
+    _require_execution_visibility(db, obj, current_user)
     return (db.query(models.TestExecutionRun).filter_by(execution_id=obj.id)
             .order_by(models.TestExecutionRun.attempt_no).all())
 
@@ -2712,10 +2770,10 @@ def list_execution_runs(execution_id: int, db: Session = Depends(get_db),
 @router.post("/executions/{execution_id}/runs/{run_id}/defects", response_model=schemas.TestRunDefectOut)
 def add_run_defect(execution_id: int, run_id: int, payload: schemas.TestRunDefectCreate,
                    db: Session = Depends(get_db),
-                   current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _execution_or_404(db, execution_id, lock=True)
-    require_project_visibility(db, obj.cycle.project_id, current_user)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
@@ -2735,10 +2793,10 @@ def add_run_defect(execution_id: int, run_id: int, payload: schemas.TestRunDefec
 @router.delete("/executions/{execution_id}/runs/{run_id}/defects/{defect_id}")
 def remove_run_defect(execution_id: int, run_id: int, defect_id: int,
                       db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _execution_or_404(db, execution_id, lock=True)
-    require_project_visibility(db, obj.cycle.project_id, current_user)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
@@ -2764,7 +2822,7 @@ def remove_run_defect(execution_id: int, run_id: int, defect_id: int,
 def list_run_images(execution_id: int, run_id: int, db: Session = Depends(get_db),
                     current_user: models.User = Depends(get_current_user)):
     obj = _execution_or_404(db, execution_id)
-    require_project_visibility(db, obj.cycle.project_id, current_user)
+    _require_execution_visibility(db, obj, current_user)
     run = _run_or_404(db, obj, run_id)
     return doc_store.list_documents(db, _RESULT_IMAGE_MODULE, run.id)
 
@@ -2773,7 +2831,7 @@ def list_run_images(execution_id: int, run_id: int, db: Session = Depends(get_db
 def download_run_image(execution_id: int, run_id: int, document_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
     obj = _execution_or_404(db, execution_id)
-    require_project_visibility(db, obj.cycle.project_id, current_user)
+    _require_execution_visibility(db, obj, current_user)
     run = _run_or_404(db, obj, run_id)
     document = doc_store.get_document_or_404(db, _RESULT_IMAGE_MODULE, run.id, document_id)
     path = doc_store.full_path(document)
@@ -2787,6 +2845,7 @@ def delete_run_image(execution_id: int, run_id: int, document_id: int, db: Sessi
                      current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _execution_or_404(db, execution_id)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
@@ -2808,7 +2867,7 @@ def delete_run_image(execution_id: int, run_id: int, document_id: int, db: Sessi
 def list_result_images(execution_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
     obj = _execution_or_404(db, execution_id)
-    require_project_visibility(db, obj.cycle.project_id, current_user)
+    _require_execution_visibility(db, obj, current_user)
     run = (db.query(models.TestExecutionRun).filter_by(execution_id=obj.id)
            .order_by(models.TestExecutionRun.attempt_no.desc()).first())
     if not run:
@@ -2820,7 +2879,7 @@ def list_result_images(execution_id: int, db: Session = Depends(get_db),
 def download_result_image(execution_id: int, document_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
     obj = _execution_or_404(db, execution_id)
-    require_project_visibility(db, obj.cycle.project_id, current_user)
+    _require_execution_visibility(db, obj, current_user)
     run = _latest_run_or_404(db, obj)
     document = doc_store.get_document_or_404(db, _RESULT_IMAGE_MODULE, run.id, document_id)
     path = doc_store.full_path(document)
@@ -2834,6 +2893,7 @@ def delete_result_image(execution_id: int, document_id: int, db: Session = Depen
                         current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _execution_or_404(db, execution_id)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
@@ -2859,10 +2919,11 @@ def remove_execution(execution_id: int, db: Session = Depends(get_db),
     recorded attempt, only an Administrator may remove it, regardless of who
     added it or QA Lead standing -- see _execution_removal_block_reason's
     own docstring for the full priority order."""
-    obj = db.query(models.TestExecution).get(execution_id)
+    obj = db.get(models.TestExecution, execution_id)
     if not obj:
         raise HTTPException(404, "Execution not found")
     cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     _require_open_cycle(cycle)
     _require_can_remove_execution(obj, current_user)
@@ -2908,6 +2969,7 @@ def bulk_remove_executions(
     """
     _require_qa_assignment_manager(current_user)
     cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     _require_open_cycle(cycle)
     execution_ids = list(dict.fromkeys(payload.execution_ids))

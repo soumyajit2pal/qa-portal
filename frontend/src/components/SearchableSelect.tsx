@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { IconSearch } from './Icons'
 import { computePanelPos, PanelPos } from './panelPosition'
 import ClearableSearchInput from './ClearableSearchInput'
+import { isKeyboardActivationKey } from '../keyboard'
 
 export interface SearchableSelectOption {
   value: string
@@ -169,13 +170,20 @@ export default function SearchableSelect({ value, onChange, options, ariaLabel, 
               />
             </div>
           )}
-          <div className="searchable-select-list">
+          <div className="searchable-select-list" role="listbox" aria-label={ariaLabel || placeholder || 'Options'}>
             {filtered.length === 0 && <div className="searchable-select-empty">No matches</div>}
             {filtered.map((opt) => (
               <div
                 key={opt.value}
                 className={`searchable-select-option ${opt.value === value ? 'active' : ''}`}
+                role="option"
+                aria-selected={opt.value === value}
+                tabIndex={0}
                 onClick={() => select(opt)}
+                onKeyDown={(event) => {
+                  if (isKeyboardActivationKey(event.key)) { event.preventDefault(); select(opt) }
+                  if (event.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
+                }}
               >
                 {opt.label}
               </div>

@@ -75,6 +75,7 @@ def execution_database(tmp_path, monkeypatch):
     models.Base.metadata.create_all(engine)
     # These tests exercise transaction/version behavior, not access policy.
     monkeypatch.setattr(execution, '_require_active_project', lambda *a: None)
+    monkeypatch.setattr(execution, '_require_cycle_visibility', lambda *a: None)
     monkeypatch.setattr(execution, 'require_can_execute_project', lambda *a: None)
     monkeypatch.setattr(execution, '_require_assigned_runner', lambda *a: None)
     monkeypatch.setattr(execution, '_execution_status_gate', lambda *a: None)

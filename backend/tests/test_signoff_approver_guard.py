@@ -2,7 +2,8 @@ from types import SimpleNamespace as Obj
 import pytest
 from fastapi import HTTPException
 from app.routers import signoff
-from app import schemas
+from app import models, schemas
+from app.workflow_authority import workflow_context
 
 class DB:
     def refresh(self, *args, **kwargs): pass
@@ -37,3 +38,34 @@ def test_wrong_workspace_or_role_is_rejected(roles, workspace, executive):
 
 def test_admin_retains_oversight():
     signoff._require_workspace_approver(Obj(qa_workspace_id=10), user(['ADMIN']), executive=True)
+
+
+def test_system_admin_with_explicit_executive_role_can_complete_second_stage(monkeypatch):
+    admin = models.User(
+        id=20, username="admin-executive", full_name="Admin Executive",
+        hashed_password="x", is_active=True,
+        role_assignments=[
+            models.UserRole(role="ADMIN"),
+            models.UserRole(role="AGM_QA"),
+        ],
+    )
+    obj = Obj(
+        id=1, qa_workspace_id=10, requester_id=3,
+        reviewed_by_id=admin.id, status="DEPT_HEAD_QA_APPROVAL_PENDING",
+    )
+    monkeypatch.setattr(signoff, '_get_or_404', lambda *args: obj)
+    monkeypatch.setattr(signoff, '_require_workspace_approver', lambda *args, **kwargs: None)
+    monkeypatch.setattr(signoff, '_validate_rich_text_before_progress', lambda *args: None)
+    monkeypatch.setattr(signoff.certificate_summary, 'validate', lambda *args: None)
+    monkeypatch.setattr(signoff, '_log', lambda *args: None)
+    monkeypatch.setattr(signoff, '_sync_linked_functional_request', lambda *args: None)
+
+    with workflow_context(admin):
+        signoff.executive_coe_decision(
+            obj.id,
+            schemas.WorkflowDecision(decision='Approved'),
+            DB(),
+            admin,
+        )
+
+    assert obj.status == 'ISSUED'

@@ -21,10 +21,30 @@ export class RequestLookupError extends Error {
   }
 }
 
+const PORTAL_ORIGIN = 'https://portal.invalid'
+
+/** Accept only canonical same-origin SPA destinations from query/API data. */
+export function internalNavigationPath(value?: string | null): string | null {
+  if (!value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) return null
+  if (/[\u0000-\u001f\u007f]/.test(value)) return null
+  try {
+    const url = new URL(value, PORTAL_ORIGIN)
+    if (url.origin !== PORTAL_ORIGIN) return null
+    // Reject encoded protocol-relative/backslash forms before React Router or
+    // a future server fallback has an opportunity to interpret them.
+    const decodedPath = decodeURIComponent(url.pathname)
+    if (decodedPath.startsWith('//') || decodedPath.includes('\\') || /[\u0000-\u001f\u007f]/.test(decodedPath)) return null
+    return `${url.pathname}${url.search}${url.hash}`
+  } catch {
+    return null
+  }
+}
+
 export function requestTarget(to: string): RequestTarget | null {
   // Module navigation and creation/search flows continue to use the router.
-  if (!to.startsWith('/') || to.startsWith('//')) return null
-  const url = new URL(to, 'https://portal.invalid')
+  const internalPath = internalNavigationPath(to)
+  if (!internalPath) return null
+  const url = new URL(internalPath, PORTAL_ORIGIN)
   if (!Object.prototype.hasOwnProperty.call(requestRoutes, url.pathname) || url.searchParams.has('new')) return null
   const identifier = url.searchParams.get('openId') || url.searchParams.get('open')
   return identifier ? { path: url.pathname as RequestTarget['path'], identifier } : null

@@ -23,6 +23,7 @@ from .. import documents as doc_store
 from .. import application_names as app_names
 from .. import reassignment
 from ..fortify_ssc import FortifySSCClient, FortifySSCError
+from ..workflow_authority import is_system_admin
 
 router = APIRouter(tags=["sast-dast"])
 
@@ -30,7 +31,7 @@ router = APIRouter(tags=["sast-dast"])
 def _uname(db: Session, uid: Optional[int]) -> Optional[str]:
     if not uid:
         return None
-    u = db.query(models.User).get(uid)
+    u = db.get(models.User, uid)
     return u.full_name if u else None
 
 
@@ -197,8 +198,43 @@ def _require_visible(db: Session, obj, user: models.User) -> None:
         )
 
 
+def _require_distinct_department_head_approver(db: Session, obj, user: models.User) -> None:
+    """Prevent the same actor approving both SM and Department Head stages."""
+    # Workflow dependencies hide ADMIN from effective roles.  This explicit
+    # maker-checker exception is tied to the stored administrator assignment.
+    if is_system_admin(user):
+        return
+    entity_type = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+    sm_approval = (
+        db.query(models.ApprovalAction)
+        .filter_by(
+            entity_type=entity_type,
+            entity_id=obj.id,
+            step_name="SM Approval",
+            decision="Approved",
+            actor_id=user.id,
+        )
+        .first()
+    )
+    # Requests already in flight when SAST/DAST audit types were split can
+    # still have an unambiguous legacy SAST_DAST approval row.
+    if sm_approval is None:
+        sm_approval = next((
+            row for row in _legacy_history_rows(db, obj.id)
+            if row.step_name == "SM Approval"
+            and row.decision == "Approved"
+            and row.actor_id == user.id
+        ), None)
+    if sm_approval:
+        raise HTTPException(
+            403,
+            "Department Head approval must be completed by a different approver; "
+            "your SM approval is already recorded on this request.",
+        )
+
+
 def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str, workspace_id: int | None = None) -> models.User:
-    user = db.query(models.User).get(user_id) if user_id else None
+    user = db.get(models.User, user_id) if user_id else None
     if user and not user.show_in_user_dropdowns:
         raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
     if not user or not user.is_active or not user.has_qa_workspace_role(role, workspace_id=workspace_id):
@@ -358,6 +394,7 @@ def _require_checklist_ready(obj):
 
 
 def _submit(db: Session, obj, current_user):
+    _require_visible(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this request")
     _require(obj, "DRAFT", "Submit")
@@ -391,6 +428,7 @@ def _resubmit(db: Session, obj, current_user):
     Rejected-by-SM request used to be a dead end; it's now reopenable the
     same way a Return is: edit details, then call this to send it straight
     back to SM_APPROVAL_PENDING for a fresh decision."""
+    _require_visible(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
     if obj.active_delegation:
@@ -464,6 +502,7 @@ def _department_head_decision(db: Session, obj, payload, current_user):
     )
     require_not_requester(current_user, obj.requester_id)
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
+    _require_distinct_department_head_approver(db, obj, current_user)
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
         raise HTTPException(400, application_name_block_message(obj.application_master_status, "department_head"))
     if payload.decision == "Approved":
@@ -483,6 +522,7 @@ def _department_head_decision(db: Session, obj, payload, current_user):
 
 
 def _start_readiness(db: Session, obj, current_user):
+    _require_visible(db, obj, current_user)
     _require(obj, "SECURITY_LEAD_ASSIGNED", "Start readiness")
     _require_assigned_qa_lead(obj, current_user)
     obj.status = "SECURITY_READINESS"
@@ -493,6 +533,7 @@ def _start_readiness(db: Session, obj, current_user):
 
 
 def _readiness_decision(db: Session, obj, payload, current_user):
+    _require_visible(db, obj, current_user)
     _require(obj, "SECURITY_READINESS", "Readiness decision")
     _require_assigned_qa_lead(obj, current_user)
     if payload.decision == "Passed":
@@ -542,6 +583,7 @@ def _assign_security_analyst(db: Session, obj, payload, current_user):
     Reassigning after the initial PLANNING->CONFIGURATION transition
     deliberately does NOT touch `status` -- a request already at, say,
     SCANNING must stay there after an analyst swap."""
+    _require_visible(db, obj, current_user)
     _require(obj, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, "Assign Security Analyst")
     is_initial_assignment = obj.status == "PLANNING"
     previous_id = obj.security_analyst_id
@@ -560,7 +602,7 @@ def _assign_security_analyst(db: Session, obj, payload, current_user):
     _log(db, obj, step, current_user, decision, f"Assigned Security Analyst: {analyst.full_name}")
     if not is_initial_assignment:
         entity_type = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
-        previous_user = db.query(models.User).get(previous_id) if previous_id else None
+        previous_user = db.get(models.User, previous_id) if previous_id else None
         reassignment.record_reassignment(
             db, entity_type, obj.id, current_user,
             previous_user.full_name if previous_user else "Unassigned", analyst.full_name, payload.reason,
@@ -580,6 +622,7 @@ def _assign_security_analyst(db: Session, obj, payload, current_user):
 
 
 def _start_configuration(db: Session, obj, current_user):
+    _require_visible(db, obj, current_user)
     raise HTTPException(
         400,
         "A Security Analyst must be assigned before configuration can start. "
@@ -662,6 +705,7 @@ def _import_scan_results(db: Session, obj, kind: str, scans: list[schemas.Securi
 
 
 def _start_scan(db: Session, obj, payload: schemas.SecurityScanStartIn, current_user):
+    _require_visible(db, obj, current_user)
     _require(obj, "CONFIGURATION", "Start scan")
     _require_assigned_security_analyst(obj, current_user)
     kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
@@ -759,6 +803,7 @@ def _rescan_scan(db: Session, obj, kind: str, payload: schemas.SecurityScanStart
     the request back to SCANNING once the fresh results are in, so Validate
     Findings is reachable again afterward, same as it was after the very
     first Start Scan."""
+    _require_visible(db, obj, current_user)
     _require(obj, "RESCAN", "Rescan")
     _require_assigned_security_analyst(obj, current_user)
     pending_ids = _pending_scan_target_ids(db, obj, kind)
@@ -788,6 +833,7 @@ def _mark_scan_complete(db: Session, obj, kind: str, payload: schemas.CommentIn,
     rescan after remediation/suppression, and completion stays blocked as
     long as any current filter still displays findings.
     """
+    _require_visible(db, obj, current_user)
     _require(obj, SCAN_ANALYST_ACTIVE_STATUSES, "Mark Scan Complete")
     _require_assigned_security_analyst(obj, current_user)
     results = _scan_results(db, kind, obj.id)
@@ -904,6 +950,7 @@ def _close_request(db: Session, obj, current_user):
     (see constants.SAST_DAST_TERMINAL_STATUSES) -- previously nothing ever
     moved a SAST/DAST request out of Report Ready, so Closed was defined but
     unreachable."""
+    _require_visible(db, obj, current_user)
     _require(obj, "REPORT_READY", "Close request")
     _require_assigned_security_analyst(obj, current_user)
     kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
@@ -965,6 +1012,7 @@ def _validate_findings(db: Session, obj, current_user, sup_filter_col, kind: str
     Complete. Any non-zero view returns the request to the remediation /
     requester / rescan loop, even when a linked suppression is Done.
     """
+    _require_visible(db, obj, current_user)
     _require(obj, "SCANNING", "Validate findings")
     _require_assigned_security_analyst(obj, current_user)
     results = _scan_results(db, kind, obj.id)
@@ -1003,6 +1051,7 @@ def _assign_to_requester(db: Session, obj, kind: str, current_user):
     _validate_findings' own docstring for why that's being superseded).
     The open-findings check is kept as a belt-and-suspenders safety net even
     though reaching Remediation already implies findings > 0."""
+    _require_visible(db, obj, current_user)
     _require(obj, "REMEDIATION", "Assign to requester")
     _require_assigned_security_analyst(obj, current_user)
     results = _scan_results(db, kind, obj.id)
@@ -1068,6 +1117,7 @@ def _mark_fixed(db: Session, obj, current_user, sup_filter_col, payload: schemas
     suppression against this request -- same _pending_suppression_ids used
     everywhere else this rule already applies (Security Complete, Report
     Ready)."""
+    _require_visible(db, obj, current_user)
     delegation = obj.active_delegation
     is_active_delegate = bool(delegation and delegation.assigned_to_id == current_user.id)
     if not (
@@ -1151,6 +1201,7 @@ def _mark_report_ready(db: Session, obj, current_user, sup_filter_col):
     hasn't been marked 'Done' (see constants.SUPPRESSION_STATUSES) -- same
     gate as Security Complete below, checked again here since Report Ready is
     reachable independently via its own manual button too."""
+    _require_visible(db, obj, current_user)
     _require(obj, "SECURITY_COMPLETE", "Mark report ready")
     _require_assigned_security_analyst(obj, current_user)
     kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
@@ -1278,6 +1329,7 @@ def create_sast(payload: schemas.SASTCreate, db: Session = Depends(get_db),
 def update_sast(req_id: int, payload: schemas.SASTUpdate, db: Session = Depends(get_db),
                  current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST", lock=True)
+    _require_visible(db, obj, current_user)
     # See _can_edit_details's own docstring above for the full permission
     # model (requester while it's theirs/returned to them; SM/Department
     # Head only while it's genuinely pending their own decision).
@@ -1474,6 +1526,7 @@ def sast_close_request(req_id: int, db: Session = Depends(get_db),
 def resolve_sast_finding(req_id: int, finding_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST", lock=True)
+    _require_visible(db, obj, current_user)
     _require_assigned_security_analyst(obj, current_user)
     finding = db.query(models.SASTFinding).filter_by(id=finding_id, sast_request_id=req_id).first()
     if not finding:
@@ -1546,6 +1599,7 @@ def list_sast_documents(req_id: int, db: Session = Depends(get_db), current_user
 def upload_sast_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                            current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST", lock=True)
+    _require_visible(db, obj, current_user)
     if not _can_upload_documents(db, obj, current_user):
         raise HTTPException(403, "Only the requester, central Security/QA team, or the SM/Department Head currently reviewing the request can upload documents")
     return doc_store.save_documents(db, "SAST", req_id, obj.request_id, files, current_user.id,
@@ -1567,6 +1621,7 @@ def download_sast_document(req_id: int, doc_id: int, db: Session = Depends(get_d
 def delete_sast_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST", lock=True)
+    _require_visible(db, obj, current_user)
     doc = doc_store.get_document_or_404(db, "SAST", req_id, doc_id)
     if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(db, obj, current_user)):
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
@@ -1608,6 +1663,7 @@ def list_sast_checklist_documents(req_id: int, item_id: int, db: Session = Depen
 def upload_sast_checklist_documents(req_id: int, item_id: int, files: List[UploadFile] = File(...),
                                     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST", lock=True)
+    _require_visible(db, obj, current_user)
     item = _sast_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
@@ -1635,6 +1691,7 @@ def download_sast_checklist_document(req_id: int, item_id: int, doc_id: int,
 def delete_sast_checklist_document(req_id: int, item_id: int, doc_id: int,
                                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST", lock=True)
+    _require_visible(db, obj, current_user)
     item = _sast_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
@@ -1664,13 +1721,14 @@ def update_sast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     item = db.query(models.SASTChecklistItem).filter_by(id=item_id, sast_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")
-    parent = db.query(models.SASTRequest).get(req_id)
+    parent = db.get(models.SASTRequest, req_id)
     if not parent or parent.status != "SECURITY_READINESS":
         raise HTTPException(
             400,
             "Security Readiness checklist items can only be verified while the request is in "
             "Security Readiness -- not while still in Draft or any other stage.",
         )
+    _require_visible(db, parent, current_user)
     _require_assigned_qa_lead(parent, current_user)
     if payload.is_complete and not item.requester_checked:
         raise HTTPException(
@@ -1799,6 +1857,7 @@ def create_dast(payload: schemas.DASTCreate, db: Session = Depends(get_db),
 def update_dast(req_id: int, payload: schemas.DASTUpdate, db: Session = Depends(get_db),
                  current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True)
+    _require_visible(db, obj, current_user)
     # See _can_edit_details's own docstring (above, on update_sast) for the
     # full permission model -- same reasoning applies here.
     if obj.status not in SAST_DAST_EDITABLE_STATUSES:
@@ -1969,6 +2028,7 @@ def dast_close_request(req_id: int, db: Session = Depends(get_db),
 def resolve_dast_finding(req_id: int, finding_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True)
+    _require_visible(db, obj, current_user)
     _require_assigned_security_analyst(obj, current_user)
     finding = db.query(models.DASTFinding).filter_by(id=finding_id, dast_request_id=req_id).first()
     if not finding:
@@ -2044,6 +2104,7 @@ def list_dast_documents(req_id: int, db: Session = Depends(get_db), current_user
 def upload_dast_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                            current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True)
+    _require_visible(db, obj, current_user)
     if not _can_upload_documents(db, obj, current_user):
         raise HTTPException(403, "Only the requester, central Security/QA team, or the SM/Department Head currently reviewing the request can upload documents")
     return doc_store.save_documents(db, "DAST", req_id, obj.request_id, files, current_user.id,
@@ -2065,6 +2126,7 @@ def download_dast_document(req_id: int, doc_id: int, db: Session = Depends(get_d
 def delete_dast_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True)
+    _require_visible(db, obj, current_user)
     doc = doc_store.get_document_or_404(db, "DAST", req_id, doc_id)
     if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(db, obj, current_user)):
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
@@ -2106,6 +2168,7 @@ def list_dast_checklist_documents(req_id: int, item_id: int, db: Session = Depen
 def upload_dast_checklist_documents(req_id: int, item_id: int, files: List[UploadFile] = File(...),
                                     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True)
+    _require_visible(db, obj, current_user)
     item = _dast_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
@@ -2133,6 +2196,7 @@ def download_dast_checklist_document(req_id: int, item_id: int, doc_id: int,
 def delete_dast_checklist_document(req_id: int, item_id: int, doc_id: int,
                                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True)
+    _require_visible(db, obj, current_user)
     item = _dast_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
@@ -2159,13 +2223,14 @@ def update_dast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     item = db.query(models.DASTChecklistItem).filter_by(id=item_id, dast_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")
-    parent = db.query(models.DASTRequest).get(req_id)
+    parent = db.get(models.DASTRequest, req_id)
     if not parent or parent.status != "SECURITY_READINESS":
         raise HTTPException(
             400,
             "Security Readiness checklist items can only be verified while the request is in "
             "Security Readiness -- not while still in Draft or any other stage.",
         )
+    _require_visible(db, parent, current_user)
     _require_assigned_qa_lead(parent, current_user)
     if payload.is_complete and not item.requester_checked:
         raise HTTPException(

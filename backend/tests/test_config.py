@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from app.config import load_environment
+from app.config import Settings
 
 
 class ConfigurationProfileTests(unittest.TestCase):
@@ -86,6 +87,30 @@ class ConfigurationProfileTests(unittest.TestCase):
                 load_environment(
                     backend_dir=Path(directory),
                     environ={"APP_ENV": "../../prod"},
+                )
+
+    def test_deployed_profile_rejects_wildcard_trusted_hosts(self):
+        with self.assertRaisesRegex(ValueError, "TRUSTED_HOSTS"):
+            Settings(
+                app_env="prod",
+                database_url="oracle+oracledb://user:password@database/service",
+                secret_key="x" * 32,
+                trusted_hosts="*",
+            )
+
+    def test_deployed_profile_rejects_insecure_or_non_origin_cors_values(self):
+        invalid_origins = (
+            "http://portal.example.com",
+            "https://portal.example.com/application",
+            "https://user:password@portal.example.com",
+        )
+        for origin in invalid_origins:
+            with self.subTest(origin=origin), self.assertRaisesRegex(ValueError, "CORS_ALLOWED_ORIGINS"):
+                Settings(
+                    app_env="uat",
+                    database_url="oracle+oracledb://user:password@database/service",
+                    secret_key="x" * 32,
+                    cors_allowed_origins=origin,
                 )
 
 

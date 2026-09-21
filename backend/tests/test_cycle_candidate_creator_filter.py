@@ -72,6 +72,7 @@ def test_creator_filter_applies_to_approved_unlinked_cycle_candidates():
         assert not _cycle_candidate_query(db, cycle, search="Unapproved replacement").all()
         assert not _cycle_candidate_query(db, cycle, priority="Low", created_by_id=authors[0].id).all()
         with patch("app.routers.test_execution._get_cycle_or_404", return_value=cycle), \
+                patch("app.routers.test_execution._require_cycle_visibility"), \
                 patch("app.routers.test_execution.require_can_execute_project"):
             page = list_cycle_candidate_test_cases(
                 cycle.id, cursor=None, page_size=25, search="payments", priority="High",

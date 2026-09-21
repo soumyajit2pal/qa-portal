@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
+import { useInternalNavigate } from '../../hooks/useRequestNavigation'
 import { api, mapWithConcurrency, waitForJob } from '../../api'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
@@ -1009,7 +1010,7 @@ function InlineExecutionActions({ execution, canExecute, executionContextError, 
   onLinkExisting: (execution: TestExecutionOut) => void
   onError: (error: unknown) => void
 }) {
-  const navigate = useNavigate()
+  const navigate = useInternalNavigate()
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1250,7 +1251,7 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
   readOnly: boolean
   onChanged: (defects: TestRunDefectOut[]) => void
 }) {
-  const navigate = useNavigate()
+  const navigate = useInternalNavigate()
   const [adding, setAdding] = useState(false)
   const [linkMode, setLinkMode] = useState<'internal' | 'external' | null>(null)
   const [internalDefects, setInternalDefects] = useState<DefectListOut[]>([])
@@ -2207,11 +2208,8 @@ export default function TestExecution() {
   const [linkingCycleRequest, setLinkingCycleRequest] = useState<TestCycleOut | null>(null)
 
   useEffect(() => {
-    // SRS 7.2 pagination rollout -- /api/test-projects is now wrapped in
-    // Page[T] for API-contract consistency (task #82); page_size=100 +
-    // .items since this project picker still wants the complete list.
-    api.get<PageOut<TestProjectOut>>('/api/test-projects?include_inactive=true&page_size=100').then((page) => {
-      const p = page.items
+    // A project picker must not silently omit projects after the first page.
+    api.getAll<TestProjectOut>('/api/test-projects?include_inactive=true').then((p) => {
       setProjects(p)
       const requested = Number(searchParams.get('project'))
       if (requested && p.some((project) => project.id === requested)) {
@@ -2273,11 +2271,10 @@ export default function TestExecution() {
   // whole project.
   const loadCycles = useCallback(async (pid: number, folderParam?: string, isCurrent: () => boolean = () => true) => {
     try {
-      const qs = new URLSearchParams({ page_size: '100' })
+      const qs = new URLSearchParams()
       if (folderParam) qs.set('folder_id', folderParam)
-      const cPage = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${pid}/cycles?${qs.toString()}`)
+      const c = await api.getAll<TestCycleOut>(`/api/test-execution/projects/${pid}/cycles?${qs.toString()}`)
       if (!isCurrent()) return
-      const c = cPage.items
       setCycles(c)
       const requestedCycle = Number(searchParams.get('cycle'))
       setCycleId(c.some((cycle) => cycle.id === requestedCycle) ? requestedCycle : (c.length ? c[0].id : ''))

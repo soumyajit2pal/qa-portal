@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useNavigate } from 'react-router-dom'
+import { useInternalNavigate } from '../../hooks/useRequestNavigation'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, TableColumn, ErrorText, PageHeader, Badge } from '../../components/Common'
@@ -221,7 +221,7 @@ function QuickDefectLink({ execution, onChanged, onError }: {
 }
 
 export default function MyExecutions() {
-  const navigate = useNavigate()
+  const navigate = useInternalNavigate()
   const { user } = useAuth()
   const [rows, setRows] = useState<MyExecutionRow[]>([])
   const [loading, setLoading] = useState(true)

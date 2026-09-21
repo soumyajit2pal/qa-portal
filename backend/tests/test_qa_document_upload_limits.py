@@ -25,8 +25,17 @@ class QADocumentUploadLimitTests(unittest.TestCase):
     def setUp(self):
         self.db = Mock()
         self.user = SimpleNamespace(id=1, has_role=lambda *roles: True)
-        self.req = SimpleNamespace(id=42, request_id="QA-42", status="DRAFT")
-        self.db.query.return_value.get.return_value = self.req
+        self.req = SimpleNamespace(
+            id=42,
+            request_id="QA-42",
+            status="DRAFT",
+            requester_id=self.user.id,
+            active_delegation=None,
+            department="QA",
+            department_unit_id=None,
+            qa_workspace_id=1,
+        )
+        self.db.get.return_value = self.req
 
     def test_accepts_boundary_and_multiple_evidence_files_above_ten_mb_total(self):
         files = [self.upload("a.pdf", QA_DOCUMENT_MAX_BYTES), self.upload("b.pdf", QA_DOCUMENT_MAX_BYTES)]

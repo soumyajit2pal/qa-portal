@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Badge } from './Common'
-import { DefectListOut, PageOut } from '../types'
+import { DefectListOut } from '../types'
 
 // Keep the Defect Management implementation in its existing lazy bundle;
 // linked-defect panels only download it after the user asks to open one.
@@ -13,12 +13,9 @@ export default function LinkedDefects({ query, title = 'Linked Defects' }: { que
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   useEffect(() => {
     let active = true
-    // SRS 7.2 pagination rollout -- /api/defects is now paginated;
-    // `query` is always a single-entity scope (qa_request_id/cycle_id/
-    // test_case_id/execution_id), so page_size=100 covers "every defect
-    // linked to this one record" without needing a real pager UI here.
-    api.get<PageOut<DefectListOut>>(`/api/defects?${query}&page_size=100`)
-      .then((page) => { if (active) setItems(page.items) })
+    // This compact panel has no pager, so exhaust the entity-scoped result.
+    api.getAll<DefectListOut>(`/api/defects?${query}`)
+      .then((rows) => { if (active) setItems(rows) })
       .catch(() => { if (active) setItems([]) })
     return () => { active = false }
   }, [query])

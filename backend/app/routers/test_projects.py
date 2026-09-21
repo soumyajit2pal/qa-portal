@@ -11,10 +11,12 @@ from ..deps import (
     get_current_user, require_roles, dashboard_department_scope, viewable_project_ids, get_project_member_role,
     can_author_repository, can_review_repository, can_execute_project, can_manage_execution_governance,
     can_give_final_approval, require_can_manage_project, get_or_404, get_project_or_404,
-    require_project_visibility,
+    require_project_visibility, active_qa_workspace_scope_ids,
 )
 from ..constants import Role
-from ..workspace_service import require_active_workspace, selectable_workspace_ids
+from ..workspace_service import (
+    inherited_workspace_access_mode, require_active_workspace, selectable_workspace_ids,
+)
 
 router = APIRouter(prefix="/api/test-projects", tags=["test-management"])
 
@@ -30,14 +32,21 @@ def _validated_department_unit_id(db: Session, unit_id: Optional[int], departmen
     return None
 
 
+def _require_project_owned_by_active_workspace(
+    project: models.TestProject, current_user: models.User,
+) -> None:
+    """Keep project-record mutations out of read-only shared workspaces."""
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids and project.qa_workspace_id not in workspace_ids:
+        raise HTTPException(403, "This Test Project belongs to another workspace and is read-only.")
+
+
 # Reported directly: "while creating project with same project name you can
 # not create project, project should be unique as well." No DB-level UNIQUE
-# constraint on TestProject.name. Retrofitting a hard UNIQUE constraint onto
-# an existing, already-populated production table risks failing outright if any
-# duplicate names already exist there. Enforced here at the application
-# layer instead, same as every other "must be unique" business rule this
-# router already checks by hand (e.g. the department-must-exist-and-be-
-# active check just above/below this). Case-insensitive and whitespace-
+# constraint on the raw TestProject.name column. Enforced here for fast,
+# specific feedback and by a normalized function-based unique index for
+# concurrency safety (the migration fails clearly if legacy duplicates need
+# cleanup). Case-insensitive and whitespace-
 # trimmed -- "MILTON" and "milton " should collide, not silently coexist as
 # two "different" projects a person would never intend. Deliberately checks
 # every project regardless of Active/Inactive/Archived status (no carve-out
@@ -45,7 +54,10 @@ def _validated_department_unit_id(db: Session, unit_id: Optional[int], departmen
 # and ApplicationMaster.name are both unique at the DB level with no such
 # carve-out either.
 def _require_unique_project_name(db: Session, name: str, exclude_id: Optional[int] = None) -> None:
-    q = db.query(models.TestProject).filter(func.lower(models.TestProject.name) == name.lower())
+    normalized_name = name.strip().upper()
+    q = db.query(models.TestProject).filter(
+        func.upper(func.trim(models.TestProject.name)) == normalized_name,
+    )
     if exclude_id is not None:
         q = q.filter(models.TestProject.id != exclude_id)
     existing = q.first()
@@ -66,11 +78,9 @@ def _require_unique_project_name(db: Session, name: str, exclude_id: Optional[in
 # see archive_test_project below) frees the application up for a fresh
 # project. The parameter remains Optional only for internal compatibility
 # with legacy rows; current create/edit APIs require an Application. Same
-# "application layer, not a DB constraint" reasoning as
-# _require_unique_project_name above -- no unique=True added to
-# application_master_id, since retrofitting that onto an existing,
-# already-populated production table risks failing outright if any
-# application already has more than one non-archived project today.
+# A conditional function-based unique index enforces the same rule under
+# concurrent writes while still allowing any number of archived historical
+# projects for one Application; this helper supplies the friendly API error.
 def _require_no_active_project_for_application(db: Session, application_master_id: Optional[int], exclude_id: Optional[int] = None) -> None:
     if not application_master_id:
         return
@@ -100,6 +110,35 @@ def _require_no_active_project_for_application(db: Session, application_master_i
             f"already has an active test project (\"{existing.name}\"). Archive it first, or reuse the "
             "existing project, before creating another one for the same application.",
         )
+
+
+def _raise_project_uniqueness_conflict(
+    db: Session,
+    *,
+    name: str,
+    application_master_id: Optional[int],
+    exclude_id: Optional[int] = None,
+    cause: IntegrityError,
+) -> None:
+    """Translate a database uniqueness race into the existing API errors.
+
+    The preflight checks provide fast, specific feedback, while the database
+    function-based unique indexes are the concurrency-safe source of truth.
+    After rolling back the failed transaction, repeat those checks so the
+    transaction that won the race is described to the caller instead of
+    leaking an Oracle ORA-00001 response.
+    """
+    try:
+        _require_unique_project_name(db, name, exclude_id=exclude_id)
+        _require_no_active_project_for_application(
+            db, application_master_id, exclude_id=exclude_id,
+        )
+    except HTTPException as conflict:
+        raise conflict from cause
+    raise HTTPException(
+        409,
+        "A conflicting Test Project was saved at the same time. Refresh and try again.",
+    ) from cause
 
 
 def _require_existing_cycle_links_match_application(db: Session, project_id: int, application_master_id: int) -> None:
@@ -133,17 +172,24 @@ def _require_existing_cycle_links_match_application(db: Session, project_id: int
 
 
 @router.get("/eligible-users", response_model=List[schemas.UserOption])
-def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_id: Optional[int] = None, runner_only: bool = False,
+def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_id: Optional[int] = None,
+                                        test_case_id: Optional[int] = None, runner_only: bool = False,
                                         roles: Optional[str] = None,
                                         db: Session = Depends(get_db),
                                         current_user: models.User = Depends(get_current_user)):
-    """Return active QA users for the selected workspace or Test Project.
+    """Return active QA users eligible in the relevant content workspace.
 
     A parent workspace can display projects owned by its children. Execution
     runner pickers therefore pass ``project_id`` so candidates and assignment
     validation use the project's owning workspace instead of the parent header.
-    Existing callers without a project retain selected-workspace behaviour.
+    Repository approval-group displays pass ``test_case_id`` because shared
+    projects can contain testcases created by several workspaces; their approval
+    group follows the testcase's permanent creating workspace, not the project
+    owner or the workspace currently selected by the viewer. Existing callers
+    without a record retain selected-workspace behaviour.
     """
+    if cycle_id is not None and test_case_id is not None:
+        raise HTTPException(400, "Select either a test case or a cycle, not both")
     if cycle_id is not None:
         cycle = get_or_404(db, models.TestCycle, cycle_id, "Test Cycle")
         require_project_visibility(db, cycle.project_id, current_user)
@@ -151,7 +197,7 @@ def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_
             raise HTTPException(400, "The selected cycle does not belong to this project")
         from .test_execution import _runner_or_404
         candidates = db.query(models.User).filter(
-            models.User.is_active == True,
+            models.User.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
             models.User.role_assignments.any(models.UserRole.role == Role.QA_ENGINEER),
         ).order_by(models.User.full_name).all()
         eligible = []
@@ -164,7 +210,15 @@ def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_
             except HTTPException:
                 continue
         return eligible
-    if project_id is not None:
+    test_case = None
+    if test_case_id is not None:
+        test_case = get_or_404(db, models.TestCase, test_case_id, "Test Case")
+        require_project_visibility(db, test_case.project_id, current_user)
+        if project_id is not None and test_case.project_id != project_id:
+            raise HTTPException(400, "The selected test case does not belong to this project")
+        project = test_case.project or get_project_or_404(db, test_case.project_id)
+        workspace_id = test_case.origin_workspace_id or project.qa_workspace_id
+    elif project_id is not None:
         project = get_project_or_404(db, project_id)
         require_project_visibility(db, project.id, current_user)
         workspace_id = project.qa_workspace_id
@@ -188,7 +242,32 @@ def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_
         .order_by(models.User.full_name)
         .all()
     )
-    return [user for user in candidates if workspace_id in selectable_workspace_ids(db, user)]
+    eligible = [
+        user for user in candidates
+        if workspace_id in selectable_workspace_ids(db, user)
+        and inherited_workspace_access_mode(db, user, workspace_id) != "PARENT_VIEWER"
+    ]
+    if test_case is None or test_case.current_draft_version is None:
+        return eligible
+
+    # Match the record-specific maker-checker checks enforced by
+    # test_repository.review_test_case. A role/workspace directory alone is
+    # not an approver list: the author, submitter and prior-stage reviewer can
+    # be in the correct group while still being barred from this exact draft.
+    draft = test_case.current_draft_version
+    record_eligible = []
+    for user in eligible:
+        if user.has_role(Role.ADMIN):
+            record_eligible.append(user)
+            continue
+        if user.id == draft.author_id:
+            continue
+        if draft.status == "Recommendation Pending" and user.id == draft.submitted_by_id:
+            continue
+        if draft.status == "QA Lead Approval Pending" and user.id in (draft.submitted_by_id, draft.reviewed_by_id):
+            continue
+        record_eligible.append(user)
+    return record_eligible
 
 
 @router.get("", response_model=pagination.Page[schemas.TestProjectOut])
@@ -409,14 +488,23 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
         created_by_id=current_user.id,
     )
     db.add(obj)
-    db.flush()
-    # PRJ-001/PRJ-005 -- the owner is always a member from day one, so
-    # add_project_member's own owner-authorization check has someone to
-    # authorize against immediately, without a separate bootstrap step.
-    db.add(models.TestProjectMember(
-        project_id=obj.id, user_id=owner_id, project_role="Owner", added_by_id=current_user.id,
-    ))
-    db.commit()
+    try:
+        db.flush()
+        # PRJ-001/PRJ-005 -- the owner is always a member from day one, so
+        # add_project_member's own owner-authorization check has someone to
+        # authorize against immediately, without a separate bootstrap step.
+        db.add(models.TestProjectMember(
+            project_id=obj.id, user_id=owner_id, project_role="Owner", added_by_id=current_user.id,
+        ))
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        _raise_project_uniqueness_conflict(
+            db,
+            name=name,
+            application_master_id=application_master_id,
+            cause=exc,
+        )
     db.refresh(obj)
     return obj
 
@@ -444,6 +532,7 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
     review_project_activation below."""
     obj = get_project_or_404(db, project_id)
     require_project_visibility(db, obj.id, current_user)
+    _require_project_owned_by_active_workspace(obj, current_user)
     # Only the "edit the project record itself" fields are Owner/QA-Lead
     # gated -- deliberately NOT applied when the payload is is_active-only,
     # since that's the separate PRJ-004 activate/deactivate request flow
@@ -526,7 +615,7 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
     elif obj.application_master_id and "department" in data:
         # A linked Application owns the department even if a caller attempts
         # to PATCH only the department and omit application_master_id.
-        app_master = db.query(models.ApplicationMaster).get(obj.application_master_id)
+        app_master = db.get(models.ApplicationMaster, obj.application_master_id)
         mapped_department = (app_master.department or "").strip() if app_master else ""
         if not mapped_department:
             raise HTTPException(400, "The linked Application does not have a mapped department")
@@ -578,7 +667,19 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
                 decision="Reactivation requested" if requested_active else "Deactivation requested",
                 comments="Awaiting QA Lead approval before taking effect.",
             ))
-    db.commit()
+    final_name = obj.name
+    final_application_master_id = obj.application_master_id
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        _raise_project_uniqueness_conflict(
+            db,
+            name=final_name,
+            application_master_id=final_application_master_id,
+            exclude_id=project_id,
+            cause=exc,
+        )
     db.refresh(obj)
     return obj
 
@@ -712,6 +813,7 @@ def review_project_activation(project_id: int, payload: schemas.TestProjectActiv
     Reject discards the request and leaves is_active untouched. Reported
     directly alongside update_test_project's gate above."""
     obj = get_project_or_404(db, project_id)
+    require_can_manage_project(obj, current_user)
     if obj.pending_is_active is None:
         raise HTTPException(400, "This project has no pending activation request")
     decision = payload.decision.strip().upper()
@@ -755,6 +857,7 @@ def archive_test_project(project_id: int, payload: schemas.TestProjectArchive, d
     `if not project.is_active` authoring/execution gate already rejects an
     archived project -- see models.py's own comment on is_archived."""
     obj = get_project_or_404(db, project_id)
+    require_can_manage_project(obj, current_user)
     if obj.is_archived:
         raise HTTPException(400, "This project is already archived")
     obj.is_archived = True
@@ -783,6 +886,7 @@ def unarchive_test_project(project_id: int, db: Session = Depends(get_db),
     decision through update_test_project (or a QA Engineer's own
     approval-gated request through the same endpoint)."""
     obj = get_project_or_404(db, project_id)
+    require_can_manage_project(obj, current_user)
     if not obj.is_archived:
         raise HTTPException(400, "This project is not archived")
     # Closes the gap the one-project-per-application rule would otherwise
@@ -800,7 +904,18 @@ def unarchive_test_project(project_id: int, db: Session = Depends(get_db),
         actor_id=current_user.id, actor_role=current_user.roles_csv,
         decision="Unarchived", comments="Project restored from archive; still Inactive until reactivated.",
     ))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        restored = get_project_or_404(db, project_id)
+        _raise_project_uniqueness_conflict(
+            db,
+            name=restored.name,
+            application_master_id=restored.application_master_id,
+            exclude_id=project_id,
+            cause=exc,
+        )
     db.refresh(obj)
     return obj
 

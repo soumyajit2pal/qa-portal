@@ -3,21 +3,25 @@
 The main QualityOps API intentionally does not import this application.  It
 is deployed as a separate container and nginx sends only
 ``/api/document-portal`` traffic here.  Both services read the same Oracle
-identity/role mappings and JWT secret, so users retain one login and one
+identity, role mappings, and session store, so users retain one login and one
 portal URL while large file uploads cannot consume the core workflow API's
 workers, memory, or upload-temporary storage.
 """
 import logging
 import os
+import tempfile
 import time
 import uuid
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text as sqlalchemy_text
 from sqlalchemy.exc import DBAPIError, TimeoutError as SQLAlchemyTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .database import main_pool_metrics
+from .database import SessionLocal, main_pool_metrics
 from .config import settings
 from .logging_config import bind_request_id, configure_logging, reset_request_id
 from .resilience import CircuitOpenError, database_circuit, is_transient_database_error, snapshot as resilience_snapshot
@@ -40,8 +44,35 @@ app = FastAPI(
     openapi_url=None if settings.app_env in {"uat", "prod", "production"} else "/openapi.json",
 )
 
+if settings.allowed_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+if settings.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Content-Type", "X-Request-ID", "X-CSRF-Token",
+            "X-Workspace-ID", "X-QA-Workspace-ID",
+        ],
+    )
+
 
 from .transport_security import enforce_https
+
+
+@app.middleware("http")
+async def document_portal_security_headers(request: Request, call_next):
+    """Match the core API when this service is reached outside nginx."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.path.startswith("/api"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 @app.middleware("http")
 async def document_portal_request_observability(request: Request, call_next):
@@ -164,12 +195,35 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 @app.get("/api/health")
 def health():
-    return {
-        "status": "ok",
+    try:
+        with SessionLocal() as db:
+            db.execute(sqlalchemy_text("SELECT 1 FROM DUAL"))
+        db_ok = True
+    except Exception:
+        db_ok = False
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=".qualityops-health-",
+            dir=document_portal.DOCUMENT_ROOT,
+            delete=True,
+        ) as probe:
+            probe.write(b"ok")
+            probe.flush()
+        storage_ok = True
+    except OSError:
+        storage_ok = False
+    payload = {
+        "status": "ok" if db_ok and storage_ok else "degraded",
         "service": "document-portal",
         "profile": settings.app_env,
+        "database": "ok" if db_ok else "unreachable",
+        "storage": "ok" if storage_ok else "unwritable",
+        "database_pool": main_pool_metrics(),
         "circuits": resilience_snapshot(),
     }
+    if not (db_ok and storage_ok):
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 
 app.include_router(document_portal.router)

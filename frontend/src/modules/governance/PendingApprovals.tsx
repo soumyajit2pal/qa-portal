@@ -1,11 +1,13 @@
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useRequestNavigation } from '../../hooks/useRequestNavigation'
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useRef } from 'react'
 
 import { api, subscribeToApiMutations } from '../../api'
 import { formatDateIST, formatDateTimeIST } from '../../time'
 import { Card, Badge, ErrorText, PageHeader } from '../../components/Common'
 import { PendingApprovalItem, PendingApprovalPage } from '../../types'
+import { createLatestRequestGate } from '../../latestRequest'
+import { isKeyboardActivationKey } from '../../keyboard'
 
 // Table's rowKey prop needs a single field name to key React's list
 // rendering by -- there's no one column on PendingApprovalItem that's
@@ -40,14 +42,17 @@ export default function PendingApprovals() {
   const [hasPrevious, setHasPrevious] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [loading, setLoading] = useState(true)
+  const loadRequests = useRef(createLatestRequestGate()).current
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
 
   const load = useCallback(async () => {
+    const generation = loadRequests.begin()
     setLoading(true)
     try {
       const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
       if (category) query.set('category', category)
       const result = await api.get<PendingApprovalPage>(`/api/pending-approvals?${query}`)
+      if (!loadRequests.isCurrent(generation)) return
       if (category && !result.category_counts[category]) {
         setCategory('')
         setPage(1)
@@ -65,11 +70,11 @@ export default function PendingApprovals() {
       setHasPrevious(result.has_previous)
       setError(null)
     } catch (err) {
-      setError(err)
+      if (loadRequests.isCurrent(generation)) setError(err)
     } finally {
-      setLoading(false)
+      if (loadRequests.isCurrent(generation)) setLoading(false)
     }
-  }, [category, page, pageSize])
+  }, [category, page, pageSize, loadRequests])
 
   useEffect(() => { load() }, [load])
 
@@ -221,11 +226,18 @@ export default function PendingApprovals() {
                         </div>
                       )}
                       {items.map((item, index) => (
-                        <button
-                          type="button"
+                        <div
+                          role="link"
+                          tabIndex={0}
                           className="pending-approval-child"
                           key={item._key}
                           onClick={() => openFromPending(item.path)}
+                          onKeyDown={(event) => {
+                            if (event.target === event.currentTarget && isKeyboardActivationKey(event.key)) {
+                              event.preventDefault()
+                              openFromPending(item.path)
+                            }
+                          }}
                           aria-label={`Review ${item.display_id || item.title}`}
                           title={`Open ${item.display_id || 'approval'} for review`}
                         >
@@ -233,7 +245,7 @@ export default function PendingApprovals() {
                           <span className="pending-approval-child-main">
                             <span className="pending-approval-child-heading">
                               <strong>{item.display_id || 'Application Name Approval'}</strong>
-                              <WorkflowStatusBadge record={item} workflow={item.entity_type === "SIGNOFF" ? "signoff" : undefined} status={item.status} label={item.status_label} />
+                              <WorkflowStatusBadge record={item} testCaseId={item.entity_type === "TEST_CASE" ? item.entity_id : undefined} workflow={item.entity_type === "SIGNOFF" ? "signoff" : undefined} status={item.status} label={item.status_label} />
                             </span>
                             <span className="pending-approval-child-title">{item.title}</span>
                             <span className="pending-approval-child-meta">
@@ -244,7 +256,7 @@ export default function PendingApprovals() {
                             </span>
                           </span>
                           <span className="pending-approval-open">Review now <b>→</b></span>
-                        </button>
+                        </div>
                       ))}
                     </React.Fragment>
                   ))}

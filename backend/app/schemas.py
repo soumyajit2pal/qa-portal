@@ -1,7 +1,15 @@
 import datetime
 import re
 from typing import Optional, List, Dict, Literal
-from pydantic import Field, BaseModel, ConfigDict, EmailStr, field_validator, model_validator
+from pydantic import (
+    Field,
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from .login_encryption import EncryptedLogin
 
 RICH_TEXT_MAX_LENGTH = 10000
@@ -49,7 +57,13 @@ def _serialize_ist_datetime(value: datetime.datetime) -> str:
 
 
 class ORMModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True, json_encoders={datetime.datetime: _serialize_ist_datetime})
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_serializer("*", mode="wrap", when_used="json", check_fields=False)
+    def _serialize_datetime_fields(self, value, handler):
+        if isinstance(value, datetime.datetime):
+            return _serialize_ist_datetime(value)
+        return handler(value)
 
 
 # ---------------- Auth / Users ----------------

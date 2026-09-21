@@ -21,3 +21,60 @@ export function approvalStage(status?: string | null, applicationMasterStatus?: 
   }
   return { roles, group, departmentScoped }
 }
+
+export interface ApprovalDirectoryContext {
+  department?: string | null
+  qa_workspace_id?: number | null
+  origin_workspace_id?: number | null
+  requester_id?: number | null
+}
+
+/**
+ * Resolve the authoritative approver-directory endpoint for a workflow badge.
+ *
+ * Test cases are deliberately record-scoped: shared repositories can display a
+ * case from another workspace, and testcase maker-checker exclusions depend on
+ * its current draft.  The generic user directory cannot answer either question,
+ * so testcase badges must use the same endpoint as the repository's Pending
+ * With link. Other workflows retain the workspace/department-scoped directory.
+ */
+export function approvalDirectoryRequest({
+  status,
+  applicationMasterStatus,
+  workflow,
+  context,
+  fallbackWorkspaceId,
+  testCaseId,
+}: {
+  status?: string | null
+  applicationMasterStatus?: string | null
+  workflow?: 'signoff'
+  context: ApprovalDirectoryContext
+  fallbackWorkspaceId?: number | null
+  testCaseId?: number | null
+}): { path: string; roles: string[]; group: string; departmentScoped: boolean } | null {
+  const stage = approvalStage(status, applicationMasterStatus, workflow)
+  const roles = testCaseId && status === 'QA Lead Approval Pending'
+    ? ['QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']
+    : stage.roles
+  if (!roles.length) return null
+
+  if (testCaseId) {
+    const query = new URLSearchParams({
+      roles: roles.join(','),
+      test_case_id: String(testCaseId),
+    })
+    return { ...stage, roles, path: `/api/test-projects/eligible-users?${query}` }
+  }
+
+  const query = new URLSearchParams({
+    purpose: 'approver',
+    roles: roles.join(','),
+    department_scoped: String(stage.departmentScoped),
+  })
+  const workspaceId = context.qa_workspace_id ?? context.origin_workspace_id ?? fallbackWorkspaceId
+  if (workspaceId) query.set('workspace_id', String(workspaceId))
+  if (context.department) query.set('department', context.department)
+  if (stage.departmentScoped && context.requester_id) query.set('exclude_id', String(context.requester_id))
+  return { ...stage, roles, path: `/api/auth/user-options?${query}` }
+}

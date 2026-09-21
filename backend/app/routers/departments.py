@@ -278,7 +278,7 @@ def update_department(dept_id: int, payload: schemas.DepartmentUpdate, db: Sessi
     than deleting) keeps existing users/requests that already reference the
     name intact -- it just stops showing up as a pickable option going
     forward."""
-    obj = db.query(models.Department).get(dept_id)
+    obj = db.get(models.Department, dept_id)
     if not obj:
         raise HTTPException(404, "Department not found")
     data = payload.model_dump(exclude_unset=True)

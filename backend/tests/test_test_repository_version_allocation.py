@@ -83,6 +83,7 @@ def test_start_and_finish_editing_only_change_the_checkout(monkeypatch):
         id=50,
         project_id=7,
         is_deleted=False,
+        status="Draft",
         current_draft_version=None,
         current_draft_version_id=None,
         versions=versions,

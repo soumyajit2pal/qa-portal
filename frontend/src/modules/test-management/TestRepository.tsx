@@ -1,5 +1,5 @@
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, mapWithConcurrency, waitForJob } from '../../api'
 import { formatDateIST, formatDateTimeIST } from '../../time'
@@ -14,7 +14,7 @@ import {
 import {
   TestProjectOut, TestFolderOut, TestCaseOut, TestCaseListOut, TestCaseSummaryOut, TestStepIn, TestCaseImportResult, ApprovalActionOut,
   TestCaseVersionSummary, TestCaseVersionCompareOut, TestProjectMyAccessOut, TestCaseVersionOut,
-  TestCaseReviewDecision, TestCaseBulkRecommendIn, UserOption, PageOut,
+  TestCaseReviewDecision, TestCaseBulkRecommendIn, UserOption,
 } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
@@ -24,6 +24,7 @@ import RoleGroupLink from '../../components/RoleGroupLink'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconArchive, IconFolder, IconGrid, IconInbox, IconTrash } from '../../components/Icons'
 import { testCaseRejectionNote } from '../../testCaseRejectionNote'
+import { createLatestRequestGate } from '../../latestRequest'
 
 // Test Repository module -- folder tree + test case authoring/import, under
 // a selected Test Project. QA Engineer + QA Lead both author (create/edit/
@@ -1975,7 +1976,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
           {existing && <Field label="Creating workspace"><span>{existing.origin_workspace_name || 'Workspace not recorded'} · {existing.workspace_writable ? 'Your workspace' : 'Read-only'}</span></Field>}
           <Field label="Workflow Status">
             <div className="tm-workflow-status-field">
-              <WorkflowStatusBadge record={existing || {}} status={existing?.status || 'Draft'} label={TEST_CASE_STATUS_LABELS[existing?.status || 'Draft']} />
+              <WorkflowStatusBadge record={existing || {}} testCaseId={existing?.id} status={existing?.status || 'Draft'} label={TEST_CASE_STATUS_LABELS[existing?.status || 'Draft']} />
               {/* Reported directly: this note used to only check
                   current_approved_version_id, so a brand-new, never-submitted
                   Draft showed "Unavailable until QA Lead approval" -- easily
@@ -2703,6 +2704,7 @@ export default function TestRepository() {
   // shape; opening a case fetches the full TestCaseOut (steps included)
   // fresh via GET /test-cases/{id} before the editor modal is shown.
   const [openingCaseId, setOpeningCaseId] = useState<number | null>(null)
+  const detailRequests = useRef(createLatestRequestGate()).current
   const [search, setSearch] = useState('')
   const [priorityFilter, setPriorityFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
@@ -2751,11 +2753,8 @@ export default function TestRepository() {
   }
 
   useEffect(() => {
-    // SRS 7.2 pagination rollout -- /api/test-projects is now wrapped in
-    // Page[T] for API-contract consistency (task #82); page_size=100 +
-    // .items since this project picker still wants the complete list.
-    api.get<PageOut<TestProjectOut>>('/api/test-projects?include_inactive=true&page_size=100').then((page) => {
-      const p = page.items
+    // A project picker must not silently omit projects after the first page.
+    api.getAll<TestProjectOut>('/api/test-projects?include_inactive=true').then((p) => {
       setProjects(p)
       const requested = Number(searchParams.get('project'))
       if (p.length && !projectId) setProjectId(p.some((x) => x.id === requested) ? requested : p[0].id)
@@ -2896,10 +2895,17 @@ export default function TestRepository() {
   // opening one fetches the full TestCaseOut (with steps) before showing
   // the editor modal.
   const openCase = useCallback(async (id: number) => {
+    const generation = detailRequests.begin()
     setOpeningCaseId(id)
-    try { setEditingCase(await api.get<TestCaseOut>(`/api/test-repository/test-cases/${id}`)) }
-    catch (err) { setError(err) } finally { setOpeningCaseId(null) }
-  }, [])
+    try {
+      const detail = await api.get<TestCaseOut>(`/api/test-repository/test-cases/${id}`)
+      if (detailRequests.isCurrent(generation)) setEditingCase(detail)
+    } catch (err) {
+      if (detailRequests.isCurrent(generation)) setError(err)
+    } finally {
+      if (detailRequests.isCurrent(generation)) setOpeningCaseId(null)
+    }
+  }, [detailRequests])
 
   const availableTags = summary?.tags || []
   const folderCounts = summary?.folder_counts || {}
@@ -3437,14 +3443,14 @@ export default function TestRepository() {
                   const hasPendingActor = !!pendingWithLabel && pendingWithLabel !== '—'
                   return (
                     <span className="tm-workflow-cell">
-                      <WorkflowStatusBadge record={c} status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} />
+                      <WorkflowStatusBadge record={c} testCaseId={c.id} status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} />
                       {pendingGroup
                         ? <RoleGroupLink
-                            users={users}
                             repositoryGroup
+                            testCaseId={c.id}
                             role={pendingGroup.role}
                             label={pendingGroup.label}
-                            renderTrigger={(count, open) => <button type="button" className="role-group-link" onClick={(event) => { event.stopPropagation(); open() }}>Pending with {pendingGroup.label}<span>{count}</span></button>}
+                            renderTrigger={(count, open) => <button type="button" className="role-group-link" onClick={(event) => { event.stopPropagation(); open() }}>Pending with {pendingGroup.label}<span>{count ?? 'View'}</span></button>}
                           />
                         : hasPendingActor ? <small>Pending with {pendingWithLabel}</small> : null}
                       {/* "along with Pending with details, show submitted by as well" --

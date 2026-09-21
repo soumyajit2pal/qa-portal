@@ -127,7 +127,7 @@ def cleanup_orphaned_application_master(db: Session, old_master_id: Optional[int
     own ORA-02292 (child record found)."""
     if not old_master_id:
         return
-    old = db.query(models.ApplicationMaster).get(old_master_id)
+    old = db.get(models.ApplicationMaster, old_master_id)
     if not old or old.status not in ("PENDING_APP_OWNER", "PENDING_SM"):
         return
     still_used_by_request = (

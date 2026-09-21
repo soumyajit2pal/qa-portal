@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app import models
+from app import auth as auth_service, models
 from app.auth import LDAPAuthError, hash_password
 from app.config import settings
+from app.constants import LoginType
 from app.routers import auth as auth_router
 from app.session_security import (
     CSRF_HEADER,
@@ -155,6 +156,25 @@ def test_disabled_login_is_generic_and_rate_limited(session_db):
     record.assert_called_once()
 
 
+def test_mock_only_unknown_user_returns_generic_invalid_credentials(session_db):
+    db, _ = session_db
+    with patch.object(auth_service.settings, "ldap_mock_enabled", True), \
+         patch.object(auth_service.settings, "ldap_mock_username_prefix", "bmock"), \
+         patch.object(auth_service.settings, "ldap_mock_password", "QualityOps-Mock-LDAP-2026!"), \
+         patch.object(auth_service, "LDAP_SERVER_URI", ""), \
+         patch.object(auth_router, "_enforce_login_rate_limit"), \
+         patch.object(auth_router, "_record_login_failure"), \
+         patch.object(auth_router, "write_audit"):
+        with pytest.raises(HTTPException) as exc:
+            auth_router.login(
+                _request("POST"), Response(),
+                SimpleNamespace(username="mistyped-user", password="anything"), db,
+            )
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Invalid username or password"
+
+
 def test_unknown_user_ldap_outage_is_not_an_enumeration_oracle(session_db):
     db, _ = session_db
     with patch.object(auth_router, "_enforce_login_rate_limit"), \
@@ -167,3 +187,31 @@ def test_unknown_user_ldap_outage_is_not_an_enumeration_oracle(session_db):
             )
     assert exc.value.status_code == 503
     assert "unavailable" in exc.value.detail.lower()
+
+
+def test_known_and_unknown_ldap_outages_have_identical_public_responses(session_db):
+    db, user = session_db
+    user.login_type = LoginType.LDAP
+    db.commit()
+
+    with patch.object(auth_router, "_enforce_login_rate_limit"), \
+         patch.object(auth_router, "ldap_authenticate_with_profile", side_effect=LDAPAuthError("directory.internal:636 offline")), \
+         patch.object(auth_router, "write_audit"):
+        with pytest.raises(HTTPException) as unknown:
+            auth_router.login(
+                _request("POST"), Response(),
+                SimpleNamespace(username="unknown-user", password="anything"), db,
+            )
+
+    with patch.object(auth_router, "_enforce_login_rate_limit"), \
+         patch.object(auth_router, "ldap_authenticate", side_effect=LDAPAuthError("directory.internal:636 offline")), \
+         patch.object(auth_router, "write_audit"):
+        with pytest.raises(HTTPException) as known:
+            auth_router.login(
+                _request("POST"), Response(),
+                SimpleNamespace(username=user.username, password="anything"), db,
+            )
+
+    assert known.value.status_code == unknown.value.status_code == 503
+    assert known.value.detail == unknown.value.detail
+    assert "directory.internal" not in known.value.detail

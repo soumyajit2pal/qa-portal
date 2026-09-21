@@ -151,6 +151,9 @@ def test_rescan_imports_only_pending_targets_and_retains_clear_history(monkeypat
     monkeypatch.setattr(sast_dast, '_scan_results', lambda *args: rows)
     monkeypatch.setattr(sast_dast, '_require', lambda *args: None)
     monkeypatch.setattr(sast_dast, '_require_assigned_security_analyst', lambda *args: None)
+    # This helper-focused test supplies lightweight stand-ins rather than an
+    # authenticated workspace actor; authorization is covered separately.
+    monkeypatch.setattr(sast_dast, '_require_visible', lambda *args: None)
     monkeypatch.setattr(sast_dast, '_log', lambda *args: None)
     payload = schemas.SecurityScanStartIn(scans=[
         {'target_id': i, 'application_name': f'Target {i}', 'application_version': '1'} for i in (41, 42)

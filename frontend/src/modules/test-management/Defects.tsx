@@ -17,11 +17,13 @@ import SearchableSelect from '../../components/SearchableSelect'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import {
   ApplicationMasterOut, ApprovalActionOut, DefectDashboardOut, DefectLinkableExecutionOut, DefectListOut, DefectOut, DepartmentOut,
-  PageOut, QARequestListOut, QARequestOut, QAWorkspaceOut, RequestDocumentOut, UserOption,
+  QARequestListOut, QARequestOut, QAWorkspaceOut, RequestDocumentOut, UserOption,
 } from '../../types'
 import { useAuth } from '../../context/AuthContext'
 import { ENVIRONMENTS, DEFECT_REASSIGNABLE_STATUSES, QA_REQUEST_CREATOR_ROLES, hasWorkflowRole as hasRole, hasDepartment, hasWorkspaceMembership, hasWorkspaceRole, canReassign, userDepartments, isSelectableUser, isViewOnly } from '../../constants'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+import { internalNavigationPath } from '../../requestNavigation'
+import { createLatestRequestGate } from '../../latestRequest'
 
 const STATUSES = ['Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect', 'Closed']
 const SEVERITIES = ['Critical', 'High', 'Medium', 'Low']
@@ -1101,7 +1103,7 @@ export function EmbeddedDefectDetail({ defectKey, onClose }: { defectKey: string
         const [allUsers, activeDepartments, duplicates, executionContexts, request] = await Promise.all([
           api.get<UserOption[]>('/api/auth/user-options').catch(() => [] as UserOption[]),
           api.get<DepartmentOut[]>('/api/departments').catch(() => [] as DepartmentOut[]),
-          api.get<PageOut<DefectListOut>>('/api/defects?page_size=100').then((page) => page.items).catch(() => [] as DefectListOut[]),
+          api.getAll<DefectListOut>('/api/defects').catch(() => [] as DefectListOut[]),
           api.get<DefectLinkableExecutionOut[]>('/api/test-execution/executions/blocked-or-failed').catch(() => [] as DefectLinkableExecutionOut[]),
           opened.qa_request_id ? api.get<QARequestOut>(`/api/qa-requests/${opened.qa_request_id}`).catch(() => null) : Promise.resolve(null),
         ])
@@ -1163,6 +1165,7 @@ export default function Defects() {
   const [priority, setPriority] = useState('')
   const [queue, setQueue] = useState<'all' | 'attention' | 'mine' | 'unlinked' | 'retest' | 'closed'>('all')
   const [error, setError] = useState<unknown>(null)
+  const detailRequests = useRef(createLatestRequestGate()).current
   const initialExecutionId = Number(searchParams.get('execution')) || undefined
 
   // SRS 7.2 pagination rollout -- the register is now server-paginated and
@@ -1194,12 +1197,18 @@ export default function Defects() {
   // page's own "open what was just created" step) fetches the full
   // DefectOut before showing the detail panel.
   const openDefect = useCallback(async (keyOrId: number | string) => {
+    const generation = detailRequests.begin()
     if (typeof keyOrId === 'number') setOpeningDefectId(keyOrId)
     try {
       const path = typeof keyOrId === 'number' ? `/api/defects/${keyOrId}` : `/api/defects/by-key/${encodeURIComponent(keyOrId)}`
-      setSelected(await api.get<DefectOut>(path))
-    } catch (err) { setError(err) } finally { setOpeningDefectId(null) }
-  }, [])
+      const detail = await api.get<DefectOut>(path)
+      if (detailRequests.isCurrent(generation)) setSelected(detail)
+    } catch (err) {
+      if (detailRequests.isCurrent(generation)) setError(err)
+    } finally {
+      if (detailRequests.isCurrent(generation)) setOpeningDefectId(null)
+    }
+  }, [detailRequests])
 
   const load = useCallback(async () => {
     try {
@@ -1211,22 +1220,14 @@ export default function Defects() {
       // QA. See TransitionModal's departmentUsers filter, which narrows this
       // full list down to the selected assigned_team at assignment time.
       const [qaRequests, allUsers, activeDepartments, duplicates, executionContexts] = await Promise.all([
-        // SRS PAG-002 -- /api/qa-requests is now paginated (max page_size
-        // 100); this picker (linking a new defect to its QA Request, and
-        // reading the responsible department off one) wants "effectively
-        // all of them" rather than one page, so it asks for the max size
-        // directly instead of going through hooks/usePaginatedList.
-        api.get<PageOut<QARequestListOut>>('/api/qa-requests?page_size=100').then((p) => p.items).catch(() => [] as QARequestListOut[]),
+        // Linking pickers need the complete authorized result, so getAll
+        // exhausts the standard paginated endpoint.
+        api.getAll<QARequestListOut>('/api/qa-requests').catch(() => [] as QARequestListOut[]),
         api.get<UserOption[]>('/api/auth/user-options'),
         api.get<DepartmentOut[]>('/api/departments'),
         // Candidate pool for TransitionModal's "Original Defect ID" picker
-        // (marking a defect Duplicate) -- SearchableSelect has no async/
-        // server-search mode, so this is capped at the same page_size=100
-        // "effectively all of them" compromise used by the QA Requests
-        // picker above, not a true unpaginated PAG-010 candidate set (the
-        // defect register has real unbounded growth, unlike Test Cases'
-        // folder tree).
-        api.get<PageOut<DefectListOut>>('/api/defects?page_size=100').then((p) => p.items),
+        // (marking a defect Duplicate) must also span every server page.
+        api.getAll<DefectListOut>('/api/defects'),
         // 2026-08 -- reported directly: "if there are 30 project[s] then 30
         // api call[s] ... same for cycles, executions." This single batch
         // call (routers/test_execution.py::list_blocked_failed_executions)
@@ -1325,7 +1326,7 @@ export default function Defects() {
       // panel, see LinkedDefects.tsx's `returnTo`) used to just clear the
       // `open` param and leave the user sitting on the Defects register,
       // instead of going back to the page they actually came from.
-      const returnTo = searchParams.get('return')
+      const returnTo = internalNavigationPath(searchParams.get('return'))
       if (returnTo) { navigate(returnTo); return }
       setSelected(null); setSearchParams({})
     }} onChanged={update} />}

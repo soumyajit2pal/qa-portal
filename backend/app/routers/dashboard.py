@@ -11,14 +11,13 @@ from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 from .. import models, cache
 from ..database import get_db
 from ..deps import (
-    get_current_user, dashboard_department_scope, active_qa_workspace_scope,
-    active_qa_workspace_scope_ids,
+    get_current_user, dashboard_department_scope, active_qa_workspace_scope_ids,
     department_unit_visibility_condition, viewable_project_ids,
 )
 from ..pagination import PageParams
 from ..xlsx_export import new_workbook, add_summary_sheet, add_table_sheet, workbook_response
 from ..constants import (
-    Role, QAStatus, GATEWAY_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
+    Role, QAStatus, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
     QA_REQUEST_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
     SAST_DAST_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
 )
@@ -129,13 +128,18 @@ def _scope_fortify_suppression_requests(query, model, scope,
 
 def _date_bounds(date_from: str | None, date_to: str | None):
     """Inclusive reporting-period bounds supplied by the dashboard."""
-    start = datetime.datetime.fromisoformat(date_from.replace("Z", "+00:00")) if date_from else None
-    end = datetime.datetime.fromisoformat(date_to.replace("Z", "+00:00")) if date_to else None
+    try:
+        start = datetime.datetime.fromisoformat(date_from.replace("Z", "+00:00")) if date_from else None
+        end = datetime.datetime.fromisoformat(date_to.replace("Z", "+00:00")) if date_to else None
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Invalid date filter. Use ISO date/time format.") from exc
     # Oracle columns are stored as naive IST wall-clock values.
     if start and start.tzinfo:
         start = start.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
     if end and end.tzinfo:
         end = end.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+    if start and end and start > end:
+        raise HTTPException(400, "date_from must be earlier than or equal to date_to.")
     return start, end
 
 
@@ -1147,7 +1151,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
 
     def add_assignment(tester_id: int, request, source: str, load: float, shared_by: int = 1):
         if tester_id not in rows:
-            user = db.query(models.User).get(tester_id)
+            user = db.get(models.User, tester_id)
             rows[tester_id] = empty_row(tester_id, user)
         row = rows[tester_id]
         row["status_counts"][request.status] = row["status_counts"].get(request.status, 0) + 1
@@ -1211,7 +1215,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
                             else _assigned_user_ids(raw_assignment))
             for tester_id in assigned_ids:
                 if tester_id not in rows:
-                    user = db.query(models.User).get(tester_id)
+                    user = db.get(models.User, tester_id)
                     rows[tester_id] = empty_row(tester_id, user)
                 rows[tester_id]["assignments"].append({
                     "request_id": request.request_id,

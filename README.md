@@ -10,7 +10,7 @@ A full-stack quality operations platform built from the **"Centralized QA Portal
   [Frontend architecture](#frontend-architecture) for why this project tried, then backed away
   from, a Module Federation split).
 - **Backend:** FastAPI + SQLAlchemy (used purely as the Oracle query/ORM layer, not for
-  database portability), JWT authentication, RBAC across 9 roles. The core workflow API
+  database portability), revocable session authentication, and role/workspace authorization. The core workflow API
   and the high-volume Document Portal API run as separate deployable services.
 - **Database:** Oracle only. The app reads `DATABASE_URL` and refuses to start without an
   Oracle connection string — there is no SQLite or other fallback (see
@@ -23,12 +23,11 @@ that renders each one.
 
 | Backend router | Frontend area | What it covers |
 |---|---|---|
-| `auth.py` | `src/Login.tsx` | JWT login, `/auth/me`, user directory, Admin CRUD |
-| `qa_requests.py` | `src/QARequests.tsx` | The cross-module request gateway/inbox — raise a request, pick its type, route it |
+| `auth.py` | `src/Login.tsx` | Encrypted login, revocable cookie sessions, `/auth/me`, user directory, Admin CRUD |
+| `qa_requests.py` | `src/QARequests/` | The cross-module request gateway/inbox — raise a request, pick its type, route it |
 | `functional.py` | **Functional** (`src/modules/functional/`) | Functional QA request lifecycle: SM/dept-head decisions, readiness checklist, planning → test design → execution → defects → retest → regression → clearance, documents, history |
 | `sast_dast.py` | **Security** (`src/modules/security/`) | SAST and DAST request lifecycle: readiness, scan configuration/execution, findings, documents, history |
 | `suppression.py` | **Security** (`src/modules/security/`) | False-positive/suppression requests: app-owner and dept-head decisions, security-team decision, documents, history |
-| `automation.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Automation request lifecycle: feasibility, engineer assignment, script development, review, CI/CD integration, clearance |
 | `performance.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Performance testing lifecycle: readiness, baseline, load test, result analysis, defect fix/retest, report, clearance |
 | `approvals.py` | **Governance** (`src/modules/governance/`) | Cross-module workflow-decision feed (`/approvals`, `/approvals/pending-mine`) |
 | `audit.py` | **Governance** (`src/modules/governance/AuditLog.tsx`) | Immutable authentication, API-access, data-change and access-management audit trail |
@@ -37,11 +36,21 @@ that renders each one.
 | `reports.py` | **Governance** (`src/modules/governance/Reports.tsx`) | Operational/security/management report data (QA summary, SAST/DAST scan, vulnerability trend, severity distribution, suppression register, monthly KPI, quality scorecard, audit evidence) |
 | `export.py` | **Governance** (`src/modules/governance/Reports.tsx`) | Excel/PDF/CSV export of the above, with RBAC |
 | `departments.py` | Used across request forms + Admin | Department master data |
+| `applications.py` | Admin + request forms | Governed application-name master data and owner decisions |
+| `qa_workspaces.py` | Workspace selector + Admin | Workspace hierarchy, membership, sharing and policy administration |
+| `test_projects.py` | **Test Management** | Test-project lifecycle and workspace sharing |
+| `test_repository.py` | **Test Management** | Folder/repository hierarchy, testcase versions, approvals, imports and exports |
+| `test_execution.py` | **Test Management** | Cycles, assignment, execution results and evidence |
+| `test_reports.py` | **Test Management** | Test-management analytics and exports |
+| `defects.py` | **Test Management** | Defect lifecycle, assignment, evidence and execution traceability |
+| `pending_approvals.py` | Header/approval notices | Role- and workspace-scoped pending-action feed |
+| `checklist_config.py`, `request_type_config.py` | Admin + request forms | Governed checklist and request-type configuration |
+| `jobs.py` | Imports/exports | Background-job status and generated artifact retrieval |
 
-Every write endpoint is RBAC-checked via `app/deps.require_roles`, and every state change is
-written to the `approval_actions` workflow-history table. Security and operational activity is
-captured separately in the immutable `qap_audit_logs` table. JWT auth stands in for AD/LDAP integration —
-real LDAP bind support is already implemented (see
+Write endpoints combine role checks with target-record workspace/department ownership checks, and
+workflow state changes are written to the `approval_actions` history table. Security and operational
+activity is captured separately in `qap_audit_logs`. Browser authentication uses revocable,
+HttpOnly server sessions with CSRF protection; real LDAP bind support is implemented (see
 [Authentication & the Admin section](#authentication--the-admin-section)), not just a stub.
 
 ## Frontend architecture
@@ -59,18 +68,18 @@ frontend/
                                                    # popover), SearchableSelect,
                                                    # UserAssignSelect, RequestDocuments,
                                                    # Icons, Layout, ModuleBoundary
-    Login.tsx, Dashboard.tsx, QARequests.tsx      # cross-cutting pages (not owned by
+    Login.tsx, Dashboard.tsx, QARequests/          # cross-cutting pages (not owned by
                                                    # one domain area)
     modules/
       functional/       Functional.tsx
       security/          SAST.tsx, DAST.tsx, Suppression.tsx
-      specialised-testing/ Automation.tsx, Performance.tsx
+      specialised-testing/ Performance.tsx
       governance/           SignOff.tsx, Approvals.tsx, Reports.tsx, Admin.tsx
 ```
 
 `src/App.tsx` loads each `modules/<area>/*` page with `React.lazy()` + `<Suspense>` — a normal
 Vite code-splitting boundary, not a network fetch to another deployed app. This still gives a
-real, measurable benefit (visiting `/sast` never downloads the Governance or Automation bundle),
+real, measurable benefit (visiting `/sast` never downloads the Governance or Performance bundle),
 and keeps the codebase organized by domain area exactly like before, but it's all one build:
 one `npm install`, one `npm run dev`, one `npm run build`, one Docker image, one deploy.
 
@@ -103,21 +112,22 @@ qualityops/
       main.py              # FastAPI app, router registration
       models.py            # SQLAlchemy models targeting Oracle
       schemas.py           # Pydantic request/response schemas
-      auth.py, deps.py     # JWT auth + RBAC dependency
+      auth.py, deps.py     # session auth + scoped authorization dependencies
       constants.py         # Roles, statuses, dropdown options (mirrors the CR doc)
       documents.py         # Shared multi-file upload/list/download helper (all modules)
       seed.py               # Demo data loader
       routers/               # One router per module (see coverage table above)
       uploads/                # Uploaded documents land here at runtime (gitignored)
     requirements.txt
-    .env.example
     Dockerfile
   frontend/
     package.json
     vite.config.ts
-    Dockerfile, nginx.conf.template   # nginx.conf itself kept only as a reference (see "Enable HTTPS")
+    Dockerfile, nginx.conf       # production SPA + same-origin TLS reverse proxy
     src/                    # see Frontend architecture above
   docker-compose.yml         # core API, isolated Document Portal API, frontend and Redis
+  docker-compose.static-ip.yml # stable nginx address for trusted-proxy deployments
+  .env.dev.example, .env.uat.example, .env.prod.example
   README.md
 ```
 
@@ -161,7 +171,7 @@ SQL
 ```
 
 Then set `DATABASE_URL=oracle+oracledb://qa_portal:qa_portal_pwd@localhost:1521/?service_name=FREEPDB1`
-(this is already the default in `backend/.env.example`). This Oracle container is deliberately
+in your local profile. This Oracle container is deliberately
 **not** part of `docker-compose.yml` — it's a one-time local dev prerequisite, not something to
 tear down/recreate alongside the app services.
 
@@ -177,9 +187,9 @@ python3 -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env            # shared local settings; edit DATABASE_URL / SECRET_KEY
-cp .env.dev.example .env.dev    # optional development-profile overrides
-export APP_ENV=dev              # selects backend/.env.dev
+cp ../.env.dev.example ../.env.dev
+# Edit ../.env.dev: DATABASE_URL and SECRET_KEY are required placeholders.
+export APP_ENV=dev              # selects ../.env.dev via the root-profile fallback
 
 alembic upgrade head             # creates or upgrades the schema
 DEMO_SEED_PASSWORD='<unique temporary password>' python -m app.seed
@@ -206,7 +216,10 @@ Profile names may contain letters, numbers, underscores, and hyphens.
 
 ```bash
 cd backend
-cp .env.uat.example .env.uat
+cp ../.env.uat.example ../.env.uat
+# Populate required database, secret, hostname, certificate and key settings.
+# One-time direct-host key provisioning (the generator refuses to overwrite):
+python -m app.generate_login_key login-private.pem
 APP_ENV=uat uvicorn app.main:app --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
 APP_ENV=uat alembic upgrade head
 ```
@@ -225,7 +238,7 @@ any configuration values or secrets.
 
 ### Logging modes
 
-Backend logging is controlled centrally from `backend/.env`:
+Backend logging is controlled by the active environment profile:
 
 ```dotenv
 DEEP_LOGGING=false
@@ -305,29 +318,35 @@ docker build -f backend/Dockerfile -t qualityops-backend backend
 docker build -f frontend/Dockerfile -t qualityops-frontend frontend
 ```
 
-The frontend image's nginx (`frontend/nginx.conf.template`, see the "Enable HTTPS" section below
-for why it's a template) reverse-proxies `/api/*` to a `backend` host same-origin, so the browser
-never talks to the API on a different origin and there's no CORS configuration needed anywhere.
-That proxy target assumes the two containers share a Docker network with the backend reachable at
-the hostname `backend` (true when run via `docker-compose.yml` below, or when deployed as two
-Services in the same Kubernetes namespace with the backend Service named `backend`). If your
-topology differs, either edit the `proxy_pass` target in `nginx.conf.template`, or skip the proxy
-entirely by rebuilding with `--build-arg VITE_API_BASE_URL=https://your-api-host` to bake in a
-direct API URL instead.
+The frontend image copies `frontend/nginx.conf`. Nginx serves the SPA over TLS, sends
+`/api/document-portal/*` to the isolated `document_portal` service, and sends the remaining
+`/api/*` traffic to `backend`. The browser therefore uses one origin and never receives a direct
+Python-service address. The three services must share a container network where those two service
+names resolve, as they do in the supplied Compose files. A different topology must provide an
+equivalent TLS reverse-proxy configuration and trusted-proxy address.
 
 ### Running everything together (docker-compose)
 
 ```bash
-# Existing/default environment
-docker compose up --build
+# Local development profile (still served through nginx TLS)
+cp .env.dev.example .env.dev
+# Populate DATABASE_URL, SECRET_KEY, certificate path, and login-key settings.
+# One-time Compose key provisioning (the generator refuses to overwrite):
+mkdir -p secrets
+chmod 700 secrets
+(cd backend && python -m app.generate_login_key ../secrets/login-private.pem)
+docker compose --env-file .env.dev up --build
 
-# Profile-specific deployment
-cp .env .env.uat
-# Set APP_ENV=uat and APP_ENV_FILE=.env.uat, then apply the safe values shown
-# in .env.uat.example and replace every UAT secret/connection value.
-docker compose --env-file .env.uat up --build -d
-# App:  http://localhost:8080
-# API:  http://localhost:8000
+# UAT/deployed profile. The static overlay gives nginx the exact address
+# configured in FORWARDED_ALLOW_IPS.
+cp .env.uat.example .env.uat
+# Replace every placeholder and review PORTAL_SUBNET before starting.
+docker compose -f docker-compose.yml -f docker-compose.static-ip.yml \
+  --env-file .env.uat up --build -d
+
+# Portal and same-origin API: https://localhost:8080
+# `backend` and `document_portal` are internal-only; no Python port is
+# published on the host.
 ```
 
 Each root profile file is a complete Compose environment and includes both
@@ -337,19 +356,15 @@ directly by the deployment environment continue to take precedence. Use
 `.env.dev.example`, `.env.uat.example`, and `.env.prod.example` as safe
 templates, and do not commit populated profile files containing secrets.
 
-Point `DATABASE_URL` at your Oracle instance via an env var or `.env` file next to
-`docker-compose.yml` (defaults to `host.docker.internal`, which reaches an Oracle container or
-host-installed Oracle from inside Docker on Mac/Windows; on Linux use the host's real IP or
-`--add-host`).
+Set `DATABASE_URL` explicitly in the selected profile; there is no database-host default. The
+hostname in that URL must be reachable from the backend containers. `localhost` inside a container
+means that container itself, not the Docker host or a separately running Oracle instance.
 
 The core backend runs 4 worker processes by default (`WEB_CONCURRENCY`, see `backend/Dockerfile`) and
-a `redis` service is included and wired up by default (`REDIS_URL`) -- required for cache
-correctness (dashboard summary + reference-data caching, see `backend/app/cache.py`) and for the
-one-time startup migration to run once per deployment instead of once per
-worker (see `backend/app/main.py`'s startup-lock comment) whenever more than one worker is
-running. The app still runs fine without Redis reachable -- caching and the startup lock both
-degrade to a no-op/permissive fallback -- but then each of the 4 workers keeps its own cache and
-the startup task can run up to 4 times.
+a `redis` service is included and wired up by default (`REDIS_URL`) for shared dashboard and
+reference-data caching across workers (see `backend/app/cache.py`). If Redis is unavailable, cache
+operations safely become misses; correctness does not depend on stale per-process caches. Startup
+file maintenance is coordinated separately with a lock on the shared upload filesystem.
 
 ### Production Oracle pool capacity
 
@@ -426,135 +441,39 @@ certs/
 └── qualityops.key
 ```
 
-The required-variable check in `docker-compose.yml` stops early with a clear configuration error
-if the directory setting is omitted. The
-same `qualityops-frontend` image can therefore be promoted unchanged between UAT and Production;
-certificates and private keys are never baked into or transferred with the image. Both paths below
-terminate TLS in this stack's own nginx (`frontend`) container. Pick based on how this server is
-reached:
+The required-variable check in `docker-compose.yml` stops early when the directory setting is
+omitted. The same frontend image can therefore be promoted unchanged; certificates and private
+keys are mounted at runtime and excluded from both source control and Docker build contexts.
 
-- **Have a real domain, and the server is reachable from the public internet on it?** Use
-  [Path A](#path-a--public-domain-lets-encrypt) -- a trusted, browser-recognized certificate that
-  renews itself automatically, no per-device setup for anyone visiting the app.
-- **Only have an IP address, no domain (yet), and/or the server is only reachable on a private
-  network (VPN/office LAN)?** Use [Path B](#path-b--ip-address--private-network-self-signed) --
-  Let's Encrypt cannot help here at all (it only ever validates domain ownership over the real
-  public internet, so a private/IP-only server can never qualify no matter what), but a private
-  certificate authority gets you real end-to-end TLS with a one-time trust step per device instead.
+For local localhost UAT only, the repository contains one certificate helper:
 
-#### Path A -- public domain (Let's Encrypt)
-
-1. **Point DNS at this host first.** The domain's A/AAAA record must already resolve to this
-   server's public IP, and ports **80** and **443** must be reachable from the internet on it --
-   Let's Encrypt validates ownership over the real internet, not just inside the Docker network.
-2. **Add two variables to the root `.env`** (next to `DATABASE_URL`, `SECRET_KEY`, etc.):
-   ```
-   DOMAIN_NAME=qa-portal.example.com
-   CERTBOT_EMAIL=you@example.com
-   ```
-   `CERTBOT_EMAIL` is only used by Let's Encrypt for expiry/security notices -- it's never shown
-   to app users.
-3. **Run the one-time bootstrap script**, before starting the rest of the stack:
-   ```bash
-   ./scripts/init-letsencrypt.sh
-   ```
-   This solves the classic nginx/Certbot chicken-and-egg problem: nginx won't start without a
-   certificate file to point at, but Certbot can't issue the first certificate until something is
-   already serving its HTTP challenge on port 80 -- so the script briefly gives nginx a throwaway
-   self-signed certificate just to get it running, requests the real one from Let's Encrypt against
-   that running nginx, then swaps it in and reloads. Safe to re-run if it fails partway through. Set
-   `CERTBOT_STAGING=1` in `.env` first to test against Let's Encrypt's staging environment (issues a
-   certificate your browser won't trust, but doesn't count against the real service's rate limits)
-   before doing a real run.
-4. **Bring up the rest of the stack** as usual: `docker compose up -d`. The app is now reachable at
-   `https://qa-portal.example.com`; plain `http://` requests to the same domain (port 80) are
-   redirected to HTTPS automatically. The pre-existing `http://localhost:8080` mapping still works
-   too, unchanged, for local/dev access without a domain.
-
-**Certificate renewal (Path A only):** the `certbot` service in `docker-compose.yml` checks every
-~12h and renews automatically once the certificate is within 30 days of expiring (Let's Encrypt
-certificates are valid 90 days). It does **not** reload nginx on its own, though -- nginx only
-picks up a renewed certificate file when told to. Add a host cron entry to reload it periodically
-(safe to run even when nothing renewed):
+```bash
+python3 scripts/generate-local-uat-tls.py
 ```
-0 3 * * 1 cd /path/to/qa-portal && docker compose exec frontend nginx -s reload
-```
-If you skip this, the certificate still renews on disk, but nginx keeps presenting the old one
-until it's next restarted/redeployed some other way -- which will eventually expire and start
-failing in browsers.
 
-#### Path B -- IP address / private network (self-signed)
+It creates or reuses `certs/qualityops-uat-ca.crt` and its private CA key, backs up an existing
+leaf pair, and generates `qualityops.crt`/`qualityops.key` for `localhost`, `127.0.0.1`, and `::1`.
+Trust only `qualityops-uat-ca.crt` on the local test device; never distribute either `.key` file.
+For a real DNS name or network IP, obtain a certificate with the correct subject alternative name
+from the organization's certificate process and place the resulting files under the configured
+host directory using the two required filenames.
 
-`scripts/init-selfsigned.sh` generates a small private Certificate Authority (once) plus a
-certificate for `DOMAIN_NAME` signed by it -- deliberately not a single bare self-signed cert.
-The difference matters: you install/trust the **CA** once on each device that needs to reach this
-server, and every certificate that CA ever issues (this one, and any future rotation) is then
-trusted automatically with no more warnings -- a bare self-signed cert would need every device to
-individually click through (or bypass) a warning, and re-approve it again on every rotation.
-
-1. **Add `DOMAIN_NAME` to the root `.env`** -- for this path it's the IP address or internal
-   hostname you and your team will actually type into a browser, e.g.:
-   ```
-   DOMAIN_NAME=192.168.1.50
-   ```
-   `CERTBOT_EMAIL` is not needed for this path (nothing here talks to Let's Encrypt at all).
-2. **Run the one-time bootstrap script**:
-   ```bash
-   ./scripts/init-selfsigned.sh
-   ```
-   Creates the local CA and a certificate for `DOMAIN_NAME` (valid 10 years by default -- override
-   with `SELFSIGNED_DAYS` in `.env`; self-signed/private-CA certificates aren't subject to the
-   shorter validity windows public CA root programs enforce, since nothing here relies on an OS/
-   browser trusting it out of the box), starts/reloads nginx, and saves the CA certificate to
-   `./certs/qa-portal-local-ca.crt`. Safe to re-run -- it reuses the existing CA if one is already
-   there, so previously-trusted devices stay trusted; only the leaf certificate regenerates.
-3. **Install `./certs/qa-portal-local-ca.crt` on every device** that will access the app, so
-   browsers stop showing a trust warning:
-   - **Windows:** double-click the `.crt` file → *Install Certificate* → *Local Machine* →
-     *Place all certificates in the following store* → *Trusted Root Certification Authorities*.
-   - **macOS:** double-click the `.crt` file to open it in *Keychain Access*, then in the
-     certificate's *Get Info* panel set *When using this certificate* → *Always Trust*.
-   - **Linux (Debian/Ubuntu):** `sudo cp qa-portal-local-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`.
-   - **Firefox** (keeps its own trust store separate from the OS on every platform):
-     Settings → Privacy & Security → *View Certificates* → *Authorities* tab → *Import*.
-   - **iOS/Android:** install as a profile/CA certificate via device Settings, then (iOS only) also
-     enable it under Settings → General → About → Certificate Trust Settings.
-
-   Until a device has done this, `https://192.168.1.50` still works (traffic is genuinely
-   encrypted), it just shows an interstitial trust warning first.
-4. **Bring up the rest of the stack**: `docker compose up -d`. Plain `http://192.168.1.50`
-   redirects to HTTPS automatically; `http://localhost:8080` still works unchanged.
-
-**No automatic renewal on this path** -- there's no ACME/Certbot involved, so nothing renews this
-certificate on a schedule. Re-run `./scripts/init-selfsigned.sh` before it expires (10 years by
-default) to issue a new leaf certificate off the same trusted CA; no device needs to re-trust
-anything when you do.
-
-#### Neither path -- HTTPS terminated elsewhere, or not wanted at all
-
-If TLS is (or will be) terminated outside this stack entirely -- an external load balancer or
-ingress that already handles HTTPS and talks plain HTTP to this container -- skip both paths
-above; `frontend/nginx.conf.template`'s port-80 behavior is a hard redirect to HTTPS, which would
-conflict with an external terminator forwarding plain HTTP. See `frontend/nginx.conf` (kept as a
-reference, no longer built by default) for a plain HTTP-only config to point the Dockerfile back
-at instead, and just make sure your external terminator forwards `X-Forwarded-Proto` (it already
-does in most LB/ingress setups) -- the backend and frontend nginx config both already read/forward
-that header where relevant.
+This repository does not contain certificate-issuance/renewal automation, an HTTP listener, or an
+HTTP-to-HTTPS redirect. Nginx listens only on container port 443, mapped by Compose to host port
+8080, so the Compose URL is `https://<host>:8080`. Certificate issuance and renewal are operator
+responsibilities; after replacing a mounted certificate, recreate or reload the frontend container.
+If an external load balancer terminates public TLS, it must either re-encrypt to this nginx TLS
+listener or the deployment must supply and review a different frontend configuration. The Python
+services must remain private, and their `FORWARDED_ALLOW_IPS` value must trust only the actual
+nginx/reverse-proxy peer.
 
 ### Verification status
 
-This project was authored and Docker/Compose files written in a sandboxed environment with
-**no Docker daemon and no npm registry access** (`docker` isn't installed there;
-`npm view react version` returned `403 Forbidden`). As a result:
-
-- ✅ Verified in-sandbox: `tsc --noEmit` passes cleanly against the full `src/` tree — source-
-  level TypeScript correctness, including every import path rewritten during the monorepo →
-  single-app consolidation, is confirmed.
-- ⚠️ **Not verified anywhere**: an actual `npm install` against a real npm registry, `vite
-  build` producing a real `dist/`, and any `docker build`/`docker compose up` execution. These
-  were written by hand following standard Vite/Docker/nginx patterns, but **please run a real
-  `npm install` + `npm run build` and a `docker compose up --build` smoke test on your own
-  machine** before relying on this in production.
+Current verification includes the complete backend pytest suite under the pinned dependencies,
+backend compile/import checks, Python dependency auditing, frontend TypeScript and Node tests, the
+Vite production build, and base/static-overlay `docker compose config` validation. A real image
+build and live Oracle-backed Compose smoke test were not run here and remain required in the target
+deployment environment before promotion.
 
 ## Authentication & the Admin section
 
@@ -564,7 +483,7 @@ Every user account has a `login_type` of either **Standard** or **LDAP**:
   username/password way.
 - **LDAP** accounts have no local password at all — every login attempt is verified live
   against your directory server (`app/auth.py::ldap_authenticate`). Configure the connection
-  via the `LDAP_*` variables in `backend/.env.example` (two binding strategies are supported:
+  via `LDAP_*` variables in the selected deployment profile (two binding strategies are supported:
   search-then-bind with a service account, or a direct DN template). Seeded demo users are all
   Standard; there's no seeded LDAP account since it depends on a real directory to test against.
 
@@ -617,8 +536,8 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
   containers; see `backend/MIGRATIONS.md`.
 - Testcase/repository and execution lists use primary-key cursor pagination;
   cycle candidates are evaluated with SQL `NOT EXISTS` and are loaded only
-  when the Add Test Cases dialog opens. Revision `20260815_0001` installs the
-  supporting Oracle indexes and must be applied with `alembic upgrade head`.
+  when the Add Test Cases dialog opens. Apply every versioned schema/index
+  change with `alembic upgrade head`; do not target or stamp an undocumented revision.
 - Large cycle additions (more than 500 rows), testcase Excel imports, and
   repository/lifecycle Excel exports run as background jobs. Job status and
   generated artifacts live under `<configured upload root>/.jobs`; therefore
@@ -627,15 +546,15 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
   reverse-proxy networks. Login and action audit records will then store the
   original client from `X-Forwarded-For` instead of the proxy's address. The
   supplied nginx configuration already forwards `X-Real-IP` and
-  `X-Forwarded-For` (and, once HTTPS is enabled per the section above,
-  `X-Forwarded-Proto`, useful if you later add HTTPS-only logic on the backend).
+  `X-Forwarded-For` and sets `X-Forwarded-Proto`; Uvicorn accepts that scheme only from
+  `FORWARDED_ALLOW_IPS`, allowing the deployed backend's HTTPS guard to reject spoofed traffic.
 - Add MFA at the identity-provider layer for LDAP/AD-backed logins, per the non-functional
   requirements (5.1) — this app only performs the LDAP bind, not step-up/MFA.
 - Supporting documents are uploaded (multiple files per request, every module) and stored under
   the deployment-controlled upload root (see `app/documents.py`). Docker always writes to
   `/data/qualityops/uploads`. Set `UPLOAD_STORAGE_HOST_PATH=/absolute/host/or/nfs/path` in the
-  root Compose `.env` to bind that container directory to a host/NFS folder; otherwise Docker
-  uses the `qa_portal_uploads` named volume. Recreate the backend container after changing the
+  selected Compose profile to bind that container directory to a host/NFS folder; the Compose
+  default is the repository-local `./storage/uploads` bind path. Recreate the backend container after changing the
   host path. The upload location cannot be changed from the application UI.
 - The authenticated **Document Portal** runs in its own `document_portal` API container and is
   reverse-proxied at the same `/api/document-portal` URL. It has its own worker pool, log volume,
@@ -644,7 +563,8 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
   upload disk. Its Oracle pool is separately capped by
   `DOCUMENT_PORTAL_DB_POOL_SIZE`/`DOCUMENT_PORTAL_DB_MAX_OVERFLOW`, so upload sessions cannot
   exhaust core workflow connections. Set `DOCUMENT_PORTAL_STORAGE_HOST_PATH=/absolute/dedicated/disk-or-nfs-path` in
-  the root Compose `.env` for production; otherwise Compose creates `qa_portal_documents`.
+  the selected Compose profile for production; the default is the repository-local
+  `./storage/document-portal` bind path.
   The service stores repository files beneath that mount's `repository/` folder and temporary
   multipart data beneath `work/`. Before the first isolated deployment, copy existing files from
   the old `<UPLOAD_STORAGE_ROOT>/document-portal` location into `repository/`; do not delete the
@@ -652,15 +572,18 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
   nested folders, uploads (including uploaded folder hierarchy), search, downloads/ZIP, rename
   and move, and intentionally exposes no delete operation.
 - Set `SECRET_KEY` to a long random value via environment variable/secrets manager, never
-  the placeholder in `.env.example`.
+  leave the empty placeholder from the root profile examples.
 - Tune `pool_size`/`max_overflow` in `app/database.py` to your Oracle session limits and
   expected concurrent user count (NFR 5.2).
 
 ## API overview
 
-All endpoints are under `/api/*` and require a bearer token from `POST /api/auth/login`
-except login itself. Full interactive documentation (request/response schemas, try-it-out)
-is auto-generated by FastAPI at `/docs` once the backend is running.
+All protected endpoints are under `/api/*` and use the opaque HttpOnly session cookie issued by
+`POST /api/auth/login`; the browser sends it with `credentials: include`, and mutating requests
+also send the CSRF cookie value in `X-CSRF-Token`. No authentication credential is returned to or
+stored by JavaScript; authentication remains entirely cookie-backed. Interactive FastAPI
+documentation is available at `/docs` only in development; UAT and
+production disable the docs, ReDoc, and OpenAPI routes.
 
 Key endpoint groups:
 
@@ -675,7 +598,7 @@ Key endpoint groups:
   (+ `/resolve`), `/history`, `/export`, `/documents`
 - `/api/suppressions` — CRUD + `/sm-decision`, `/dept-head-decision`,
   `/security-team-decision`, `/history`, `/export`, `/documents`
-- `/api/automation-requests`, `/api/performance-requests` — CRUD + decision/lifecycle actions,
+- `/api/performance-requests` — CRUD + decision/lifecycle actions,
   `/checklist`, `/history`, `/export`, `/documents`
 - `/api/signoffs` — CRUD + `/issue`, `/history`, `/export`, `/documents`
 - `/api/approvals`, `/api/approvals/pending-mine` — cross-module audit/decision feed
@@ -692,40 +615,29 @@ Key endpoint groups:
 - Ageing in the 3W dashboard is computed from `updated_at` timestamps (a reasonable proxy
   for "since when it has been pending"); wire in SLA thresholds/escalation matrices per your
   bank's policy if you need automatic escalation emails.
-- RBAC is enforced per-endpoint (who can perform which action); if you need row-level
-  visibility restrictions (e.g., a Requester should only see their own department's
-  requests), add query filters in the relevant router's `list_*` functions.
-- See [Verification status](#verification-status) above: `npm install`, `vite build`, and
-  `docker build`/`docker compose up` have not been executed in the authoring environment and
-  should be smoke-tested before relying on this in production.
+- See [Verification status](#verification-status) above: run an Oracle-backed container smoke
+  test in the target environment before promotion.
 
-### Active-session token renewal
+### Active sessions
 
-The browser calls `POST /api/auth/renew` shortly before the access token expires
-when there has been trusted keyboard, pointer, or scroll activity within the
-last minute. A visible-tab timer checks every 15 seconds; API polling alone
-does not keep a session alive. Renewal is also checked before business API
-requests. Concurrent requests share one renewal, and a late renewal response
-cannot restore a token cleared by logout or replaced by a new login.
+Login creates an opaque random session secret and a separate CSRF secret. Only SHA-256 hashes are
+stored in `qap_auth_sessions`. The session secret is sent in a host-only HttpOnly, SameSite=Lax
+cookie; JavaScript can read only the companion CSRF cookie. UAT and production use Secure
+`__Host-` cookie names. Every non-safe request must provide the matching `X-CSRF-Token` value, and
+browser-identified cross-site mutations are rejected.
 
-- `ACCESS_TOKEN_EXPIRE_MINUTES` controls each access token's lifetime (default 30).
-- `SESSION_MAX_MINUTES` controls the absolute session lifetime from login
-  (default 480 / eight hours). This signed deadline is preserved at renewal.
-- Renewal requires an unexpired, correctly signed access token and an active
-  database account, and uses the user's current roles. Expired tokens require
-  another sign-in; there is no long-lived refresh credential stored in the browser.
-- After activity stops, renewal stops and the remaining access-token lifetime
-  runs out. This is not a separate exact idle-timeout counter. A sleeping tab
-  that resumes after expiry requires sign-in again.
-- Session credentials remain in sessionStorage. This implementation uses the
-  existing stateless bearer model: logout clears the browser credential but does
-  not revoke a previously copied bearer token on the server. Such tokens remain
-  usable until their expiry and cannot renew beyond the signed session deadline.
-- Deploy both frontend and backend for renewal to work. No database migration
-  is required. HTTPS remains required for deployed bearer-token authentication.
+- `SESSION_IDLE_MINUTES` is the server-enforced inactivity limit (default 30 minutes).
+- `SESSION_MAX_MINUTES` is the absolute lifetime from login (default 480 minutes/eight hours).
+- Authenticated requests refresh `last_seen_at` at most once per minute. `POST /api/auth/renew`
+  validates the same cookie session and returns current identity data; it does not issue a browser
+  credential, replace the session cookie, or extend the absolute deadline.
+- Logout revokes the server-side row and clears both cookies. A non-secret local-storage marker
+  synchronizes logout across tabs; credentials are never placed in localStorage or sessionStorage.
+- Disabling a user or changing live role assignments takes effect through the database-backed
+  identity checks. Expired and revoked sessions require another sign-in.
 
-Browser renewal regression checks: run `node tests/token-renewal.cjs` from
-`frontend`. Backend renewal checks are in `backend/tests/test_token_renewal.py`.
+Cookie/CSRF browser regression checks are in `frontend/tests/token-renewal.cjs`; backend session
+coverage is in `backend/tests/test_session_security.py`.
 
 
 ### Login payload encryption

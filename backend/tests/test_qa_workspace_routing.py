@@ -606,6 +606,95 @@ def test_test_management_candidates_come_from_active_workspace_not_department():
     assert invalid.value.status_code == 400
 
 
+def test_testcase_approval_candidates_follow_origin_workspace_and_maker_checker():
+    db = _session()
+    owner_workspace = models.QAWorkspace(workspace_key="OWNER", name="Owner Workspace", is_active=True)
+    viewer_workspace = models.QAWorkspace(workspace_key="VIEWER", name="Viewer Workspace", is_active=True)
+    author = models.User(
+        username="case-author", full_name="Case Author", hashed_password="x", is_active=True,
+        role_assignments=[models.UserRole(role="QA_ENGINEER")],
+    )
+    submitter = models.User(
+        username="case-submitter", full_name="Case Submitter", hashed_password="x", is_active=True,
+        role_assignments=[models.UserRole(role="QA_ENGINEER")],
+    )
+    eligible_reviewer = models.User(
+        username="eligible-reviewer", full_name="Eligible Reviewer", hashed_password="x", is_active=True,
+        role_assignments=[models.UserRole(role="QA_ENGINEER")],
+    )
+    stage_one_reviewer = models.User(
+        username="stage-one-reviewer", full_name="Stage One Reviewer", hashed_password="x", is_active=True,
+        role_assignments=[models.UserRole(role="QA_LEAD")],
+    )
+    eligible_lead = models.User(
+        username="eligible-lead", full_name="Eligible Lead", hashed_password="x", is_active=True,
+        role_assignments=[models.UserRole(role="QA_LEAD")],
+    )
+    wrong_workspace_reviewer = models.User(
+        username="viewer-reviewer", full_name="Viewer Reviewer", hashed_password="x", is_active=True,
+        role_assignments=[models.UserRole(role="QA_ENGINEER")],
+    )
+    db.add_all([
+        owner_workspace, viewer_workspace, author, submitter, eligible_reviewer,
+        stage_one_reviewer, eligible_lead, wrong_workspace_reviewer,
+    ])
+    db.flush()
+    project = models.TestProject(
+        project_key="SHARED-APPROVALS", name="Shared approval project", is_active=True,
+        qa_workspace_id=owner_workspace.id, owner_id=author.id, created_by_id=author.id,
+    )
+    db.add(project)
+    db.flush()
+    db.add(models.TestProjectViewGrant(project_id=project.id, workspace_id=viewer_workspace.id))
+    for user in (author, submitter, eligible_reviewer, stage_one_reviewer, eligible_lead):
+        db.add(models.QAWorkspaceMember(
+            workspace_id=owner_workspace.id, user_id=user.id,
+            role="WORKSPACE_MEMBER", is_active=True,
+        ))
+    db.add(models.QAWorkspaceMember(
+        workspace_id=viewer_workspace.id, user_id=wrong_workspace_reviewer.id,
+        role="WORKSPACE_MEMBER", is_active=True,
+    ))
+    case = models.TestCase(
+        test_case_key="SHARED-TC-1", project=project,
+        origin_workspace_id=owner_workspace.id, created_by_id=author.id,
+    )
+    draft = models.TestCaseVersion(
+        test_case=case, status="Recommendation Pending", author_id=author.id,
+        submitted_by_id=submitter.id, version_major=1, version_minor=0,
+    )
+    db.add_all([case, draft])
+    db.flush()
+    case.current_draft_version_id = draft.id
+    db.commit()
+    db.refresh(wrong_workspace_reviewer)
+
+    # The caller is viewing the shared project from another workspace. The
+    # displayed group must nevertheless come from the testcase's permanent
+    # creating workspace and exclude people barred by maker-checker.
+    wrong_workspace_reviewer.active_qa_workspace_id = viewer_workspace.id
+    set_current_workspace_id(viewer_workspace.id)
+    set_current_workspace_scope_ids({viewer_workspace.id})
+    try:
+        stage_one = list_eligible_test_management_users(
+            test_case_id=case.id, roles="QA_ENGINEER", db=db,
+            current_user=wrong_workspace_reviewer,
+        )
+        assert {user.username for user in stage_one} == {"eligible-reviewer"}
+
+        draft.status = "QA Lead Approval Pending"
+        draft.reviewed_by_id = stage_one_reviewer.id
+        db.commit()
+        stage_two = list_eligible_test_management_users(
+            test_case_id=case.id, roles="QA_LEAD,CHIEF_MANAGER_QA,AGM_QA", db=db,
+            current_user=wrong_workspace_reviewer,
+        )
+        assert {user.username for user in stage_two} == {"eligible-lead"}
+    finally:
+        set_current_workspace_id(None)
+        set_current_workspace_scope_ids(set())
+
+
 def test_legacy_role_rows_serialize_as_one_workspace_membership():
     db = _session()
     workspace = models.QAWorkspace(workspace_key="ONE", name="One", is_active=True)

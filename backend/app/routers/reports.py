@@ -2,7 +2,7 @@ import datetime
 from collections import Counter, defaultdict
 from types import SimpleNamespace
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import case, false, func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -29,13 +29,18 @@ _GATEWAY_PRIVATE_STATUSES = (GatewayStatus.DRAFT, GatewayStatus.CANCELLED)
 
 
 def _period_bounds(date_from: str | None, date_to: str | None):
-    start = datetime.datetime.fromisoformat(date_from.replace("Z", "+00:00")) if date_from else None
-    end = datetime.datetime.fromisoformat(date_to.replace("Z", "+00:00")) if date_to else None
+    try:
+        start = datetime.datetime.fromisoformat(date_from.replace("Z", "+00:00")) if date_from else None
+        end = datetime.datetime.fromisoformat(date_to.replace("Z", "+00:00")) if date_to else None
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Invalid date filter. Use ISO date/time format.") from exc
     # Database datetimes are stored as naive local values, as in dashboard.py.
     if start and start.tzinfo:
         start = start.astimezone(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).replace(tzinfo=None)
     if end and end.tzinfo:
         end = end.astimezone(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).replace(tzinfo=None)
+    if start and end and start > end:
+        raise HTTPException(400, "date_from must be earlier than or equal to date_to.")
     return start, end
 
 

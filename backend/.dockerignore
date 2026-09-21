@@ -1,13 +1,28 @@
+# Send only build inputs to the container builder.  In particular, never put
+# local uploads, application logs, populated environment files, or private
+# login keys in a build context: a remote builder can retain the context even
+# when the Dockerfile never copies a given file into the final layer.
+**
+
+!requirements.txt
+!alembic.ini
+!alembic/
+!alembic/**
+!app/
+!app/**
+
+# Runtime/user data lives below app/ in direct-host deployments.  `COPY app`
+# must not turn that data into an image layer.
+app/uploads/
+app/**/__pycache__/
+app/**/*.py[cod]
+venv/
+logs/
+uploads/
 .env
 .env.*
-!.env.example
-venv/
-__pycache__/
-**/__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.DS_Store
-logs/
-app/uploads/
-alembic/__pycache__/
+.secrets/
+secrets/
+*.pem
+*.key
+

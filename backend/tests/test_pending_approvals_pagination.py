@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session
 from app import models
 from app.constants import Role
 from app.routers.pending_approvals import (
+    _application_master_items,
     _test_case_items,
     _paginate_pending_items,
     _sm_dept_head_items,
+    _suppression_items,
     count_pending_approvals,
 )
 from app.workspace_service import (
@@ -196,6 +198,101 @@ class PendingApprovalsPaginationTests(unittest.TestCase):
                     count_pending_approvals(db=db, current_user=department_head),
                     {"count": 1},
                 )
+            finally:
+                set_current_workspace_id(None)
+                set_current_workspace_scope_ids(set())
+
+    def test_second_stage_queue_excludes_the_same_sm_approver(self):
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine)
+        with Session(engine) as db:
+            workspace = models.QAWorkspace(workspace_key="QA", name="QA", is_active=True)
+            requester = models.User(
+                username="requester", full_name="Requester", hashed_password="x", is_active=True,
+                department_assignments=[models.UserDepartment(department="Operations")],
+                role_assignments=[models.UserRole(role=Role.REQUESTER)],
+            )
+            approver = models.User(
+                username="dual-approver", full_name="Dual Approver", hashed_password="x", is_active=True,
+                department_assignments=[models.UserDepartment(department="Operations")],
+                role_assignments=[
+                    models.UserRole(role=Role.SM),
+                    models.UserRole(role=Role.DEPARTMENT_HEAD_CM),
+                ],
+            )
+            gateway = models.QARequest(
+                request_id="TQA-REQ-MAKER", application_name="APP", department="Operations",
+                requester=requester, qa_workspace=workspace, status="RAISED",
+            )
+            functional = models.FunctionalRequest(
+                request_id="TQA-FUNC-MAKER", qa_request=gateway, requester=requester,
+                status="DEPARTMENT_HEAD_APPROVAL_PENDING",
+            )
+            db.add_all([workspace, requester, approver, gateway, functional])
+            db.flush()
+            db.add_all([
+                models.QAWorkspaceMember(
+                    workspace_id=workspace.id, user_id=approver.id,
+                    role="WORKSPACE_MEMBER", is_active=True,
+                ),
+                models.ApprovalAction(
+                    entity_type="FUNCTIONAL_REQUEST", entity_id=functional.id,
+                    step_name="SM Approval", decision="Approved", actor_id=approver.id,
+                ),
+            ])
+            db.commit()
+            approver.active_qa_workspace_id = workspace.id
+            set_current_workspace_id(workspace.id)
+            set_current_workspace_scope_ids({workspace.id})
+            try:
+                self.assertEqual(_sm_dept_head_items(db, approver), [])
+                self.assertEqual(count_pending_approvals(db=db, current_user=approver), {"count": 0})
+            finally:
+                set_current_workspace_id(None)
+                set_current_workspace_scope_ids(set())
+
+    def test_self_approval_items_are_absent_from_application_and_security_queues(self):
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine)
+        with Session(engine) as db:
+            workspace = models.QAWorkspace(workspace_key="QA", name="QA", is_active=True)
+            actor = models.User(
+                username="dual-role", full_name="Dual Role", hashed_password="x", is_active=True,
+                department_assignments=[models.UserDepartment(department="Operations")],
+                role_assignments=[
+                    models.UserRole(role=Role.REQUESTER),
+                    models.UserRole(role=Role.APPLICATION_OWNER),
+                    models.UserRole(role=Role.SECURITY_ANALYST),
+                ],
+            )
+            gateway = models.QARequest(
+                request_id="TQA-REQ-SELF", application_name="SELF APP", department="Operations",
+                requester=actor, qa_workspace=workspace, status="SUBMITTED",
+            )
+            application = models.ApplicationMaster(
+                name="SELF APP", department="Operations", status="PENDING_APP_OWNER",
+                requested_by=actor, qa_request=gateway,
+            )
+            gateway.application_master = application
+            suppression = models.SuppressionRequest(
+                suppression_id="TQA-SUP-SELF", application_name="SELF APP",
+                department="Operations", qa_workspace=workspace,
+                created_by_id=actor.id, status="SECURITY_TEAM_VERIFICATION",
+            )
+            db.add_all([workspace, actor, gateway, application, suppression])
+            db.flush()
+            db.add(models.QAWorkspaceMember(
+                workspace_id=workspace.id, user_id=actor.id,
+                role="WORKSPACE_MEMBER", is_active=True,
+            ))
+            db.commit()
+            actor.active_qa_workspace_id = workspace.id
+            set_current_workspace_id(workspace.id)
+            set_current_workspace_scope_ids({workspace.id})
+            try:
+                self.assertEqual(_application_master_items(db, actor), [])
+                self.assertEqual(_suppression_items(db, actor), [])
+                self.assertEqual(count_pending_approvals(db=db, current_user=actor), {"count": 0})
             finally:
                 set_current_workspace_id(None)
                 set_current_workspace_scope_ids(set())

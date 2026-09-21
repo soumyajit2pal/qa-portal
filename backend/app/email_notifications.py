@@ -922,7 +922,9 @@ def _notification_route(db, action, target):
             if workspace and inherited_workspace_access_mode(db, user, workspace) == 'PARENT_VIEWER':
                 continue
             if isinstance(target, models.TestCycle):
-                if not set(user.roles).intersection({Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA}):
+                if not set(user.roles).intersection({
+                    Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+                }):
                     continue
             if isinstance(target, models.TestExecution) and Role.QA_ENGINEER not in user.roles:
                 continue

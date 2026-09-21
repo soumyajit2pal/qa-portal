@@ -672,6 +672,7 @@ def assign_for_input(req_id: int, payload: schemas.QARequestDelegationCreate,
            .one_or_none())
     if not obj:
         raise HTTPException(404, "QA Request not found")
+    _require_gateway_visibility(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can delegate this request")
     if obj.status != GatewayStatus.DRAFT:
@@ -720,6 +721,7 @@ def return_delegated_request(req_id: int, payload: schemas.QARequestDelegationCl
            .one_or_none())
     if not obj:
         raise HTTPException(404, "QA Request not found")
+    _require_gateway_visibility(db, obj, current_user)
     delegation = obj.active_delegation
     if not delegation or delegation.assigned_to_id != current_user.id:
         raise HTTPException(403, "Only the currently assigned user can return this request")
@@ -753,6 +755,7 @@ def recall_delegated_request(req_id: int, payload: schemas.QARequestDelegationCl
            .one_or_none())
     if not obj:
         raise HTTPException(404, "QA Request not found")
+    _require_gateway_visibility(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can recall this delegation")
     delegation = obj.active_delegation
@@ -839,6 +842,23 @@ def _active_child_delegation(db: Session, target_type: str, target_id: int, *, l
     return query.one_or_none()
 
 
+def _require_child_delegation_visibility(
+    db: Session, target, current_user: models.User, *, delegated: bool = False,
+) -> None:
+    """Keep child hand-offs inside the selected workspace and org scope."""
+    gateway = target.qa_request
+    require_department_visibility(
+        current_user, target.department,
+        requester_id=target.requester_id, delegated=delegated,
+        entity_workspace_id=gateway.qa_workspace_id if gateway else None,
+    )
+    require_department_unit_visibility(
+        db, current_user, target.department,
+        gateway.department_unit_id if gateway else None,
+        requester_id=target.requester_id, delegated=delegated,
+    )
+
+
 def _log_child_delegation(db: Session, entity_type: str, entity_id: int,
                           user: models.User, decision: str, comments: str) -> None:
     db.add(models.ApprovalAction(
@@ -861,6 +881,7 @@ def assign_child_for_input(qa_request_id: int, target_type: str, target_id: int,
     normalized, target, requester_statuses, audit_entity_type = _child_delegation_target(
         db, qa_request_id, target_type, target_id, lock=True,
     )
+    _require_child_delegation_visibility(db, target, current_user)
     if target.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can delegate this request")
     if target.status not in requester_statuses:
@@ -914,6 +935,7 @@ def return_child_delegation(qa_request_id: int, target_type: str, target_id: int
     delegation = _active_child_delegation(db, normalized, target.id, lock=True)
     if not delegation or delegation.assigned_to_id != current_user.id:
         raise HTTPException(403, "Only the currently assigned user can return this request")
+    _require_child_delegation_visibility(db, target, current_user, delegated=True)
     comments = (payload.comments or "").strip()
     if not comments:
         raise HTTPException(400, "Return comments are required")
@@ -939,6 +961,7 @@ def recall_child_delegation(qa_request_id: int, target_type: str, target_id: int
     normalized, target, _, audit_entity_type = _child_delegation_target(
         db, qa_request_id, target_type, target_id, lock=True,
     )
+    _require_child_delegation_visibility(db, target, current_user)
     if target.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can recall this delegation")
     delegation = _active_child_delegation(db, normalized, target.id, lock=True)
@@ -1749,7 +1772,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
 
 @router.get("/{req_id}/history", response_model=List[schemas.ApprovalActionOut])
 def request_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.QARequest).get(req_id)
+    obj = db.get(models.QARequest, req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, obj, current_user)
@@ -1767,7 +1790,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
     Performance) has its own, separate export covering its own full
     workflow -- this one only covers the gateway's own short Draft ->
     Submitted -> Raised lifecycle."""
-    obj = db.query(models.QARequest).get(req_id)
+    obj = db.get(models.QARequest, req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, obj, current_user)
@@ -1816,7 +1839,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
                      .order_by(models.ApprovalAction.created_at).all())
     history = []
     for h in history_rows:
-        actor = db.query(models.User).get(h.actor_id) if h.actor_id else None
+        actor = db.get(models.User, h.actor_id) if h.actor_id else None
         history.append((h.step_name or "—", h.decision or "—", actor.full_name if actor else "—",
                          h.actor_role or "—", h.comments or "—",
                          h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
@@ -1846,7 +1869,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
 # fixed checklist index, then promoted by submit_request above.
 def _draft_request_for_evidence(db: Session, req_id: int, current_user: models.User,
                                 require_editable: bool = False):
-    req = db.query(models.QARequest).get(req_id)
+    req = db.get(models.QARequest, req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, req, current_user)
@@ -1946,7 +1969,7 @@ def delete_draft_checklist_evidence(req_id: int, kind: str, item_index: int, doc
 
 @router.get("/{req_id}/documents", response_model=List[schemas.QARequestDocumentOut])
 def list_documents(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    req = db.query(models.QARequest).get(req_id)
+    req = db.get(models.QARequest, req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, req, current_user)
@@ -1971,9 +1994,10 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
     to widen this to the way the linked Functional/SAST/DAST/Performance
     requests' own upload endpoints do -- just the request's own requester
     (or an admin)."""
-    req = db.query(models.QARequest).get(req_id)
+    req = db.get(models.QARequest, req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
+    _require_gateway_visibility(db, req, current_user)
     can_upload = (current_user.has_role(Role.ADMIN)
                   or _is_active_delegate(req, current_user)
                   or (req.requester_id == current_user.id and not req.active_delegation))
@@ -2029,7 +2053,7 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
 @router.get("/{req_id}/documents/{doc_id}/download")
 def download_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
-    req = db.query(models.QARequest).get(req_id)
+    req = db.get(models.QARequest, req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, req, current_user)
@@ -2051,7 +2075,7 @@ def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
     # can't call doc_store.delete_document() -- only reuses doc_store's
     # can_delete_document() for the permission check, which is duck-typed
     # (just needs .uploaded_by_id) and applies here unchanged.
-    req = db.query(models.QARequest).get(req_id)
+    req = db.get(models.QARequest, req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
     if req.active_delegation and req.requester_id == current_user.id and not current_user.has_role(Role.ADMIN):

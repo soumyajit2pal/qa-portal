@@ -9,8 +9,8 @@ from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import (
     get_workflow_user as get_current_user, require_workflow_roles as require_roles, dashboard_department_scope,
-    resolve_entity_department, resolve_entity_workspace_id, require_entity_workspace_visibility,
-    require_department_visibility, viewable_project_ids, active_qa_workspace_scope_ids,
+    resolve_entity_department, require_entity_workspace_visibility,
+    require_department_visibility, viewable_project_ids,
 )
 from .. import documents as doc_store
 from ..constants import GatewayStatus, Role
@@ -24,16 +24,16 @@ def _resolve_request_ref(db: Session, entity_type: str, entity_id: int) -> Optio
     Workflow Log instead of the raw internal entity_id. Returns None if the
     underlying record no longer exists."""
     if entity_type == "QA_REQUEST":
-        obj = db.query(models.QARequest).get(entity_id)
+        obj = db.get(models.QARequest, entity_id)
         return obj.request_id if obj else None
     if entity_type == "FUNCTIONAL_REQUEST":
-        obj = db.query(models.FunctionalRequest).get(entity_id)
+        obj = db.get(models.FunctionalRequest, entity_id)
         return obj.request_id if obj else None
     if entity_type == "SAST":
-        obj = db.query(models.SASTRequest).get(entity_id)
+        obj = db.get(models.SASTRequest, entity_id)
         return obj.request_id if obj else None
     if entity_type == "DAST":
-        obj = db.query(models.DASTRequest).get(entity_id)
+        obj = db.get(models.DASTRequest, entity_id)
         return obj.request_id if obj else None
     if entity_type == "SAST_DAST":
         # Legacy rows logged before SAST/DAST were split into their own
@@ -41,22 +41,22 @@ def _resolve_request_ref(db: Session, entity_type: str, entity_id: int) -> Optio
         # routers/sast_dast.py::_legacy_history_rows) -- entity_id here may
         # belong to either table, so this is a best-effort lookup only, kept
         # for rows written before the split.
-        sast = db.query(models.SASTRequest).get(entity_id)
+        sast = db.get(models.SASTRequest, entity_id)
         if sast:
             return sast.request_id
-        dast = db.query(models.DASTRequest).get(entity_id)
+        dast = db.get(models.DASTRequest, entity_id)
         return dast.request_id if dast else None
     if entity_type == "PERFORMANCE":
-        obj = db.query(models.PerformanceRequest).get(entity_id)
+        obj = db.get(models.PerformanceRequest, entity_id)
         return obj.request_id if obj else None
     if entity_type == "SUPPRESSION":
-        obj = db.query(models.SuppressionRequest).get(entity_id)
+        obj = db.get(models.SuppressionRequest, entity_id)
         return obj.suppression_id if obj else None
     if entity_type == "SIGNOFF":
-        obj = db.query(models.QASignOff).get(entity_id)
+        obj = db.get(models.QASignOff, entity_id)
         return obj.certificate_id if obj else None
     if entity_type == "DEFECT":
-        obj = db.query(models.Defect).get(entity_id)
+        obj = db.get(models.Defect, entity_id)
         return obj.defect_key if obj else None
     return None
 
@@ -125,19 +125,20 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
         from ..workflow_authority import record_department
         rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope
                 or (r.entity_type == 'DEFECT' and record_department(db, r, current_user)[1] in scope)]
-    workspace_ids = active_qa_workspace_scope_ids(current_user)
-    if workspace_ids:
-        visibility = {}
-        def visible(row):
-            key = (row.entity_type, row.entity_id)
-            if key not in visibility:
-                try:
-                    require_entity_workspace_visibility(db, current_user, *key)
-                    visibility[key] = True
-                except HTTPException:
-                    visibility[key] = False
-            return visibility[key]
-        rows = [r for r in rows if visible(r)]
+    # Always run the entity visibility resolver. For ordinary business users
+    # there may be no QA-workspace scope tuple, but project/folder visibility
+    # (notably restricted Test Cycle folders) still applies.
+    visibility = {}
+    def visible(row):
+        key = (row.entity_type, row.entity_id)
+        if key not in visibility:
+            try:
+                require_entity_workspace_visibility(db, current_user, *key)
+                visibility[key] = True
+            except HTTPException:
+                visibility[key] = False
+        return visibility[key]
+    rows = [r for r in rows if visible(r)]
     return rows[:500]
 
 
@@ -274,7 +275,7 @@ def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, curren
     model = _COMMENT_ENTITY_MODELS.get(normalized_type)
     if not model:
         raise HTTPException(400, f"Comments are not supported for entity type '{entity_type}'")
-    obj = db.query(model).get(entity_id)
+    obj = db.get(model, entity_id)
     if not obj:
         raise HTTPException(404, "Record not found")
     if normalized_type == "DEFECT":
@@ -286,6 +287,8 @@ def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, curren
         visible_ids = viewable_project_ids(db, current_user)
         if visible_ids is not None and project_id not in visible_ids:
             raise HTTPException(403, "You do not have access to this record")
+        if normalized_type == "TEST_CYCLE":
+            require_entity_workspace_visibility(db, current_user, normalized_type, entity_id)
     else:
         require_entity_workspace_visibility(db, current_user, normalized_type, entity_id)
         requester_id = getattr(obj, "requester_id", None) or getattr(obj, "created_by_id", None)
@@ -366,7 +369,7 @@ def add_rich_comment(entity_type: str, entity_id: int, body: str = Form(""),
 
 
 def _comment_or_404(db: Session, comment_id: int) -> models.ApprovalAction:
-    row = db.query(models.ApprovalAction).get(comment_id)
+    row = db.get(models.ApprovalAction, comment_id)
     if not row or row.decision != "Commented":
         raise HTTPException(404, "Comment not found")
     return row

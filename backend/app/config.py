@@ -20,6 +20,7 @@ import os
 import re
 from pathlib import Path
 from typing import MutableMapping
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 from pydantic import field_validator, model_validator
@@ -141,6 +142,23 @@ class Settings(BaseSettings):
                 raise ValueError("SESSION_COOKIE_SECURE cannot be disabled in UAT or production")
             if "*" in self.cors_origins:
                 raise ValueError("Credentialed CORS must use explicit origins in UAT or production")
+            if "*" in self.allowed_hosts:
+                raise ValueError("TRUSTED_HOSTS cannot allow every host in UAT or production")
+            for origin in self.cors_origins:
+                parsed = urlsplit(origin)
+                if (
+                    parsed.scheme != "https"
+                    or not parsed.netloc
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or parsed.path not in {"", "/"}
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError(
+                        "CORS_ALLOWED_ORIGINS must contain only explicit HTTPS origins "
+                        "without credentials, paths, queries, or fragments in UAT or production"
+                    )
         if self.app_env in {"prod", "production"} and self.ldap_mock_enabled:
             raise ValueError("LDAP mock authentication cannot be enabled in production")
         if self.ldap_mock_enabled:

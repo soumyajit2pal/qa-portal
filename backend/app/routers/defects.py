@@ -84,7 +84,7 @@ _QA_DEFECT_ROLES = {
 
 
 def _get(defect_id: int, db: Session) -> models.Defect:
-    obj = db.query(models.Defect).get(defect_id)
+    obj = db.get(models.Defect, defect_id)
     if not obj:
         raise HTTPException(404, "Defect not found")
     return obj
@@ -94,6 +94,18 @@ def _get_visible(defect_id: int, db: Session, current_user: models.User) -> mode
     obj = _scoped_defects(db, current_user).filter(models.Defect.id == defect_id).first()
     if not obj:
         raise HTTPException(404, "Defect not found")
+    return obj
+
+
+def _get_mutable(defect_id: int, db: Session, current_user: models.User) -> models.Defect:
+    """A project view grant may expose a linked defect, but never make it writable."""
+    obj = _get_visible(defect_id, db, current_user)
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    defect_workspace_id = obj.qa_workspace_id or (
+        obj.qa_request.qa_workspace_id if obj.qa_request else None
+    )
+    if workspace_ids and defect_workspace_id not in workspace_ids:
+        raise HTTPException(404, "Defect not found in the active workspace")
     return obj
 
 
@@ -195,7 +207,7 @@ def _is_assignee_department_head(db: Session, obj: models.Defect, user: models.U
     """
     if not obj.assignee_id:
         return False
-    assigned_user = db.query(models.User).get(obj.assignee_id)
+    assigned_user = db.get(models.User, obj.assignee_id)
     if not assigned_user:
         return False
     workspace_id = obj.qa_workspace_id or (obj.qa_request.qa_workspace_id if obj.qa_request else None)
@@ -290,7 +302,7 @@ def _required(value, label: str):
 
 
 def _execution_context(db: Session, execution_id: int, request: Optional[models.QARequest]):
-    execution = db.query(models.TestExecution).get(execution_id)
+    execution = db.get(models.TestExecution, execution_id)
     if not execution or not execution.cycle or not execution.test_case:
         raise HTTPException(404, "Test Execution, Test Cycle, or Test Case was not found")
     cycle, test_case = execution.cycle, execution.test_case
@@ -302,7 +314,7 @@ def _execution_context(db: Session, execution_id: int, request: Optional[models.
             "Functional": models.FunctionalRequest, "SAST": models.SASTRequest,
             "DAST": models.DASTRequest, "Performance": models.PerformanceRequest,
         }.get(linked_request.child_type)
-        child = db.query(child_model).get(linked_request.child_id) if child_model else None
+        child = db.get(child_model, linked_request.child_id) if child_model else None
         if request and child and child.qa_request_id and child.qa_request_id != request.id:
             raise HTTPException(400, "This execution's Test Cycle is linked to a different QA Request")
     return execution, cycle, test_case
@@ -774,7 +786,7 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
 def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
                           db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
-    obj = _get_visible(defect_id, db, current_user)
+    obj = _get_mutable(defect_id, db, current_user)
     if obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect"}:
         raise HTTPException(400, f"A {obj.status} defect cannot be linked to a new execution")
     execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request)
@@ -800,7 +812,7 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
 @router.patch("/{defect_id}", response_model=schemas.DefectOut)
 def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(get_current_user)):
-    obj = _get_visible(defect_id, db, current_user)
+    obj = _get_mutable(defect_id, db, current_user)
     manager = _is_manager(db, obj, current_user)
     if obj.status != "New":
         raise HTTPException(400, "Only a New defect can be edited. Use workflow actions for later changes")
@@ -832,7 +844,7 @@ def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = D
 @router.post("/{defect_id}/transition", response_model=schemas.DefectOut)
 def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Session = Depends(get_db),
                       current_user: models.User = Depends(get_current_user)):
-    obj = _get_visible(defect_id, db, current_user)
+    obj = _get_mutable(defect_id, db, current_user)
     if obj.workflow_json:
         raise HTTPException(400, "Use the versioned workspace workflow actions for this defect")
     requested = payload.status
@@ -908,7 +920,7 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     remarks = (payload.remarks or "").strip()
     if requested in {"Triaged", "Assigned"}:
         assignee_id = _required(payload.assignee_id, "Assignee")
-        assignee_user = db.query(models.User).get(assignee_id)
+        assignee_user = db.get(models.User, assignee_id)
         if not assignee_user or not assignee_user.is_active:
             raise HTTPException(404, "Selected assignee was not found or is inactive")
         if not assignee_user.show_in_user_dropdowns:
@@ -960,7 +972,7 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         obj.fix_details = _required(payload.fix_details, "Fix Details")
         obj.fixed_build_version = _required(payload.fixed_build_version, "Fixed Build/Release Version")
         retest_tester_id = _required(payload.retest_tester_id, "QA Retest Owner")
-        retest_tester = db.query(models.User).get(retest_tester_id)
+        retest_tester = db.get(models.User, retest_tester_id)
         if not retest_tester or not retest_tester.is_active:
             raise HTTPException(404, "Selected QA Retest Owner was not found or is inactive")
         if not retest_tester.has_role(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
@@ -1039,12 +1051,12 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
 @router.post("/{defect_id}/reassign", response_model=schemas.DefectOut)
 def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session = Depends(get_db),
                      current_user: models.User = Depends(get_current_user)):
-    obj = _get_visible(defect_id, db, current_user)
+    obj = _get_mutable(defect_id, db, current_user)
     if not obj.assignee_id or obj.status not in DEFECT_REASSIGNABLE_STATUSES:
         raise HTTPException(400, f"{obj.defect_key} does not currently have an assignee that can be reassigned.")
     previous_assignee_id = obj.assignee_id
     previous_assigned_at = obj.assigned_at
-    previous_assignee = db.query(models.User).get(previous_assignee_id)
+    previous_assignee = db.get(models.User, previous_assignee_id)
     previous_is_qa = bool(previous_assignee and set(previous_assignee.roles) & _QA_DEFECT_ROLES)
     reassignment.require_can_reassign(
         current_user, obj.assignee_id,
@@ -1052,7 +1064,7 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
         qa_workspace_id=(obj.qa_workspace_id if previous_is_qa else None),
     )
     reason = reassignment.require_reason(payload.reason)
-    new_assignee = db.query(models.User).get(payload.assignee_id)
+    new_assignee = db.get(models.User, payload.assignee_id)
     if not new_assignee or not new_assignee.is_active:
         raise HTTPException(404, "Selected assignee was not found or is inactive")
     if not new_assignee.show_in_user_dropdowns:
@@ -1099,7 +1111,7 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
 @router.post("/{defect_id}/attachments", response_model=List[schemas.RequestDocumentOut])
 def upload_attachments(defect_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
-    obj = _get_visible(defect_id, db, current_user)
+    obj = _get_mutable(defect_id, db, current_user)
     # Evidence remains addable by a real workflow actor even while Closed,
     # because a reporter who is allowed to reopen a Closed defect must be
     # able to satisfy the reopen action's mandatory-evidence precondition.
@@ -1144,13 +1156,13 @@ def workflow_candidates(defect_id: int, department: Optional[str] = None,
 def defect_workflow_action(defect_id: int, payload: schemas.DefectWorkflowAction,
                            db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     from .defect_workflow_actions import apply_action
-    return apply_action(db, _get_visible(defect_id, db, current_user), payload, current_user)
+    return apply_action(db, _get_mutable(defect_id, db, current_user), payload, current_user)
 
 
 @router.post('/{defect_id}/link-request', response_model=schemas.DefectOut)
 def link_defect_request(defect_id: int, payload: schemas.DefectLinkRequest,
                         db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = _get_visible(defect_id, db, current_user)
+    obj = _get_mutable(defect_id, db, current_user)
     if not (_is_manager(db, obj, current_user) or obj.reporter_id == current_user.id or _is_assignee(obj, current_user)):
         raise HTTPException(403, 'Only the reporter, resolver or QA lead can link a request')
     db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()

@@ -2,6 +2,7 @@ import React, {
   ReactNode,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -20,6 +21,8 @@ import MultiSelect from "./MultiSelect";
 import { api, HttpError } from "../api";
 import { useAuth } from "../context/AuthContext";
 import type { RequestDocumentOut, ChecklistItemDocumentOut } from "../types";
+import { isKeyboardActivationKey } from "../keyboard";
+import { shouldActivateTableRow } from "../tableInteraction";
 
 // Every status across every module (QA Request, SAST/DAST,
 // Performance, Suppression, Sign-off) funnels through this one Badge, so its
@@ -436,9 +439,55 @@ export function Modal({
   closeDisabled,
 }: ModalProps) {
   const [shake, setShake] = useState(false);
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeStateRef = useRef({ onClose, closeDisabled, preventBackdropClose, variant });
+  closeStateRef.current = { onClose, closeDisabled, preventBackdropClose, variant };
   // Record drawers open in the spacious centered view by default. Users can
   // restore the compact right-side drawer with the header toggle.
   const [expanded, setExpanded] = useState(variant === "drawer");
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const frame = window.requestAnimationFrame(() => {
+      const first = dialogRef.current?.querySelector<HTMLElement>(
+        "button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex='-1'])",
+      );
+      (first || dialogRef.current)?.focus();
+    });
+    function onKeyDown(event: KeyboardEvent) {
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const openDialogs = document.querySelectorAll<HTMLElement>("[role='dialog'][aria-modal='true']");
+      if (openDialogs[openDialogs.length - 1] !== dialog) return;
+      if (event.key === "Escape") {
+        const state = closeStateRef.current;
+        if (state.closeDisabled || state.preventBackdropClose) return;
+        event.preventDefault();
+        event.stopPropagation();
+        state.onClose();
+        if (state.variant === "drawer" && new URLSearchParams(window.location.search).get("fromPending") === "1") {
+          window.history.back();
+        }
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        "button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex='-1'])",
+      )).filter((element) => element.getAttribute("aria-hidden") !== "true");
+      if (!focusable.length) { event.preventDefault(); dialog.focus(); return; }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown, true);
+      previouslyFocused?.focus();
+    };
+  }, []);
 
   function handleExplicitClose() {
     if (closeDisabled) return;
@@ -474,13 +523,18 @@ export function Modal({
         onClick={handleBackdropClick}
       >
         <div
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={titleId}
+          tabIndex={-1}
           className={`dialog ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${fitContent ? "dialog-fit-content" : ""} ${
             shake ? "modal-shake" : ""
           }`}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="drawer-header">
-            <h3>{title}</h3>
+            <h3 id={titleId}>{title}</h3>
             <button
               type="button"
               className="modal-close-btn"
@@ -504,13 +558,18 @@ export function Modal({
       onClick={handleBackdropClick}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className={`drawer ${wide ? "drawer-wide" : ""} ${expanded ? "drawer-expanded" : ""} ${
           shake ? "modal-shake" : ""
         }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="drawer-header">
-          <h3>{title}</h3>
+          <h3 id={titleId}>{title}</h3>
           <div className="drawer-header-actions">
             <button
               type="button"
@@ -1644,7 +1703,20 @@ export function Table<T extends Record<string, any>>({
           {pagedRows.map((row) => (
             <tr
               key={String(row[rowKey])}
-              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              onClick={onRowClick ? (event) => {
+                const target = event.target as Element;
+                if (!shouldActivateTableRow(target, event.currentTarget)) return;
+                onRowClick(row);
+              } : undefined}
+              onKeyDown={onRowClick ? (event) => {
+                if (event.target === event.currentTarget && isKeyboardActivationKey(event.key)) {
+                  event.preventDefault();
+                  onRowClick(row);
+                }
+              } : undefined}
+              role={onRowClick ? "button" : undefined}
+              tabIndex={onRowClick ? 0 : undefined}
+              aria-label={onRowClick ? `Open record ${String(row[rowKey])}` : undefined}
               className={onRowClick ? "row-clickable" : undefined}
             >
               {visibleColumns.map((c) => (

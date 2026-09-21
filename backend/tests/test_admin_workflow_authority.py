@@ -5,10 +5,9 @@ from starlette.requests import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from app import models as m
-from app.workflow_authority import configure_request, workflow_context
+from app.workflow_authority import configure_request
 from app.deps import require_not_requester, require_roles
 from app.routers.pending_approvals import count_pending_approvals, list_pending_approvals
-from app import pagination
 
 
 @pytest.fixture
@@ -92,7 +91,7 @@ def test_admin_queue_and_direct_access_match_department_and_self_approval_rules(
                               role='WORKSPACE_MEMBER', is_active=True))
     cases = []
     for index, (department, maker) in enumerate([('QA', author), ('Payments', author), ('QA', user)]):
-        project = m.TestProject(project_key=f'P{index}', name='Project', department=department,
+        project = m.TestProject(project_key=f'P{index}', name=f'Project {index}', department=department,
                                 qa_workspace_id=workspace.id, is_active=True)
         case = m.TestCase(project=project, test_case_key=f'TC{index}', origin_workspace_id=workspace.id)
         draft = m.TestCaseVersion(test_case=case, status='Recommendation Pending', author_id=maker.id,

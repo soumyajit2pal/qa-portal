@@ -1,38 +1,38 @@
-import { approvalStage } from '../approvalStage'
+import { approvalDirectoryRequest, type ApprovalDirectoryContext } from '../approvalStage'
 import { useState, type ReactNode } from 'react'
 import { Badge, Modal, ErrorText } from './Common'
 import { api } from '../api'
-import { activeWorkspaceId, hasDepartment, hasWorkspaceMembership } from '../constants'
+import { activeWorkspaceId } from '../constants'
 import { useAuth } from '../context/AuthContext'
 import type { UserOption } from '../types'
 
-type Context = {
+type Context = ApprovalDirectoryContext & {
   status?: string | null
-  department?: string | null
-  qa_workspace_id?: number | null
-  requester_id?: number | null
   application_master_status?: string | null
 }
 
-export default function WorkflowStatusBadge({ status, label, record, workflow }: {
-  status?: string | null; label?: ReactNode; record: Context; workflow?: 'signoff'
+export default function WorkflowStatusBadge({ status, label, record, workflow, testCaseId }: {
+  status?: string | null; label?: ReactNode; record: Context; workflow?: 'signoff'; testCaseId?: number | null
 }) {
   const { user } = useAuth()
   const [open, setOpen] = useState(false)
   const [members, setMembers] = useState<UserOption[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const { roles, group, departmentScoped } = approvalStage(status, record.application_master_status, workflow)
-  if (!roles.length) return <Badge status={status} label={label} />
+  const directory = approvalDirectoryRequest({
+    status,
+    applicationMasterStatus: record.application_master_status,
+    workflow,
+    context: record,
+    fallbackWorkspaceId: activeWorkspaceId(user),
+    testCaseId,
+  })
+  if (!directory) return <Badge status={status} label={label} />
+  const { group, departmentScoped, path } = directory
   const load = async () => {
     setOpen(true); setLoading(true); setError(''); setMembers([])
     try {
-      const workspace = record.qa_workspace_id ?? activeWorkspaceId(user)
-      const query = new URLSearchParams({ purpose: 'approver', roles: roles.join(','), department_scoped: String(departmentScoped) })
-      if (workspace) query.set('workspace_id', String(workspace))
-      if (record.department) query.set('department', record.department)
-      if (departmentScoped && record.requester_id) query.set('exclude_id', String(record.requester_id))
-      setMembers(await api.get<UserOption[]>(`/api/auth/user-options?${query}`))
+      setMembers(await api.get<UserOption[]>(path))
     } catch (err) { setError(err instanceof Error ? err.message : 'Unable to load approvers.') }
     finally { setLoading(false) }
   }

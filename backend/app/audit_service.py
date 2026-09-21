@@ -45,9 +45,23 @@ def request_ip(request: Request) -> Optional[str]:
     at the immediate peer, trusted proxies are removed from the right side of
     X-Forwarded-For; the first untrusted address is recorded as the client.
     """
-    peer = _ip(request.client.host if request.client else None)
+    peer_value = request.client.host if request.client else None
+    peer = _ip(peer_value)
     if not peer:
-        return None
+        # Uvicorn's trusted ProxyHeaders middleware deliberately replaces the
+        # ASGI peer with ``None`` when every address in X-Forwarded-For is in
+        # its trusted set. Nginx still supplies an overwritten X-Real-IP in
+        # that case. A non-empty but malformed peer does *not* get this
+        # fallback, so a direct client cannot make a forged header trusted.
+        if peer_value:
+            return None
+        real_ip = _ip(request.headers.get("x-real-ip"))
+        if real_ip:
+            return str(real_ip)[:64]
+        forwarded = request.headers.get("x-forwarded-for")
+        chain = [_ip(value) for value in forwarded.split(",")] if forwarded else []
+        first_valid = next((address for address in chain if address), None)
+        return str(first_valid)[:64] if first_valid else None
     if not _is_trusted_proxy(peer):
         return str(peer)[:64]
 
@@ -63,6 +77,24 @@ def request_ip(request: Request) -> Optional[str]:
         if not _is_trusted_proxy(address):
             return str(address)[:64]
     return str(chain[0])[:64]
+
+
+def request_audit_target(request: Request, module: str) -> tuple[str, Optional[str], Optional[str]]:
+    """Return useful resource metadata for the generic API audit event.
+
+    Business handlers can still write a richer audit record with a display
+    name. The middleware-level record has only the resolved route/path and
+    path parameters, but that is enough to avoid an unexplained blank target.
+    """
+    target_type = module if module and module != "OTHER" else "API_RESOURCE"
+    identifiers = [
+        f"{key}={value}"
+        for key, value in request.path_params.items()
+        if key == "id" or key.endswith("_id")
+    ]
+    if identifiers:
+        return target_type, ", ".join(identifiers)[:100], None
+    return target_type, None, request.url.path[:255] or None
 
 
 def user_snapshot(user: models.User) -> dict:

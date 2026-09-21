@@ -1,5 +1,7 @@
 import { encryptLogin, LoginKey } from './loginEncryption'
 import { isQaEvidenceUpload, qaDocumentSizeError } from './qaDocumentUpload'
+import { isWorkspaceSelectionStorageChange, selectedWorkspaceStorageId } from './workspaceTransition'
+import { fetchAllPages } from './pagination'
 
 const BASE_URL: string = (import.meta.env.VITE_API_BASE_URL as string) || ''
 
@@ -52,6 +54,16 @@ const RETRYABLE_STATUSES = new Set([408, 502, 503, 504])
 const inFlightGets = new Map<string, Promise<unknown>>()
 const completedGets = new Map<string, { value: unknown; expiresAt: number }>()
 let cacheGeneration = 0
+// localStorage is shared by every tab. If another tab changes the selected
+// workspace, block any interval/click request that races the reload installed
+// by AuthContext; otherwise an old-workspace screen can submit with the new
+// X-Workspace-ID during the brief hand-off.
+let crossTabWorkspaceChange = false
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('storage', (event) => {
+    if (isWorkspaceSelectionStorageChange(event)) crossTabWorkspaceChange = true
+  })
+}
 const activityListeners = new Set<(pending: number) => void>()
 export interface ApiMutationEvent {
   path: string
@@ -176,7 +188,7 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
     const csrf = csrfToken()
     if (csrf) headers['X-CSRF-Token'] = csrf
   }
-  const activeWorkspace = localStorage.getItem('active_workspace_id') || localStorage.getItem('qa_active_workspace_id')
+  const activeWorkspace = selectedWorkspaceStorageId(localStorage)
   if (activeWorkspace) headers['X-Workspace-ID'] = activeWorkspace
 
   let payload: BodyInit | undefined
@@ -237,14 +249,16 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
 }
 
 async function request<T = any>(path: string, opts: RequestOptions = {}): Promise<T> {
+  if (crossTabWorkspaceChange) {
+    throw new HttpError('The active workspace changed in another tab. This page is reloading before more work can be submitted.', 409)
+  }
   const method = opts.method || 'GET'
   // Workspace is part of response identity. The same account can switch
   // workspaces while staying signed in, and `/api/dashboard/*` paths do not
   // contain that scope because it is carried in X-Workspace-ID. Without it,
   // an in-flight or eight-second cached response from workspace A could be
   // rendered after workspace B became active.
-  const activeWorkspace = localStorage.getItem('active_workspace_id')
-    || localStorage.getItem('qa_active_workspace_id') || ''
+  const activeWorkspace = selectedWorkspaceStorageId(localStorage)
   // Encryption challenges are single-use, including across concurrent actions.
   const key = method === 'GET' && !['/api/auth/me', '/api/auth/login-key'].includes(path.split('?')[0])
     ? `${activeWorkspace}:${path}:${opts.isBlob ? 'blob' : 'json'}`
@@ -322,6 +336,10 @@ function triggerDownload(blob: Blob, filename: string) {
 
 export const api = {
   get: <T = any>(path: string): Promise<T> => request<T>(path),
+  // Pickers and exports need the complete authorized result set. Keep this
+  // separate from normal tables, which should retain server-side paging.
+  getAll: <T = any>(path: string): Promise<T[]> =>
+    fetchAllPages<T>((pagePath) => request(pagePath), path),
   getWithoutActivity: <T = any>(path: string): Promise<T> =>
     request<T>(path, { trackActivity: false }),
   // `timeoutMs` (optional, third arg) lets a caller whose POST triggers slow
@@ -439,6 +457,10 @@ export const api = {
     // it active until the server responds or the connection actually fails.
     timeoutMs: number = 0,
   ): Promise<T> => new Promise((resolve, reject) => {
+    if (crossTabWorkspaceChange) {
+      reject(new HttpError('The active workspace changed in another tab. This page is reloading before more work can be submitted.', 409))
+      return
+    }
     const form = new FormData()
     Object.entries(fields).forEach(([key, value]) => {
       if (value !== undefined && value !== null) form.append(key, value)
@@ -447,6 +469,8 @@ export const api = {
     xhr.open('POST', `${BASE_URL}${path}`)
     const csrf = csrfToken()
     if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf)
+    const activeWorkspace = selectedWorkspaceStorageId(localStorage)
+    if (activeWorkspace) xhr.setRequestHeader('X-Workspace-ID', activeWorkspace)
     xhr.withCredentials = true
     xhr.timeout = timeoutMs
     xhr.upload.onprogress = (event) => {

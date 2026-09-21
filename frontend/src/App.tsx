@@ -1,14 +1,15 @@
-import React, { ReactNode, Suspense, lazy, useEffect, useState } from 'react'
+import React, { ReactNode, Suspense, lazy, useState } from 'react'
 import { Routes, Route, Navigate, Link, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
 import WorkspaceTransition from './components/WorkspaceTransition'
+import { internalNavigationPath } from './requestNavigation'
 import RequestViewer from './components/RequestViewer'
 import DepartmentPrompt from './components/DepartmentPrompt'
 import EmailCompletionPrompt from './components/EmailCompletionPrompt'
 import PendingApprovalsNotice from './components/PendingApprovalsNotice'
 import { UserOut } from './types'
-import { hasWorkspaceRole, uniqueWorkspaceAccess } from './constants'
+import { hasWorkspaceRole, isViewOnly, uniqueWorkspaceAccess } from './constants'
 
 // Cross-cutting pages -- not owned by any one domain module (the QA Request
 // gateway feeds every module, the Dashboard summarizes across all of
@@ -272,8 +273,7 @@ function ProtectedLayout() {
 function LoginRoute() {
   const { user, loading } = useAuth()
   const location = useLocation()
-  const requested = typeof location.state?.from === 'string' && location.state.from.startsWith('/')
-    && !location.state.from.startsWith('//') ? location.state.from : '/'
+  const requested = internalNavigationPath(typeof location.state?.from === 'string' ? location.state.from : null) || '/'
   if (loading) return <ModuleFallback />
   return user ? <Navigate to={requested} replace /> : <Login />
 }
@@ -281,6 +281,13 @@ function LoginRoute() {
 function QaGroupOnly({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   return hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA') ? <>{children}</> : <Navigate to="/" replace />
+}
+
+function AdminOnly({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
+  return user?.roles.includes('ADMIN') && !isViewOnly(user)
+    ? <>{children}</>
+    : <Navigate to="/" replace />
 }
 
 function DocumentPortalOnly({ children }: { children: ReactNode }) {
@@ -348,31 +355,6 @@ function ModuleFallback() {
 }
 
 export default function App() {
-  // Date ranges govern reporting and workflow deadlines.  Keep native date
-  // inputs calendar-only so a partially typed/pasted value cannot bypass the
-  // paired min/max range rules (for example, entering a To date before From).
-  // Tab/Escape remain available for normal keyboard focus and dismissing the
-  // native calendar; selection itself still happens through the picker.
-  useEffect(() => {
-    function isDateInput(target: EventTarget | null): target is HTMLInputElement {
-      return target instanceof HTMLInputElement && target.type === 'date'
-    }
-    function blockDateTyping(event: KeyboardEvent) {
-      if (isDateInput(event.target) && !['Tab', 'Escape'].includes(event.key)) event.preventDefault()
-    }
-    function blockDatePasteOrDrop(event: ClipboardEvent | DragEvent) {
-      if (isDateInput(event.target)) event.preventDefault()
-    }
-    document.addEventListener('keydown', blockDateTyping, true)
-    document.addEventListener('paste', blockDatePasteOrDrop, true)
-    document.addEventListener('drop', blockDatePasteOrDrop, true)
-    return () => {
-      document.removeEventListener('keydown', blockDateTyping, true)
-      document.removeEventListener('paste', blockDatePasteOrDrop, true)
-      document.removeEventListener('drop', blockDatePasteOrDrop, true)
-    }
-  }, [])
-
   return (
     <>
       <WorkspaceTransition />
@@ -412,12 +394,12 @@ export default function App() {
           <Route path="/pending-approvals" element={<ModuleBoundary moduleName="Governance"><PendingApprovals /></ModuleBoundary>} />
           <Route path="/approvals" element={<ModuleBoundary moduleName="Governance"><Approvals /></ModuleBoundary>} />
           <Route path="/reports" element={<ModuleBoundary moduleName="Governance"><Reports /></ModuleBoundary>} />
-          <Route path="/admin" element={<ModuleBoundary moduleName="Governance"><Admin /></ModuleBoundary>} />
+          <Route path="/admin" element={<AdminOnly><ModuleBoundary moduleName="Governance"><Admin /></ModuleBoundary></AdminOnly>} />
           <Route path="/department-admin" element={<ModuleBoundary moduleName="Governance"><DepartmentAdmin /></ModuleBoundary>} />
           <Route path="/workspace-admin" element={<ModuleBoundary moduleName="Governance"><ParentWorkspaceAdmin /></ModuleBoundary>} />
           <Route path="/audit-log" element={<ModuleBoundary moduleName="Governance"><AuditLog /></ModuleBoundary>} />
-          <Route path="/checklist-config" element={<ModuleBoundary moduleName="Governance"><ChecklistConfig /></ModuleBoundary>} />
-          <Route path="/request-type-config" element={<ModuleBoundary moduleName="Governance"><RequestTypeConfig /></ModuleBoundary>} />
+          <Route path="/checklist-config" element={<AdminOnly><ModuleBoundary moduleName="Governance"><ChecklistConfig /></ModuleBoundary></AdminOnly>} />
+          <Route path="/request-type-config" element={<AdminOnly><ModuleBoundary moduleName="Governance"><RequestTypeConfig /></ModuleBoundary></AdminOnly>} />
           <Route path="/document-portal" element={<DocumentPortalOnly><ModuleBoundary moduleName="Document Portal"><DocumentPortal /></ModuleBoundary></DocumentPortalOnly>} />
 
           {/* Test Management module */}

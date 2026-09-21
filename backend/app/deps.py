@@ -2,7 +2,7 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, Request, status
 from starlette.concurrency import run_in_threadpool
-from sqlalchemy import and_, false, func, or_, true
+from sqlalchemy import false, func, or_, true
 from sqlalchemy.orm import Session, selectinload
 
 from .database import SessionLocal, get_db
@@ -668,43 +668,43 @@ def resolve_entity_department(db: Session, entity_type: str, entity_id: int) -> 
     caller's filter treats as "excluded" -- fail closed (hide anything we
     can't positively confirm is in-scope) rather than fail open."""
     if entity_type == "QA_REQUEST":
-        obj = db.query(models.QARequest).get(entity_id)
+        obj = db.get(models.QARequest, entity_id)
         return obj.department if obj else None
     if entity_type == "FUNCTIONAL_REQUEST":
-        obj = db.query(models.FunctionalRequest).get(entity_id)
+        obj = db.get(models.FunctionalRequest, entity_id)
         return obj.department if obj else None
     if entity_type == "SAST":
-        obj = db.query(models.SASTRequest).get(entity_id)
+        obj = db.get(models.SASTRequest, entity_id)
         return obj.department if obj else None
     if entity_type == "DAST":
-        obj = db.query(models.DASTRequest).get(entity_id)
+        obj = db.get(models.DASTRequest, entity_id)
         return obj.department if obj else None
     if entity_type == "SAST_DAST":
-        sast = db.query(models.SASTRequest).get(entity_id)
+        sast = db.get(models.SASTRequest, entity_id)
         if sast:
             return sast.department
-        dast = db.query(models.DASTRequest).get(entity_id)
+        dast = db.get(models.DASTRequest, entity_id)
         return dast.department if dast else None
     if entity_type == "PERFORMANCE":
-        obj = db.query(models.PerformanceRequest).get(entity_id)
+        obj = db.get(models.PerformanceRequest, entity_id)
         return obj.department if obj else None
     if entity_type == "SUPPRESSION":
-        obj = db.query(models.SuppressionRequest).get(entity_id)
+        obj = db.get(models.SuppressionRequest, entity_id)
         return obj.department if obj else None
     if entity_type == "SIGNOFF":
-        obj = db.query(models.QASignOff).get(entity_id)
+        obj = db.get(models.QASignOff, entity_id)
         return obj.request_department if obj else None
     if entity_type == "DEFECT":
-        obj = db.query(models.Defect).get(entity_id)
+        obj = db.get(models.Defect, entity_id)
         return obj.department if obj else None
     if entity_type == "TEST_PROJECT":
-        obj = db.query(models.TestProject).get(entity_id)
+        obj = db.get(models.TestProject, entity_id)
         return obj.department if obj else None
     if entity_type == "TEST_CASE":
-        obj = db.query(models.TestCase).get(entity_id)
+        obj = db.get(models.TestCase, entity_id)
         return obj.project.department if obj and obj.project else None
     if entity_type == "TEST_CYCLE":
-        obj = db.query(models.TestCycle).get(entity_id)
+        obj = db.get(models.TestCycle, entity_id)
         return obj.project.department if obj and obj.project else None
     if entity_type == "TEST_EXECUTION":
         obj = db.get(models.TestExecution, entity_id)
@@ -768,6 +768,11 @@ def require_entity_workspace_visibility(db: Session, current_user: models.User,
             raise HTTPException(404, "Record not found")
         project_id = content.cycle.project_id if entity_type == "TEST_EXECUTION" else content.project_id
         require_project_visibility(db, project_id, current_user)
+        cycle = content.cycle if entity_type == "TEST_EXECUTION" else (
+            content if entity_type == "TEST_CYCLE" else None
+        )
+        if cycle is not None and cycle.folder_id:
+            require_can_view_cycle_folder(cycle.folder, current_user)
         return
     selected = active_qa_workspace_scope(current_user)
     if selected is not None:
@@ -809,7 +814,7 @@ def require_not_requester(current_user: models.User, requester_id) -> None:
 def get_or_404(db: Session, model, obj_id: int, label: str):
     """Generic version of the "get_or_404" shape repeated inline, standalone
     (no shared helper), throughout most routers in this app -- e.g.
-    `obj = db.query(Model).get(id); if not obj: raise HTTPException(404,
+    `obj = db.get(Model, id); if not obj: raise HTTPException(404,
     "X not found")`. Not retrofitted onto every existing call site (dozens,
     across nearly every router) in one sweep -- many of those inline blocks
     have entity-specific extra logic sitting between the lookup and the
@@ -818,7 +823,7 @@ def get_or_404(db: Session, model, obj_id: int, label: str):
     worth. This is here so call sites that are a plain lookup-or-404 with no
     extra logic (like the get_project_or_404 case above) can adopt it
     incrementally instead of writing the same three lines again."""
-    obj = db.query(model).get(obj_id)
+    obj = db.get(model, obj_id)
     if not obj:
         raise HTTPException(404, f"{label} not found")
     return obj
@@ -829,7 +834,7 @@ def get_project_or_404(db: Session, project_id: int) -> models.TestProject:
     test_reports.py, and test_repository.py -- all three Test Management
     routers look up a TestProject by id constantly. Consolidated here so
     there's one implementation instead of three to keep in sync."""
-    obj = db.query(models.TestProject).get(project_id)
+    obj = db.get(models.TestProject, project_id)
     if not obj:
         raise HTTPException(404, "Test Project not found")
     return obj

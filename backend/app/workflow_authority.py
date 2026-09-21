@@ -19,7 +19,7 @@ WORKFLOW_ROLES = {
 
 
 def is_system_admin(user):
-    return any(row.role == 'ADMIN' for row in user.role_assignments)
+    return any(row.role == 'ADMIN' for row in getattr(user, 'role_assignments', ()))
 
 
 _workflow_actors = ContextVar("workflow_actors", default=())

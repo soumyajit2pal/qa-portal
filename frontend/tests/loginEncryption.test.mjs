@@ -41,9 +41,13 @@ async function moduleUrl(path) {
 }
 const encryptionUrl = await moduleUrl('../src/loginEncryption.ts')
 const uploadUrl = await moduleUrl('../src/qaDocumentUpload.ts')
+const workspaceTransitionUrl = await moduleUrl('../src/workspaceTransition.ts')
+const paginationUrl = await moduleUrl('../src/pagination.ts')
 let apiSource = await readFile(new URL('../src/api.ts', import.meta.url), 'utf8')
 apiSource = apiSource.replace("'./loginEncryption'", JSON.stringify(encryptionUrl))
   .replace("'./qaDocumentUpload'", JSON.stringify(uploadUrl))
+  .replace("'./workspaceTransition'", JSON.stringify(workspaceTransitionUrl))
+  .replace("'./pagination'", JSON.stringify(paginationUrl))
   .replaceAll('import.meta.env', '({ PROD: true, VITE_API_BASE_URL: "" })')
 const apiCode = ts.transpileModule(apiSource, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
@@ -101,4 +105,32 @@ test('unavailable browser encryption never falls back to sending plaintext', asy
     await assert.rejects(api.createUser({ username: 'test1', login_type: 'STANDARD', password: 'valid-password' }), /encryption is unavailable/)
     assert.equal(calls.filter(c => c.method === 'POST').length, 0)
   } finally { window.crypto = webcrypto }
+})
+
+test('progress uploads carry the same active-workspace header as fetch requests', async () => {
+  const originalStorage = globalThis.localStorage
+  const originalXhr = globalThis.XMLHttpRequest
+  let request
+  class FakeXMLHttpRequest {
+    headers = {}
+    upload = {}
+    status = 200
+    statusText = 'OK'
+    responseText = '{}'
+    open(method, url) { this.method = method; this.url = url }
+    setRequestHeader(name, value) { this.headers[name] = value }
+    send() { request = this; this.onload() }
+  }
+  globalThis.localStorage = {
+    getItem: (key) => key === 'active_workspace_id' ? '27' : null,
+    removeItem: () => {},
+  }
+  globalThis.XMLHttpRequest = FakeXMLHttpRequest
+  try {
+    await api.uploadFormWithProgress('/api/document-portal/upload', { path: '' }, () => {})
+    assert.equal(request.headers['X-Workspace-ID'], '27')
+  } finally {
+    globalThis.localStorage = originalStorage
+    globalThis.XMLHttpRequest = originalXhr
+  }
 })

@@ -20,7 +20,6 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from .config import settings
-from .db_base import Base
 from .logging_config import configure_logging, mask_database_url
 
 configure_logging()  # first import in the chain (main.py imports this module

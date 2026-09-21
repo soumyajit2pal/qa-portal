@@ -1,9 +1,10 @@
 import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
+import { createLatestRequestGate } from "../../latestRequest";
 import { formatDateTimeIST, istToday } from "../../time";
 import { useAuth } from "../../context/AuthContext";
 import {
@@ -1229,7 +1230,7 @@ export function FunctionalDetail({
             <DetailField label="Assigned Group">
               {(() => {
                 const assigned = assignedGroupFor(req.status, req.application_master_status, req.department);
-                return assigned ? <RoleGroupLink users={users} role={assigned.role} label={assigned.label} department={assigned.department} /> : "—";
+                return assigned ? <RoleGroupLink role={assigned.role} label={assigned.label} department={assigned.department} /> : "—";
               })()}
             </DetailField>
             <DetailField label="Assigned Tester(s)">
@@ -1433,7 +1434,7 @@ export function FunctionalDetail({
                       : undefined
                   }
                   extraControlLabel="Assign to group"
-                  extraControl={<RoleGroupLink users={users} role="QA_LEAD" label="QA Lead" />}
+                  extraControl={<RoleGroupLink role="QA_LEAD" label="QA Lead" />}
                   extraReady
                   onApprove={(signed) =>
                     act("department-head-decision", {
@@ -1867,6 +1868,7 @@ export default function Functional() {
   // FunctionalDetail (which needs every field) is shown.
   const [selected, setSelected] = useState<FunctionalOut | null>(null);
   const [openingId, setOpeningId] = useState<number | null>(null);
+  const detailRequests = useRef(createLatestRequestGate()).current;
   const [error, setError] = useState<unknown>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -1884,16 +1886,17 @@ export default function Functional() {
 
   const openRequest = useCallback(async (idOrRow: number | FunctionalListOut) => {
     const id = typeof idOrRow === "number" ? idOrRow : idOrRow.id;
+    const generation = detailRequests.begin();
     setOpeningId(id);
     try {
       const full = await api.get<FunctionalOut>(`/api/functional-requests/${id}`);
-      setSelected(full);
+      if (detailRequests.isCurrent(generation)) setSelected(full);
     } catch (err) {
-      setError(err);
+      if (detailRequests.isCurrent(generation)) setError(err);
     } finally {
-      setOpeningId(null);
+      if (detailRequests.isCurrent(generation)) setOpeningId(null);
     }
-  }, []);
+  }, [detailRequests]);
 
   // Pending Approvals includes openId so this fetches the exact record even
   // when it is not on the module list's currently loaded page.  `open` is

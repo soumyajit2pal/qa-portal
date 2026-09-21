@@ -1,4 +1,4 @@
-from ..deps import get_workflow_user, require_workflow_roles
+from ..deps import require_workflow_roles
 import io
 from typing import List, Optional
 
@@ -11,6 +11,7 @@ from .. import cache, models, schemas
 from ..database import get_db
 from ..deps import (
     get_current_user, require_roles, require_same_department,
+    require_not_requester,
     require_department_visibility, require_department_unit_action_scope,
     department_unit_visibility_condition, active_qa_workspace_scope_ids,
 )
@@ -147,6 +148,34 @@ def _approve_pending_application_name(db: Session, obj: "models.ApplicationMaste
         _finalize_child_requests(db, gw, gw.requester)
 
 
+def _decision_gateway_or_404(
+    db: Session, obj: "models.ApplicationMaster", current_user: models.User,
+) -> "models.QARequest":
+    """Resolve the same active, workspace-visible gateway used by the queue.
+
+    A pending global name can be reused by more than one gateway before its
+    decision. Authority therefore follows any active linked gateway in the
+    selected workspace, rather than only the first gateway recorded in the
+    master's traceability pointer.
+    """
+    from ..workspace_service import current_workspace_scope_ids
+
+    query = db.query(models.QARequest).filter(
+        models.QARequest.application_master_id == obj.id,
+        models.QARequest.status.notin_([GatewayStatus.DRAFT, GatewayStatus.CANCELLED]),
+    )
+    workspace_ids = current_workspace_scope_ids()
+    if workspace_ids:
+        query = query.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
+    gateway = query.order_by(models.QARequest.created_at.desc()).first()
+    if gateway is None:
+        raise HTTPException(404, "Application name not found in the active workspace")
+    require_department_visibility(
+        current_user, obj.department, entity_workspace_id=gateway.qa_workspace_id,
+    )
+    return gateway
+
+
 @router.get("", response_model=List[schemas.ApplicationMasterOut])
 def list_application_names(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Approved names only -- this is what feeds the QA Request wizard's
@@ -249,7 +278,7 @@ def update_application_department(
     Linked Test Projects carry a denormalised department value for filtering,
     so keep those rows synchronized with the application master update.
     """
-    obj = db.query(models.ApplicationMaster).get(app_id)
+    obj = db.get(models.ApplicationMaster, app_id)
     if not obj:
         raise HTTPException(404, "Application not found")
     department = payload.department.strip()
@@ -316,7 +345,7 @@ def rename_application_master(
     Request/child request/finding/defect that already used the old name
     reads the new one too, instead of silently freezing at whatever name was
     in effect on the day the request was raised."""
-    obj = db.query(models.ApplicationMaster).get(app_id)
+    obj = db.get(models.ApplicationMaster, app_id)
     if not obj:
         raise HTTPException(404, "Application not found")
     new_name = payload.name.strip().upper()
@@ -429,18 +458,16 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
     to do for it, and "awaiting approval forever with nothing to show for it"
     isn't a real state; the requester can simply edit and resubmit under a
     different name."""
-    obj = db.query(models.ApplicationMaster).get(app_id)
+    obj = db.get(models.ApplicationMaster, app_id)
     if not obj:
         raise HTTPException(404, "Application name not found")
-    require_department_visibility(
-        current_user, obj.department,
-        entity_workspace_id=obj.qa_request.qa_workspace_id if obj.qa_request else None,
-    )
+    decision_gateway = _decision_gateway_or_404(db, obj, current_user)
     require_same_department(current_user, obj.department)
     require_department_unit_action_scope(
         db, current_user, obj.department,
-        obj.qa_request.department_unit_id if obj.qa_request else None,
+        decision_gateway.department_unit_id,
     )
+    require_not_requester(current_user, obj.requested_by_id)
     if obj.status != "PENDING_APP_OWNER":
         raise HTTPException(
             400,
@@ -522,18 +549,16 @@ def decide_application_name(app_id: int, payload: schemas.ApplicationMasterDecis
     -- a request can't be allowed to proceed to Department Head under an
     application name the SM just rejected. Same same-department scoping as
     every other SM approval checkpoint in the app."""
-    obj = db.query(models.ApplicationMaster).get(app_id)
+    obj = db.get(models.ApplicationMaster, app_id)
     if not obj:
         raise HTTPException(404, "Application name not found")
-    require_department_visibility(
-        current_user, obj.department,
-        entity_workspace_id=obj.qa_request.qa_workspace_id if obj.qa_request else None,
-    )
+    decision_gateway = _decision_gateway_or_404(db, obj, current_user)
     require_same_department(current_user, obj.department)
     require_department_unit_action_scope(
         db, current_user, obj.department,
-        obj.qa_request.department_unit_id if obj.qa_request else None,
+        decision_gateway.department_unit_id,
     )
+    require_not_requester(current_user, obj.requested_by_id)
     if obj.status == "PENDING_APP_OWNER":
         raise HTTPException(
             400,

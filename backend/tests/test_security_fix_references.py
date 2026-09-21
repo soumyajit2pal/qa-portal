@@ -33,6 +33,9 @@ def setup_request(monkeypatch, kind):
         request.targets = [models.DASTTarget(id=i, application_url=f'https://app/{i}') for i in (41, 42, 43)]
     monkeypatch.setattr(sast_dast, '_pending_scan_target_ids', lambda *args: {41, 42})
     monkeypatch.setattr(sast_dast, '_pending_suppression_ids', lambda *args: [])
+    # These unit tests isolate remediation evidence/state transitions. Route-
+    # level workspace authorization has dedicated database-backed coverage.
+    monkeypatch.setattr(sast_dast, '_require_visible', lambda *args: None)
     user = SimpleNamespace(id=1, roles_csv='REQUESTER', has_role=lambda *args: False)
     return request, user
 

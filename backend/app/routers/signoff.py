@@ -22,6 +22,7 @@ from ..pdf_export import (
     qa_clearance_export_status,
 )
 from .. import documents as doc_store
+from ..workflow_authority import is_system_admin
 
 router = APIRouter(prefix="/api/signoffs", tags=["signoff"])
 
@@ -62,7 +63,7 @@ def _require(obj, expected_statuses, action: str):
 
 
 def _get_or_404(db: Session, signoff_id: int) -> "models.QASignOff":
-    obj = db.query(models.QASignOff).get(signoff_id)
+    obj = db.get(models.QASignOff, signoff_id)
     if not obj:
         raise HTTPException(404, "Clearance certificate not found")
     from ..workspace_service import current_workspace_scope_ids
@@ -452,7 +453,7 @@ def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, d
     # records the QA Lead decision they cannot sign the final Executive
     # decision on the same certificate. Admin retains its explicit oversight
     # bypass, consistent with the other sign-off permission checks.
-    if obj.reviewed_by_id == current_user.id and not current_user.has_role(Role.ADMIN):
+    if obj.reviewed_by_id == current_user.id and not is_system_admin(current_user):
         raise HTTPException(
             403,
             "Final Executive approval must be completed by a different approver; "
@@ -494,7 +495,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     def uname(uid):
         if not uid:
             return None
-        u = db.query(models.User).get(uid)
+        u = db.get(models.User, uid)
         return u.full_name if u else None
 
     history_rows = (db.query(models.ApprovalAction)

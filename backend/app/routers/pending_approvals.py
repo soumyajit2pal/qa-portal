@@ -3,7 +3,7 @@ from typing import List, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, or_, select, union_all
+from sqlalchemy import and_, func, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from .. import models, pagination, schemas
@@ -150,7 +150,7 @@ def _user_name(db: Session, user_id: Optional[int]) -> Optional[str]:
     read-only feed."""
     if not user_id:
         return None
-    row = db.query(models.User).get(user_id)
+    row = db.get(models.User, user_id)
     return row.full_name if row else None
 
 
@@ -200,7 +200,11 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
     if user.has_role(Role.APPLICATION_OWNER):
         q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_APP_OWNER")
         if not is_admin:
-            q = q.filter(models.ApplicationMaster.department.in_(user.departments))
+            q = q.filter(
+                models.ApplicationMaster.department.in_(user.departments),
+                or_(models.ApplicationMaster.requested_by_id.is_(None),
+                    models.ApplicationMaster.requested_by_id != user.id),
+            )
         for obj in q.order_by(models.ApplicationMaster.created_at).all():
             gw = _active_gateway(obj.id)
             if not gw:
@@ -216,7 +220,11 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
     if user.has_role(Role.SM):
         q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_SM")
         if not is_admin:
-            q = q.filter(models.ApplicationMaster.department.in_(user.departments))
+            q = q.filter(
+                models.ApplicationMaster.department.in_(user.departments),
+                or_(models.ApplicationMaster.requested_by_id.is_(None),
+                    models.ApplicationMaster.requested_by_id != user.id),
+            )
         for obj in q.order_by(models.ApplicationMaster.created_at).all():
             gw = _active_gateway(obj.id)
             if not gw:
@@ -244,6 +252,31 @@ _SM_DEPT_HEAD_MODULES = [
     (models.DASTRequest, "DAST", "/dast", "DAST", SAST_DAST_STATUS_LABELS),
     (models.PerformanceRequest, "PERFORMANCE", "/performance", "Performance Testing", PERFORMANCE_STATUS_LABELS),
 ]
+
+
+def _same_sm_approver_condition(model, entity_type: str, user: models.User):
+    """SQL predicate matching the decision endpoint's two-stage separation."""
+    modern = select(models.ApprovalAction.id).where(
+        models.ApprovalAction.entity_type == entity_type,
+        models.ApprovalAction.entity_id == model.id,
+        models.ApprovalAction.step_name == "SM Approval",
+        models.ApprovalAction.decision == "Approved",
+        models.ApprovalAction.actor_id == user.id,
+    ).exists()
+    if entity_type not in {"SAST", "DAST"}:
+        return modern
+    other_model = models.DASTRequest if entity_type == "SAST" else models.SASTRequest
+    legacy = and_(
+        ~select(other_model.id).where(other_model.id == model.id).exists(),
+        select(models.ApprovalAction.id).where(
+            models.ApprovalAction.entity_type == "SAST_DAST",
+            models.ApprovalAction.entity_id == model.id,
+            models.ApprovalAction.step_name == "SM Approval",
+            models.ApprovalAction.decision == "Approved",
+            models.ApprovalAction.actor_id == user.id,
+        ).exists(),
+    )
+    return or_(modern, legacy)
 
 # Readiness checkpoints belong to the shared QA Lead group. Legacy lead-ID
 # columns remain in the model for historical records but no longer scope the
@@ -323,6 +356,8 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
                     team_scope,
                     model.requester_id != user.id,
                 )
+            if not is_system_admin(user):
+                q = q.filter(~_same_sm_approver_condition(model, entity_type, user))
             for obj in q.order_by(model.created_at).all():
                 results.append(_item(
                     f"{module_label} -- Department Head Approval", entity_type, obj.id, obj.request_id,
@@ -396,6 +431,9 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
         if not is_admin:
             q = q.filter(_suppression_team_scope_condition(db, user),
                          models.SuppressionRequest.created_by_id != user.id)
+        if not is_system_admin(user):
+            q = q.filter(or_(models.SuppressionRequest.sm_id.is_(None),
+                             models.SuppressionRequest.sm_id != user.id))
         for obj in q.order_by(models.SuppressionRequest.created_at).all():
             results.append(_item(
                 "Suppression -- Department Head Approval", "SUPPRESSION", obj.id, obj.suppression_id,
@@ -405,7 +443,10 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
                 obj.created_at, _detail_path("/suppression", obj.suppression_id, obj.id),
             ))
     if user.has_role(Role.SECURITY_ANALYST):
-        for obj in _query("SECURITY_TEAM_VERIFICATION").order_by(models.SuppressionRequest.created_at).all():
+        q = _query("SECURITY_TEAM_VERIFICATION").filter(
+            models.SuppressionRequest.created_by_id != user.id,
+        )
+        for obj in q.order_by(models.SuppressionRequest.created_at).all():
             results.append(_item(
                 "Suppression -- Security Team Verification", "SUPPRESSION", obj.id, obj.suppression_id,
                 f"Suppression: {obj.application_name or '—'}", obj.status,
@@ -446,7 +487,7 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
             ))
     if user.has_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         q = _query("DEPT_HEAD_QA_APPROVAL_PENDING")
-        if not is_admin:
+        if not is_system_admin(user):
             q = q.filter(or_(models.QASignOff.reviewed_by_id.is_(None), models.QASignOff.reviewed_by_id != user.id))
         for obj in q.order_by(models.QASignOff.created_at).all():
             results.append(_item(
@@ -615,12 +656,20 @@ def _pending_count_statement(db: Session, user: models.User):
     if user.has_role(Role.APPLICATION_OWNER):
         conditions = [models.ApplicationMaster.status == "PENDING_APP_OWNER", active_gateway]
         if not is_admin:
-            conditions.append(models.ApplicationMaster.department.in_(user.departments))
+            conditions.extend([
+                models.ApplicationMaster.department.in_(user.departments),
+                or_(models.ApplicationMaster.requested_by_id.is_(None),
+                    models.ApplicationMaster.requested_by_id != user.id),
+            ])
         add_count(models.ApplicationMaster, *conditions)
     if user.has_role(Role.SM):
         conditions = [models.ApplicationMaster.status == "PENDING_SM", active_gateway]
         if not is_admin:
-            conditions.append(models.ApplicationMaster.department.in_(user.departments))
+            conditions.extend([
+                models.ApplicationMaster.department.in_(user.departments),
+                or_(models.ApplicationMaster.requested_by_id.is_(None),
+                    models.ApplicationMaster.requested_by_id != user.id),
+            ])
         add_count(models.ApplicationMaster, *conditions)
 
     for model, _entity_type, _path, _module_label, _labels in _SM_DEPT_HEAD_MODULES:
@@ -643,6 +692,7 @@ def _pending_count_statement(db: Session, user: models.User):
                     ),
                     model.requester_id != user.id,
                 ])
+            conditions.append(~_same_sm_approver_condition(model, _entity_type, user))
             add_count(model, *conditions, join=(models.QARequest, model.qa_request_id == models.QARequest.id, True))
 
     if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
@@ -666,9 +716,15 @@ def _pending_count_statement(db: Session, user: models.User):
                 _suppression_team_scope_condition(db, user),
                 models.SuppressionRequest.created_by_id != user.id,
             ])
+        conditions.append(or_(models.SuppressionRequest.sm_id.is_(None),
+                              models.SuppressionRequest.sm_id != user.id))
         add_count(models.SuppressionRequest, *conditions)
     if user.has_role(Role.SECURITY_ANALYST):
-        add_count(models.SuppressionRequest, models.SuppressionRequest.status == "SECURITY_TEAM_VERIFICATION")
+        add_count(
+            models.SuppressionRequest,
+            models.SuppressionRequest.status == "SECURITY_TEAM_VERIFICATION",
+            models.SuppressionRequest.created_by_id != user.id,
+        )
 
     workspace_id = active_qa_workspace_scope(user)
     if is_admin or user.has_qa_workspace_role(
@@ -683,10 +739,9 @@ def _pending_count_statement(db: Session, user: models.User):
         if user.has_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA):
             conditions = [models.QASignOff.status == "DEPT_HEAD_QA_APPROVAL_PENDING"]
             if not is_admin:
-                conditions.extend([
-                    models.QASignOff.requester_id != user.id,
-                    or_(models.QASignOff.reviewed_by_id.is_(None), models.QASignOff.reviewed_by_id != user.id),
-                ])
+                conditions.append(models.QASignOff.requester_id != user.id)
+            conditions.append(or_(models.QASignOff.reviewed_by_id.is_(None),
+                                  models.QASignOff.reviewed_by_id != user.id))
             add_count(models.QASignOff, *conditions)
 
     if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):

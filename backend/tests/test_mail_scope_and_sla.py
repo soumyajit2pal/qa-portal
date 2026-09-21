@@ -75,7 +75,7 @@ def test_sla_boundary_recipients_dedup_and_new_update(db):
 
 def test_scope_excludes_other_department_view_only_and_inactive(db):
     good=user(db,1,'SM','IT')
-    wrong=user(db,2,'SM','Other')
+    user(db,2,'SM','Other')
     view=user(db,3,'SM','IT');view.role_assignments.append(m.UserRole(role='VIEW_ONLY'))
     inactive=user(db,4,'SM','IT');inactive.is_active=False
     db.flush()
@@ -86,8 +86,8 @@ def test_scope_excludes_other_department_view_only_and_inactive(db):
 def test_group_mail_excludes_wrong_workspace_and_parent_viewer(db, monkeypatch):
     from app import workspace_service
     good=user(db,1,'QA_ENGINEER','QA')
-    outsider=user(db,2,'QA_ENGINEER','QA')
-    viewer=user(db,3,'QA_ENGINEER','QA')
+    user(db,2,'QA_ENGINEER','QA')
+    user(db,3,'QA_ENGINEER','QA')
     administrator=user(db,4,'QA_ENGINEER','Other')
     administrator.role_assignments.append(m.UserRole(role='ADMIN'));db.flush()
     monkeypatch.setattr(mail,'_workspace_role_user_ids',lambda *args:{1,2,3,4})

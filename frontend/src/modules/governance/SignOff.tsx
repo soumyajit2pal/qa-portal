@@ -18,6 +18,7 @@ import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivi
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
+import { isKeyboardActivationKey } from '../../keyboard'
 import './SignOff.css'
 
 function userName(users: UserOption[], id?: number | null): string | null {
@@ -155,11 +156,12 @@ function TestingRequestIdSearch({ requests, selected, onSelect, onClear, display
       />
       {open && (
         <div className="searchable-select-panel">
-          <div className="searchable-select-list">
+          <div className="searchable-select-list" role="listbox" aria-label="Eligible functional testing requests">
             {matches.length === 0 && <div className="searchable-select-empty">No eligible Functional Testing Requests found.</div>}
             {matches.map((r) => (
-              <div key={r.id} className="searchable-select-option"
-                   onClick={() => { onSelect(r); setQuery(''); setOpen(false) }}>
+              <div key={r.id} className="searchable-select-option" role="option" aria-selected={false} tabIndex={0}
+                   onClick={() => { onSelect(r); setQuery(''); setOpen(false) }}
+                   onKeyDown={(event) => { if (isKeyboardActivationKey(event.key)) { event.preventDefault(); onSelect(r); setQuery(''); setOpen(false) } }}>
                 <div>{r.request_id} — {r.application_name || '—'}</div>
                 {(r.department || r.application_owner) && (
                   <div className="muted small">{r.application_owner || '—'} &middot; {r.department || '—'}</div>
@@ -247,15 +249,11 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
 
   useEffect(() => {
     if (presetRequest) { applyRequest(presetRequest); return }
-    // SIGNOFF_ELIGIBLE_STATUSES filtering now happens server-side via
-    // PAG-001's multi-value `status` param, instead of fetching every
-    // Functional Testing Request and filtering client-side. page_size=100
-    // is the same "good enough for a picker, not exhaustive" compatibility
-    // cap used by the other pickers built on top of a paginated endpoint
-    // (see QARequests/index.tsx's own openRequest comment for the pattern).
+    // Filtering happens server-side, while the picker exhausts the filtered
+    // result so an older eligible request is never impossible to select.
     const statusQuery = SIGNOFF_ELIGIBLE_STATUSES.map((s) => `status=${encodeURIComponent(s)}`).join('&')
-    api.get<PageOut<FunctionalListOut>>(`/api/functional-requests?${statusQuery}&page_size=100`)
-      .then((p) => setEligibleRequests(p.items))
+    api.getAll<FunctionalListOut>(`/api/functional-requests?${statusQuery}`)
+      .then(setEligibleRequests)
       .catch(setError)
   }, [presetRequest, applyRequest])
 

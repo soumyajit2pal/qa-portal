@@ -2,7 +2,7 @@ import datetime
 from unittest.mock import patch
 
 import pytest
-from jose import JWTError
+from jwt import PyJWTError as JWTError
 from fastapi import Response
 
 from app.auth import create_access_token, decode_access_token, renew_access_token
