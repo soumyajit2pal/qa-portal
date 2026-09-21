@@ -26,9 +26,7 @@ SEVERITIES = ("Critical", "High", "Medium", "Low")
 PRIORITIES = ("P1 – Immediate", "P2 – High", "P3 – Medium", "P4 – Low")
 RESOLUTION_TYPES = (
     "Fixed", "Configuration Changed", "Data Corrected", "Code Change",
-    "Environment Issue Resolved", "Cannot Reproduce", "Working as Designed",
-    "Requirement Misunderstanding", "Test Data Issue", "Configuration Issue",
-    "Documentation Updated", "Enhancement / Change Request", "Other",
+    "Environment Issue Resolved", "Cannot Reproduce", "Working as Designed", "Other",
 )
 NAD_QA_OUTCOMES = {
     "Working as Designed", "Requirement Misunderstanding", "Environment Issue Resolved",
@@ -883,10 +881,10 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
             "Only the Defect Reporter, current assignee, the Department Head of the assignee, "
             "a QA Lead, or an Administrator can perform this action",
         )
-    if requested == "Not a Defect Review" and not (manager or assignee):
+    if requested == "Not a Defect Review" and not assignee:
         raise HTTPException(
             403,
-            "Only the assigned developer/resolver or an authorized QA lead can propose Not a Defect",
+            "Only the assigned developer/resolver can propose Not a Defect",
         )
     if requested == "Not a Defect" and not (obj.status == "Not a Defect Review" and (qa_reviewer or manager)):
         raise HTTPException(403, "Only the assigned QA reviewer or an authorized QA lead can confirm Not a Defect")

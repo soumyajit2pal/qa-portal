@@ -94,7 +94,7 @@ export default function DefectWorkflowPanel({ defect, users, departments, onChan
     if (target === 'Triaged') return canTriage
     if (['In Progress', 'Ready for QA'].includes(target)) return manager || resolver
     if (target === 'Deferred') return manager || roles.includes('APPLICATION_OWNER')
-    if (target === 'Not a Defect Review') return manager || resolver
+    if (target === 'Not a Defect Review') return resolver
     if (target === 'Not a Defect') return defect.status === 'Not a Defect Review' && (manager || qa)
     if (target === 'Change Request Raised') return defect.status === 'Not a Defect Review' && (manager || qa)
     if (target === 'Reopened' && defect.status === 'Not a Defect Review') return manager || qa

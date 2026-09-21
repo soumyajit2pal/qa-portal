@@ -282,6 +282,17 @@ def test_not_a_defect_proposer_cannot_self_assign_as_qa_reviewer():
                remarks='Expected behavior', reference='REQ-17')
 
 
+def test_qa_lead_cannot_submit_the_developer_not_a_defect_proposal():
+    obj = defect('In Progress')
+    lead = SimpleNamespace(id=2, full_name='QA Lead', roles=['QA_LEAD'], has_role=lambda *roles: True)
+    payload = schemas.DefectWorkflowAction(
+        revision=0, status='Not a Defect Review', retest_tester_id=4,
+        remarks='Expected behavior', reference='REQ-17',
+    )
+    with pytest.raises(HTTPException, match='authorized owner'):
+        apply_action(DB(obj), obj, payload, lead)
+
+
 def test_owner_from_another_workspace_rejected(monkeypatch):
     from app import workspace_service
     monkeypatch.setattr(workspace_service, 'selectable_workspace_ids', lambda *a: {99})

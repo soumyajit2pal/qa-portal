@@ -143,7 +143,7 @@ def apply_action(db, obj, payload, user):
             # disagreement is explicit, attributable, and independently
             # audited instead of treating the developer's proposal as a
             # terminal status.
-            allowed(manager or assignee)
+            allowed(assignee)
             reviewer = owner(payload.retest_tester_id, 'QA tester')
             if reviewer.id in {user.id, obj.assignee_id}:
                 raise HTTPException(400, 'Select an independent QA reviewer other than the developer/resolver proposing this outcome')

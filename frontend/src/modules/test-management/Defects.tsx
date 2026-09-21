@@ -28,7 +28,7 @@ import { createLatestRequestGate } from '../../latestRequest'
 const STATUSES = ['Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised', 'Closed']
 const SEVERITIES = ['Critical', 'High', 'Medium', 'Low']
 const PRIORITIES = ['P1 – Immediate', 'P2 – High', 'P3 – Medium', 'P4 – Low']
-const RESOLUTION_TYPES = ['Fixed', 'Configuration Changed', 'Data Corrected', 'Code Change', 'Environment Issue Resolved', 'Cannot Reproduce', 'Working as Designed', 'Requirement Misunderstanding', 'Test Data Issue', 'Configuration Issue', 'Documentation Updated', 'Enhancement / Change Request', 'Other']
+const RESOLUTION_TYPES = ['Fixed', 'Configuration Changed', 'Data Corrected', 'Code Change', 'Environment Issue Resolved', 'Cannot Reproduce', 'Working as Designed', 'Other']
 const NAD_QA_OUTCOMES = ['Working as Designed', 'Requirement Misunderstanding', 'Environment Issue Resolved', 'Test Data Issue', 'Configuration Issue', 'Documentation Updated']
 // 2026-08 -- reported directly, with a full defect lifecycle diagram: New
 // now passes through an explicit "Triaged" checkpoint before any
@@ -926,7 +926,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     if (target === 'Assigned') return canAssign
     if (['Rejected', 'Duplicate'].includes(target)) return !qaDispositionBlocked
       && (manager || defect.reporter_id === user?.id || assigneeOrDepartmentHead)
-    if (target === 'Not a Defect Review') return manager || assignee
+    if (target === 'Not a Defect Review') return assignee
     if (target === 'Not a Defect') return defect.status === 'Not a Defect Review' && (manager || qaReviewer)
     if (target === 'Change Request Raised') return defect.status === 'Not a Defect Review' && (manager || qaReviewer)
     if (target === 'Deferred') return manager || applicationOwner

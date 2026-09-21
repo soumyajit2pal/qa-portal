@@ -158,7 +158,7 @@ test('not-a-defect is proposed to an independent QA reviewer before becoming ter
   assert.match(legacy, /Documentation Updated/)
   assert.match(legacy, /Change Request \/ enhancement reference/)
   assert.match(legacy, /QA reviewer \*/)
-  assert.match(modern, /target === 'Not a Defect Review'.*manager \|\| resolver/)
+  assert.match(modern, /target === 'Not a Defect Review'.*return resolver/)
   assert.match(modern, /target === 'Not a Defect'.*manager \|\| qa/)
   assert.match(modern, /target === 'Change Request Raised'.*manager \|\| qa/)
   assert.match(modern, /target === 'Reopened'.*Not a Defect Review.*manager \|\| qa/)

@@ -4,7 +4,7 @@ import pytest
 
 from app.constants import Role
 from app import schemas
-from app.routers.defects import CREATE_ROLES, STATUSES, TRANSITIONS, _qa_disposition_blocked_for_requester_assignment
+from app.routers.defects import CREATE_ROLES, NAD_QA_OUTCOMES, RESOLUTION_TYPES, STATUSES, TRANSITIONS, _qa_disposition_blocked_for_requester_assignment
 from app.routers.test_execution import _DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES, _DEFECT_RETEST_CLEAR_STATUSES
 
 
@@ -95,6 +95,13 @@ def test_not_a_defect_review_blocks_cycle_completion_until_qa_decides():
     assert "Not a Defect Review" not in _DEFECT_RETEST_CLEAR_STATUSES
     assert "Not a Defect" in _DEFECT_RETEST_CLEAR_STATUSES
     assert "Change Request Raised" in _DEFECT_RETEST_CLEAR_STATUSES
+
+
+def test_qa_triage_classifications_do_not_leak_into_normal_fix_resolution_types():
+    qa_only = {"Requirement Misunderstanding", "Test Data Issue", "Configuration Issue", "Documentation Updated"}
+    assert qa_only.issubset(NAD_QA_OUTCOMES)
+    assert qa_only.isdisjoint(RESOLUTION_TYPES)
+    assert "Enhancement / Change Request" not in RESOLUTION_TYPES
 
 
 def test_agm_qa_has_full_defect_creation_authority():
