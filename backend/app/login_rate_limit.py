@@ -5,6 +5,7 @@ import uuid
 from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 from .models import LoginFailure
+from .audit_service import request_ip
 
 WINDOW_SECONDS = 15 * 60
 MAX_FAILURES = 5
@@ -23,7 +24,17 @@ def _attempts(db, username, host=None):
 
 
 def _host(request):
-    return request.client.host if request.client else 'unknown'
+    # ProxyHeadersMiddleware can preserve a ``request.client`` object while
+    # replacing its host with ``None`` when the complete forwarded chain is
+    # trusted.  Returning that value used to make every failed login attempt
+    # insert NULL into qap_login_failures.host.  The resulting integrity error
+    # then replaced the intended 401 "Invalid username or password" response
+    # with the rate limiter's generic 503 service-unavailable response.
+    #
+    # Reuse the application's trust-aware address resolver so forwarded
+    # headers are accepted only at a trusted edge, and always retain a stable,
+    # non-null bucket when no valid client address is available.
+    return request_ip(request) or 'unknown'
 
 
 def enforce(request, username):

@@ -13,6 +13,11 @@ def request(host='10.0.0.1'):
     return Request({'type': 'http', 'client': (host, 123), 'headers': []})
 
 
+def proxy_request(real_ip=None):
+    headers = [] if real_ip is None else [(b'x-real-ip', real_ip.encode())]
+    return Request({'type': 'http', 'client': (None, 0), 'headers': headers})
+
+
 @pytest.fixture
 def store(tmp_path):
     engine = create_engine('sqlite:///' + str(tmp_path / 'limits.db'))
@@ -65,6 +70,27 @@ def test_success_clears_only_current_ip(store):
     limits.enforce(request(), 'user')
     with pytest.raises(HTTPException):
         limits.enforce(request('10.0.0.2'), 'user')
+
+
+def test_proxy_client_without_host_records_failure_instead_of_returning_503(store):
+    """Uvicorn may expose client=(None, 0) behind a trusted reverse proxy."""
+    proxied = proxy_request('10.20.30.40')
+    limits.record(proxied, 'user')
+
+    with store() as db:
+        row = db.query(LoginFailure).one()
+        assert row.host == '10.20.30.40'
+
+    limits.clear(proxied, 'user')
+
+
+def test_proxy_client_without_any_valid_address_uses_non_null_bucket(store):
+    proxied = proxy_request()
+    limits.record(proxied, 'user')
+
+    with store() as db:
+        row = db.query(LoginFailure).one()
+        assert row.host == 'unknown'
 
 
 def test_wait_for_fifth_newest_failure_when_concurrent_attempts_exceed_limit(store):
