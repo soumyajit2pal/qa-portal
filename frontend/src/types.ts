@@ -504,6 +504,7 @@ export interface FunctionalOut {
   updated_at: string
   qa_request_id?: number | null
   qa_request?: LinkedRequestRef | null
+  qa_workspace_id?: number | null
   active_delegation?: QARequestDelegationOut | null
   application_name?: string | null
   epic_number?: string | null
@@ -705,6 +706,7 @@ export interface SASTOut {
   findings: SASTFindingOut[]
   qa_request_id?: number | null
   qa_request?: LinkedRequestRef | null
+  qa_workspace_id?: number | null
   active_delegation?: QARequestDelegationOut | null
   department?: string | null
   application_owner?: string | null
@@ -798,6 +800,7 @@ export interface DASTOut {
   findings: DASTFindingOut[]
   qa_request_id?: number | null
   qa_request?: LinkedRequestRef | null
+  qa_workspace_id?: number | null
   active_delegation?: QARequestDelegationOut | null
   department?: string | null
   application_owner?: string | null
@@ -898,6 +901,7 @@ export interface PerformanceOut {
   updated_at: string
   qa_request_id?: number | null
   qa_request?: LinkedRequestRef | null
+  qa_workspace_id?: number | null
   active_delegation?: QARequestDelegationOut | null
   department?: string | null
   application_owner?: string | null
@@ -925,6 +929,7 @@ export interface SuppressionOut {
   application_name: string
   scan_type: string
   department?: string | null
+  qa_workspace_id?: number | null
   application_owner?: string | null
   sast_request_id?: number | null
   dast_request_id?: number | null
@@ -1228,6 +1233,8 @@ export interface TestProjectOut {
   application_master_id?: number | null
   qa_workspace_id?: number | null
   qa_workspace_name?: string | null
+  workspace_contributable: boolean
+  workspace_writable: boolean
   department?: string | null
   department_unit_id?: number | null
   department_unit_name?: string | null

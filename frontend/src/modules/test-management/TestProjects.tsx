@@ -31,7 +31,9 @@ const CAN_MANAGE_ROLES = ['QA_ENGINEER', 'QA_LEAD']
 // Projects in general (create, request activation/deactivation). Mirrors
 // backend deps.py::can_manage_project exactly.
 function canEditProjectDetails(user: UserOut | null | undefined, project: TestProjectOut): boolean {
-  return hasRole(user, ...QA_LEAD_GROUP_ROLES) || (hasRole(user, 'QA_ENGINEER') && project.owner_id === user?.id)
+  return project.workspace_writable && (
+    hasRole(user, ...QA_LEAD_GROUP_ROLES) || (hasRole(user, 'QA_ENGINEER') && project.owner_id === user?.id)
+  )
 }
 
 function NewProjectModal({ applications, departments, users, currentUserId, onClose, onCreated }: {
@@ -614,8 +616,8 @@ export default function TestProjects() {
                 {project.shared_with_you && (
                   <span className="badge badge-blue" title="The project owner or an authorized project manager shared view access with you, your department, or your active workspace.">Shared with you</span>
                 )}
-                {project.view_only && (
-                  <span className="badge badge-gray" title="You can see this project's Test Execution/Repository/Reports/Defects, but only a Department Head, QA Lead, or Admin from its own department can manage it.">Project settings read-only</span>
+                {!project.workspace_writable && (
+                  <span className="badge badge-gray" title="This project is visible here, but its settings belong to another workspace or your current access is read-only.">Project settings read-only</span>
                 )}
                 <Badge status={project.is_archived ? 'Archived' : project.is_active ? 'Active' : 'Inactive'} />
               </span>
@@ -654,7 +656,7 @@ export default function TestProjects() {
                   {!project.view_only && canEditProjectDetails(user, project) && (
                     <button onClick={() => setViewAccessProject(project)}>Share project…</button>
                   )}
-                  {!project.is_archived && !project.view_only && (project.pending_is_active != null ? (
+                  {!project.is_archived && project.workspace_writable && (project.pending_is_active != null ? (
                     canReview && (
                       <>
                         <button className="primary" onClick={() => setActivationReview({ project, decision: 'APPROVE' })}>Approve request</button>
@@ -670,7 +672,7 @@ export default function TestProjects() {
                       {project.is_active ? 'Request deactivation' : 'Request reactivation'}
                     </button>
                   ))}
-                  {!project.view_only && canReview && (
+                  {project.workspace_writable && canReview && (
                     project.is_archived
                       ? <button onClick={() => setUnarchiveProject(project)}>Unarchive</button>
                       : <button className="danger" onClick={() => setArchiveProject(project)}>Archive</button>
@@ -730,7 +732,7 @@ export default function TestProjects() {
       )}
       {activityProject && (
         <Modal title={`${activityProject.project_key} · Activity`} onClose={() => setActivityProject(null)} wide>
-          <JiraActivity entityType="TEST_PROJECT" entityId={activityProject.id} items={activity} onPosted={(item) => setActivity((prev) => [...prev, item])} />
+          <JiraActivity ownerWorkspaceId={activityProject.qa_workspace_id} entityType="TEST_PROJECT" entityId={activityProject.id} items={activity} onPosted={(item) => setActivity((prev) => [...prev, item])} />
         </Modal>
       )}
       {statusProject && (

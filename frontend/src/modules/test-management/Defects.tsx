@@ -1053,7 +1053,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
       <section className="defect-evidence"><div><h4>Evidence & Attachments <span>{documents.length}</span></h4>{canTouchDefect && <label className="btn btn-sm">{uploading ? 'Uploading…' : '+ Add evidence'}<input type="file" multiple hidden accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')} disabled={uploading} onChange={(e) => upload(e.target.files)} /></label>}</div>{documents.length ? <div className="defect-files">{documents.map((document) => <button key={document.id} onClick={() => download(document)}>{document.file_name}</button>)}</div> : <p className="muted small">No supporting evidence attached.</p>}</section>
       </div>
       <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-activity`} aria-labelledby={`defect-${defect.id}-tab-activity`} hidden={detailTab !== 'activity'} tabIndex={0}>
-      <JiraActivity workflowHistory={defect.workflow ? defect.workflow_state?.history || [] : undefined} entityType="DEFECT" entityId={defect.id} items={activity} onPosted={(item) => setActivity((current) => [...current, item])} />
+      <JiraActivity ownerWorkspaceId={defect.qa_workspace_id} workflowHistory={defect.workflow ? defect.workflow_state?.history || [] : undefined} entityType="DEFECT" entityId={defect.id} items={activity} onPosted={(item) => setActivity((current) => [...current, item])} />
       </div>
       </div>
     </Modal>

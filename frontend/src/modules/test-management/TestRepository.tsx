@@ -2178,7 +2178,14 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
         </div>
       )}
       {existing && <LinkedDefects query={`test_case_id=${existing.id}`} />}
-      {existing && <JiraActivity readOnly={!existing.workspace_writable} entityType="TEST_CASE" entityId={existing.id} items={activity} onPosted={(item) => setActivity((prev) => [...prev, item])} />}
+      {existing && <JiraActivity
+        readOnly={!existing.workspace_writable}
+        ownerWorkspaceId={existing.origin_workspace_id || currentProject.qa_workspace_id}
+        entityType="TEST_CASE"
+        entityId={existing.id}
+        items={activity}
+        onPosted={(item) => setActivity((prev) => [...prev, item])}
+      />}
       {confirmDelete && existing && (
         <ConfirmModal
           title="Delete test case?"
@@ -2913,8 +2920,13 @@ export default function TestRepository() {
   const folderTree = useMemo(() => buildFolderTree(folders), [folders])
   const selectedProject = projects.find((project) => project.id === projectId)
   const projectIsActive = !!selectedProject?.is_active
+  const projectCanContribute = projectIsActive && !!selectedProject?.workspace_contributable
   const selectedCount = selectedCaseIds.size
   const selectedCases = cases.filter((testCase) => selectedCaseIds.has(testCase.id))
+  // Selection can survive an in-place data refresh. Re-evaluate ownership
+  // before deriving every bulk payload so a row that became read-only can
+  // never remain actionable merely because it was selected earlier.
+  const writableSelectedCases = selectedCases.filter((testCase) => testCase.workspace_writable)
   // 2026-08 fix: this originally only checked the two OLD-path in-flight
   // statuses -- missed the NEW-path pair introduced alongside them
   // (Recommendation Pending / QA Lead Approval Pending), so a selection
@@ -2924,37 +2936,37 @@ export default function TestRepository() {
   // reuses the same TEST_CASE_PENDING_DECISION_STATUSES constant the
   // modal's own internal per-row lock and the single-case panel already use,
   // instead of a separately-maintained two-status list.
-  const selectedCasesIncludeWorkflowLock = selectedCases.some(
+  const selectedCasesIncludeWorkflowLock = writableSelectedCases.some(
     (testCase) => TEST_CASE_PENDING_DECISION_STATUSES.includes(testCase.status),
   )
-  const selectedReturnedCasesBelongToUser = selectedCases.every(
+  const selectedReturnedCasesBelongToUser = writableSelectedCases.every(
     (testCase) => !RETURNED_CORRECTION_STATUSES.includes(testCase.status)
       || testCase.current_draft_author_id === user?.id,
   )
-  const canBulkUpdateAssignments = canAuthor && !selectedCasesIncludeWorkflowLock && selectedCases.length > 0 && selectedCases.every(
+  const canBulkUpdateAssignments = canAuthor && !selectedCasesIncludeWorkflowLock && writableSelectedCases.length > 0 && writableSelectedCases.every(
     (testCase) => testCase.current_draft_author_id === user?.id
       && !['Approved', 'Rejected', 'Archived'].includes(testCase.status),
   )
-  const canBulkUpdateTestcaseFields = canAuthor && !selectedCasesIncludeWorkflowLock && selectedReturnedCasesBelongToUser
+  const canBulkUpdateTestcaseFields = canAuthor && writableSelectedCases.length > 0 && !selectedCasesIncludeWorkflowLock && selectedReturnedCasesBelongToUser
   const canOpenBulkUpdate = canBulkUpdateAssignments || canBulkUpdateTestcaseFields
-  const recommendSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
+  const recommendSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id) && testCase.workspace_writable
     && (testCase.current_draft_author_id !== user?.id || isAdministrator)
     && ['In Review', 'Recommendation Pending'].includes(testCase.status)
     && (testCase.status === 'In Review' ? canReview : hasRole(user, 'QA_ENGINEER'))
     && (isAdministrator || testCase.status !== 'Recommendation Pending' || testCase.current_draft_submitted_by_id !== user?.id)
   ).map((testCase) => testCase.id)
-  const finalApproveSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
+  const finalApproveSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id) && testCase.workspace_writable
     && (testCase.current_draft_author_id !== user?.id || isAdministrator)
     && ['Review Completed', 'QA Lead Approval Pending'].includes(testCase.status)
     && (testCase.status === 'Review Completed' ? canGiveFinalApproval : hasRole(user, ...QA_LEAD_GROUP_ROLES))
     && (isAdministrator || testCase.status !== 'QA Lead Approval Pending'
       || (testCase.current_draft_submitted_by_id !== user?.id && testCase.current_draft_reviewed_by_id !== user?.id))
   ).map((testCase) => testCase.id)
-  const submittableSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
+  const submittableSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id) && testCase.workspace_writable
     && ['Draft', ...RETURNED_CORRECTION_STATUSES].includes(testCase.status)
     && (!RETURNED_CORRECTION_STATUSES.includes(testCase.status)
       || testCase.current_draft_author_id === user?.id)).map((testCase) => testCase.id)
-  const returnRejectSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
+  const returnRejectSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id) && testCase.workspace_writable
     && (testCase.current_draft_author_id !== user?.id || isAdministrator)
     && (
       (testCase.status === 'Recommendation Pending'
@@ -2978,9 +2990,9 @@ export default function TestRepository() {
   // list view can't detect without a dedicated backend flag -- the
   // backend's own check (which scans full version history) remains the
   // authoritative guard for that case, same as every other bulk action here.
-  const governedSelectedIds = selectedCases.filter((testCase) =>
+  const governedSelectedIds = writableSelectedCases.filter((testCase) =>
     !!testCase.current_approved_version_id || testCase.status === 'Rejected').map((testCase) => testCase.id)
-  const deletableSelectedIds = selectedCases.filter((testCase) =>
+  const deletableSelectedIds = writableSelectedCases.filter((testCase) =>
     !testCase.current_approved_version_id
     && testCase.status !== 'Rejected'
     && (!RETURNED_CORRECTION_STATUSES.includes(testCase.status)
@@ -2989,7 +3001,7 @@ export default function TestRepository() {
   // already-Archived row has nothing further to do, a Draft/In Review/etc
   // row has no approved baseline to archive yet).
   const archivableSelectedIds = canManageRepoGovernance
-    ? selectedCases.filter((testCase) => testCase.status === 'Approved').map((testCase) => testCase.id)
+    ? writableSelectedCases.filter((testCase) => testCase.status === 'Approved').map((testCase) => testCase.id)
     : []
   // "Restore selected" -- the reverse of Archive Selected, same eligibility
   // gate (QA Lead Group/Admin, canManageRepoGovernance) and only ever
@@ -2997,7 +3009,7 @@ export default function TestRepository() {
   // view (or an "All test cases" selection filtered to status=Archived),
   // same as archivableSelectedIds isn't gated to any one view either.
   const restorableSelectedIds = canManageRepoGovernance
-    ? selectedCases.filter((testCase) => testCase.status === 'Archived').map((testCase) => testCase.id)
+    ? writableSelectedCases.filter((testCase) => testCase.status === 'Archived').map((testCase) => testCase.id)
     : []
   // "Visible" now means "on the current page" -- selection/bulk actions are
   // scoped to whatever page is loaded, same tradeoff already made for Test
@@ -3191,7 +3203,7 @@ export default function TestRepository() {
         eyebrow="Test Case Management · Design · Organize · Execute · Trace"
         title="Test Repository" count={summary?.total ?? 0}
         subtitle="Design and organize reusable test cases using the Epic → Feature → Story hierarchy from your Excel template."
-        actions={canAuthor && projectId && projectIsActive ? (
+        actions={canAuthor && projectId && projectCanContribute ? (
           <button className="btn btn-primary tm-new-test-case" onClick={() => setEditingCase('new')}>+ New Test Case</button>
         ) : undefined}
       />
@@ -3221,7 +3233,7 @@ export default function TestRepository() {
           <button className="btn" onClick={exportRepository} disabled={!projectId || exportingRepository}>
             {exportingRepository ? 'Exporting…' : 'Export Repository'}
           </button>
-          {canAuthor && projectId && projectIsActive && (
+          {canAuthor && projectId && projectCanContribute && (
             <>
               <button className="btn" onClick={() => setShowNewFolder(true)}>+ New Folder</button>
               <button className="btn" onClick={() => setShowImport(true)}>Import Excel</button>
@@ -3231,6 +3243,9 @@ export default function TestRepository() {
       </div>
       {projectId && !projectIsActive && (
         <div className="tm-workflow-banner inactive"><span>!</span><strong>Project is inactive</strong><InfoTooltip label="About inactive projects" content="Repository content remains available for review, but changes are disabled until the project is reactivated." /></div>
+      )}
+      {projectId && projectIsActive && !projectCanContribute && (
+        <div className="tm-workflow-banner inactive"><span>i</span><strong>Repository is read-only in this workspace</strong><InfoTooltip label="About read-only repository access" content="You can inspect this shared project and its test cases, but creating or changing repository content requires contributor access from the active workspace." /></div>
       )}
       {projectId && projectIsActive && (
         <div className="tm-workflow-banner"><span>✓</span><strong>Governed test-case workflow</strong><InfoTooltip label="About the governed test-case workflow" content="Author creates or imports a Draft → an eligible QA Group member recommends → an eligible QA Lead Group member gives final approval → approved testcases become available in Test Cycles. Administrator access is retained for workflow recovery." /></div>
@@ -3291,7 +3306,7 @@ export default function TestRepository() {
                 onRenameRequest={setFolderToRename}
               />
             </ul>}
-            {!repositoryStructureCollapsed && canAuthor && projectIsActive && <button className="tm-tree-add" onClick={() => setShowNewFolder(true)}>+ Add folder</button>}
+            {!repositoryStructureCollapsed && canAuthor && projectCanContribute && <button className="tm-tree-add" onClick={() => setShowNewFolder(true)}>+ Add folder</button>}
           </aside>
           <section className="tm-main-panel">
             {isRecycleBinView ? (
@@ -3549,7 +3564,7 @@ export default function TestRepository() {
           </section>
         </div>
       )}
-      {showNewFolder && projectId && projectIsActive && (
+      {showNewFolder && projectId && projectCanContribute && (
         <NewFolderModal
           projectId={projectId}
           folders={folders}
@@ -3557,7 +3572,7 @@ export default function TestRepository() {
           onCreated={(f) => { setFolders((prev) => [...prev, f]); setShowNewFolder(false) }}
         />
       )}
-      {showImport && projectId && projectIsActive && (
+      {showImport && projectId && projectCanContribute && (
         <ImportModal
           projectId={projectId}
           folders={folders}
@@ -3684,7 +3699,7 @@ export default function TestRepository() {
           folderId={typeof selectedFolder === 'number' ? selectedFolder : ''}
           existing={editingCase === 'new' ? null : editingCase}
           users={users}
-          canAuthor={canAuthor && projectIsActive && (editingCase === "new" || !!editingCase.workspace_writable)}
+          canAuthor={canAuthor && projectIsActive && (editingCase === "new" ? projectCanContribute : !!editingCase.workspace_writable)}
           canReview={canReview && projectIsActive && editingCase !== "new" && !!editingCase.workspace_writable}
           canGiveFinalApproval={canGiveFinalApproval && projectIsActive && editingCase !== "new" && !!editingCase.workspace_writable}
           onClose={() => setEditingCase(null)}

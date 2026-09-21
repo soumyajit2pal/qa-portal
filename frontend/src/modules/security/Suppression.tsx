@@ -784,7 +784,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
       )}
 
       {tab === 'history' && (
-        <JiraActivity entityType="SUPPRESSION" entityId={sup.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
+        <JiraActivity ownerWorkspaceId={sup.qa_workspace_id} entityType="SUPPRESSION" entityId={sup.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {tab === 'documents' && <RequestDocuments apiBase="/api/suppressions" reqId={sup.id} canManage={canManageDocuments} />}

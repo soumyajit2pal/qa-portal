@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState, useEffect } from 'react'
 import { api, mapWithConcurrency } from '../api'
 import { formatDateIST, formatDateTimeIST } from '../time'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_LABELS } from '../constants'
+import { activeWorkspaceId, isViewOnly, ROLE_LABELS, uniqueWorkspaceAccess } from '../constants'
 import { ApprovalActionOut, RequestDocumentOut } from '../types'
 import { EmptyState, ErrorText } from './Common'
 import {
@@ -21,8 +21,15 @@ import {
   pasteStructuredRichText,
 } from './RichTextEditor'
 import { decodeMergedRichTable } from '../richTableCodec'
+import { isActivityReadOnly } from '../activityAccess'
 
 type ActivityFilter = 'all' | 'comments' | 'history'
+
+const COMMENT_WORKFLOW_ROLES = new Set([
+  'REQUESTER', 'DEVELOPER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER', 'SM',
+  'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'QA_ENGINEER', 'QA_LEAD',
+  'CHIEF_MANAGER_QA', 'AGM_QA', 'SECURITY_ANALYST',
+])
 
 function initials(name?: string | null): string {
   const parts = (name || '?').trim().split(/\s+/)
@@ -220,8 +227,9 @@ function CommentContent({ commentId, value }: { commentId: number; value: string
   )
 }
 
-export default function JiraActivity({ entityType, entityId, items, onPosted, workflowHistory, readOnly = false }: {
+export default function JiraActivity({ entityType, entityId, items, onPosted, workflowHistory, readOnly = false, ownerWorkspaceId }: {
   readOnly?: boolean
+  ownerWorkspaceId?: number | null
   workflowHistory?: Record<string, any>[]
   entityType: string
   entityId: number
@@ -229,6 +237,20 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
   onPosted: (item: ApprovalActionOut) => void
 }) {
   const { user } = useAuth()
+  const selectedWorkspaceId = activeWorkspaceId(user)
+  const activeWorkspaceAccess = uniqueWorkspaceAccess(user).find(
+    (access) => access.workspace_id === selectedWorkspaceId,
+  )
+  const adminWithoutWorkflowRole = !!user?.roles.includes('ADMIN')
+    && !user.roles.some((role) => COMMENT_WORKFLOW_ROLES.has(role))
+  const accessIsReadOnly = isViewOnly(user)
+    || activeWorkspaceAccess?.role === 'PARENT_WORKSPACE_VIEWER'
+    || adminWithoutWorkflowRole
+  const isReadOnly = isActivityReadOnly(
+    readOnly || accessIsReadOnly,
+    selectedWorkspaceId,
+    ownerWorkspaceId,
+  )
   const editorRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const imageInsertRange = useRef<Range | null>(null)
@@ -352,7 +374,13 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
         </div>
       </div>
 
-      {!readOnly && <div className={`jira-comment-composer ${expanded ? 'expanded' : ''}`}>
+      {isReadOnly && (
+        <div className="jira-activity-read-only" role="note">
+          Comments are read-only for the selected workspace or permission profile. Switch to the record's owning workspace with contributor access to add a comment.
+        </div>
+      )}
+
+      {!isReadOnly && <div className={`jira-comment-composer ${expanded ? 'expanded' : ''}`}>
         <div className="jira-avatar current">{initials(user?.full_name)}</div>
         <div className="jira-composer-body">
           {expanded && (
@@ -436,7 +464,9 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
           <EmptyState
             compact
             title={filter === 'comments' ? 'No comments yet' : 'No activity recorded'}
-            description={filter === 'comments' ? 'Start the conversation using the comment box above.' : 'Workflow events will appear here as the request progresses.'}
+            description={filter === 'comments'
+              ? (isReadOnly ? 'No comments have been added to this record.' : 'Start the conversation using the comment box above.')
+              : 'Workflow events will appear here as the request progresses.'}
           />
         )}
       </div>

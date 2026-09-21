@@ -796,7 +796,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
       )}
 
       {tab === 'history' && (
-        <JiraActivity entityType="PERFORMANCE" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
+        <JiraActivity ownerWorkspaceId={req.qa_workspace_id} entityType="PERFORMANCE" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {tab === 'documents' && <RequestDocuments apiBase="/api/performance-requests" reqId={req.id} canManage={canManageDocuments} />}

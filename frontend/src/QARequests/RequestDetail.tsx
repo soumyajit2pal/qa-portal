@@ -977,7 +977,7 @@ export function RequestDetail({
       )}
 
       {tab === "history" && (
-        <JiraActivity entityType="QA_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
+        <JiraActivity ownerWorkspaceId={req.qa_workspace_id} entityType="QA_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {editingReq && (

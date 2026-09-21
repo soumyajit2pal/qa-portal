@@ -1254,6 +1254,11 @@ class FunctionalRequest(Base):
     # Approval step can see (and act on) a pending new Application Name
     # right from this request's own detail view.
     @property
+    def qa_workspace_id(self):
+        """Owning workspace, delegated from the gateway request."""
+        return self.qa_request.qa_workspace_id if self.qa_request else None
+
+    @property
     def application_master_status(self):
         return self.qa_request.application_master_status if self.qa_request else None
 
@@ -1422,6 +1427,11 @@ class SASTRequest(Base):
     # department/application_owner above, so the SM reviewing this request's
     # own SM Approval step can see (and act on) a pending new Application
     # Name right from this request's own detail view.
+    @property
+    def qa_workspace_id(self):
+        """Owning workspace, delegated from the gateway request."""
+        return self.qa_request.qa_workspace_id if self.qa_request else None
+
     @property
     def application_master_status(self):
         return self.qa_request.application_master_status if self.qa_request else None
@@ -1653,6 +1663,11 @@ class DASTRequest(Base):
     # own SM Approval step can see (and act on) a pending new Application
     # Name right from this request's own detail view.
     @property
+    def qa_workspace_id(self):
+        """Owning workspace, delegated from the gateway request."""
+        return self.qa_request.qa_workspace_id if self.qa_request else None
+
+    @property
     def application_master_status(self):
         return self.qa_request.application_master_status if self.qa_request else None
 
@@ -1874,6 +1889,11 @@ class PerformanceRequest(Base):
     # department/application_owner above, so the SM reviewing this request's
     # own SM Approval step can see (and act on) a pending new Application
     # Name right from this request's own detail view.
+    @property
+    def qa_workspace_id(self):
+        """Owning workspace, delegated from the gateway request."""
+        return self.qa_request.qa_workspace_id if self.qa_request else None
+
     @property
     def application_master_status(self):
         return self.qa_request.application_master_status if self.qa_request else None
@@ -2563,6 +2583,29 @@ class TestProject(Base):
     @property
     def department_unit_name(self):
         return self.department_unit.name if self.department_unit else None
+
+    @property
+    def workspace_contributable(self):
+        """Whether the active actor may create workspace-owned content here."""
+        from sqlalchemy.orm import object_session
+        db = object_session(self)
+        actor = db.info.get("project_workspace_actor") if db else None
+        if not db or not isinstance(actor, User):
+            return False
+        from .project_workspace_ownership import workspace_can_contribute
+        return workspace_can_contribute(db, self.id, actor)
+
+    @property
+    def workspace_writable(self):
+        """Project metadata itself is writable only from its owning workspace."""
+        from sqlalchemy.orm import object_session
+        db = object_session(self)
+        actor = db.info.get("project_workspace_actor") if db else None
+        return bool(
+            isinstance(actor, User)
+            and getattr(actor, "active_qa_workspace_id", None) == self.qa_workspace_id
+            and self.workspace_contributable
+        )
     owner = relationship("User", foreign_keys=[owner_id])
     created_by = relationship("User", foreign_keys=[created_by_id])
     pending_requested_by = relationship("User", foreign_keys=[pending_requested_by_id])
@@ -2731,6 +2774,14 @@ class WorkspaceOwnedContent:
         if isinstance(actor, User):
             from .workflow_authority import admin_department_allowed
             if not admin_department_allowed(actor, self.project.department if self.project else None):
+                return False
+            # Workspace equality alone is insufficient. A View Only user,
+            # a user without a Test Management role, or a workspace whose
+            # project collaboration grant was revoked will all be rejected
+            # by assert_owned() on write. Reflect that complete rule in API
+            # output so the frontend never offers controls that must fail.
+            from .project_workspace_ownership import workspace_can_contribute
+            if not self.project or not workspace_can_contribute(db, self.project.id, actor):
                 return False
         return selected is not None and selected == owner
 

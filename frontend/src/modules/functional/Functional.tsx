@@ -1843,7 +1843,7 @@ export function FunctionalDetail({
       )}
 
       {tab === "history" && (
-        <JiraActivity entityType="FUNCTIONAL_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
+        <JiraActivity ownerWorkspaceId={req.qa_workspace_id} entityType="FUNCTIONAL_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {tab === "documents" && (

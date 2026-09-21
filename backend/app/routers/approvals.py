@@ -9,7 +9,7 @@ from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import (
     get_workflow_user as get_current_user, require_workflow_roles as require_roles, dashboard_department_scope,
-    resolve_entity_department, require_entity_workspace_visibility,
+    resolve_entity_department, resolve_entity_workspace_id, require_entity_workspace_visibility,
     require_department_visibility, viewable_project_ids,
 )
 from .. import documents as doc_store
@@ -295,6 +295,7 @@ def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, curren
         require_department_visibility(
             current_user, resolve_entity_department(db, normalized_type, entity_id),
             requester_id=requester_id,
+            entity_workspace_id=resolve_entity_workspace_id(db, normalized_type, entity_id),
         )
     return normalized_type
 

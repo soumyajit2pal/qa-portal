@@ -26,9 +26,15 @@ def workspace_can_contribute(db, project_id, user):
     project = db.get(models.TestProject, project_id)
     if not project:
         return False
-    from .workflow_authority import admin_department_allowed
-    if isinstance(user, models.User) and not admin_department_allowed(user, project.department):
-        return False
+    if isinstance(user, models.User):
+        # Keep this import inside the already-loaded real-user branch. Test
+        # and migration workers sometimes bind a lightweight actor; importing
+        # workflow_authority for the first time from inside SQLAlchemy's
+        # before_flush iteration registers another before_flush listener and
+        # mutates the listener deque mid-iteration.
+        from .workflow_authority import admin_department_allowed
+        if not admin_department_allowed(user, project.department):
+            return False
     if project.qa_workspace_id == workspace_id:
         return True
     return db.query(models.TestProjectViewGrant.id).filter_by(
@@ -80,6 +86,17 @@ def assert_owned(db, root, user):
         raise HTTPException(403, 'This record belongs to another workspace and is read-only. Create a test case or cycle in your own workspace.')
 
 
+def assert_project_owned(db, project, user):
+    """Protect project metadata; sharing grants content collaboration only."""
+    workspace_id = getattr(user, 'active_qa_workspace_id', None)
+    if (
+        workspace_id is None
+        or project.qa_workspace_id != workspace_id
+        or not workspace_can_contribute(db, project.id, user)
+    ):
+        raise HTTPException(403, 'This project belongs to another workspace and is read-only.')
+
+
 @event.listens_for(Session, 'before_flush')
 def enforce_workspace_ownership(db, flush_context, instances):
     user = db.info.get('project_workspace_actor')
@@ -117,13 +134,24 @@ def guard_request(db, user, request):
         return
     path = request.url.path
     if path.startswith('/api/approvals/'):
-        model = {'TEST_CASE': m.TestCase, 'TEST_CYCLE': m.TestCycle, 'TEST_EXECUTION': m.TestExecution}.get(str(request.path_params.get('entity_type', '')).upper())
+        entity_type = str(request.path_params.get('entity_type', '')).upper()
+        model = {'TEST_PROJECT': m.TestProject, 'TEST_CASE': m.TestCase, 'TEST_CYCLE': m.TestCycle, 'TEST_EXECUTION': m.TestExecution}.get(entity_type)
         entity_id = request.path_params.get('entity_id')
         if model and entity_id:
             obj = db.get(model, int(entity_id))
-            root = root_for(db, obj) if obj is not None else None
-            if root is not None:
-                assert_owned(db, root, user)
+            if isinstance(obj, m.TestProject):
+                assert_project_owned(db, obj, user)
+            else:
+                root = root_for(db, obj) if obj is not None else None
+                if root is not None:
+                    assert_owned(db, root, user)
+        return
+    if path.startswith('/api/test-projects/'):
+        project_id = request.path_params.get('project_id')
+        if project_id is not None:
+            project = db.get(m.TestProject, int(project_id))
+            if project is not None:
+                assert_project_owned(db, project, user)
         return
     if not path.startswith(('/api/test-repository/', '/api/test-execution/')):
         return

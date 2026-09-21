@@ -2407,6 +2407,7 @@ export default function TestExecution() {
   const cycleIsCompleted = selectedCycle?.status === 'Completed'
   const selectedProject = projects.find((project) => project.id === projectId)
   const projectIsActive = !!selectedProject?.is_active
+  const projectCanContribute = projectIsActive && !!selectedProject?.workspace_contributable
   const runnerCandidates = useMemo(() => users.filter((candidate) => (
     isSelectableUser(candidate)
   )), [users])
@@ -2555,7 +2556,7 @@ export default function TestExecution() {
         </li>
       ))}
       {cycles.length === 0 && <li className="tm-cycle-empty">No cycles here yet.</li>}
-      {canExec && projectIsActive && (
+      {canExec && projectCanContribute && (
         <li><button type="button" className="tm-cycle-nested-add" onClick={() => setShowNewCycle(true)}><IconPlus aria-hidden="true" /> Create cycle</button></li>
       )}
     </ul>
@@ -2585,7 +2586,7 @@ export default function TestExecution() {
                 label: `${p.project_key} -- ${p.name}${p.is_active ? '' : ' [Inactive]'}`,
               }))}
             />
-            {canExec && projectId && projectIsActive && (
+            {canExec && projectId && projectCanContribute && (
               <button className="btn" onClick={() => setShowNewCycle(true)}>+ Cycle</button>
             )}
           </div>
@@ -2593,6 +2594,9 @@ export default function TestExecution() {
       />
       {projectId && !projectIsActive && (
         <div className="info-banner">This project is inactive. Existing cycles and results are read-only until the project is reactivated.</div>
+      )}
+      {projectId && projectIsActive && !projectCanContribute && (
+        <div className="info-banner">Test Execution is read-only in this workspace. Contributor access is required to create cycles or record results.</div>
       )}
       {projectId && (
         <div className={`tm-workspace tm-execution-workspace tm-execution-refined${cycleSidebarCollapsed ? ' cycle-sidebar-collapsed' : ''}`}>
@@ -2666,7 +2670,7 @@ export default function TestExecution() {
               ))}
               </ul>
             </>}
-            {!cycleSidebarCollapsed && canExec && projectIsActive && <button type="button" className="tm-tree-add" onClick={() => setShowNewCycleFolder(true)}><IconPlus aria-hidden="true" /> Add folder</button>}
+            {!cycleSidebarCollapsed && canExec && projectCanContribute && <button type="button" className="tm-tree-add" onClick={() => setShowNewCycleFolder(true)}><IconPlus aria-hidden="true" /> Add folder</button>}
           </aside>
           <section className="tm-main-panel">
           {cycleId ? (
@@ -2837,7 +2841,14 @@ export default function TestExecution() {
                   <span><strong>Test Cycle Activity & Audit History</strong><small>Cycle comments, details, request links, and lifecycle changes only</small></span>
                   <em>{cycleAuditActivity.length}</em><b>{showActivity ? 'Hide' : 'Show'}</b>
                 </button>
-                {showActivity && <JiraActivity readOnly={!selectedCycle?.workspace_writable} entityType="TEST_CYCLE" entityId={Number(cycleId)} items={cycleAuditActivity} onPosted={(item) => setCycleActivity((prev) => [...prev, item])} />}
+                {showActivity && <JiraActivity
+                  readOnly={!selectedCycle?.workspace_writable}
+                  ownerWorkspaceId={selectedCycle?.origin_workspace_id || selectedProject?.qa_workspace_id}
+                  entityType="TEST_CYCLE"
+                  entityId={Number(cycleId)}
+                  items={cycleAuditActivity}
+                  onPosted={(item) => setCycleActivity((prev) => [...prev, item])}
+                />}
               </section>
             </>
           ) : (
@@ -2846,7 +2857,7 @@ export default function TestExecution() {
           </section>
         </div>
       )}
-      {showNewCycle && projectId && projectIsActive && (
+      {showNewCycle && projectId && projectCanContribute && (
         <CycleModal
           project={selectedProject!}
           requests={functionalRequestOptions}
@@ -2900,7 +2911,7 @@ export default function TestExecution() {
           }}
         />
       )}
-      {showNewCycleFolder && projectId && (
+      {showNewCycleFolder && projectId && projectCanContribute && (
         <NewCycleFolderModal
           projectId={projectId}
           onClose={() => setShowNewCycleFolder(false)}
@@ -2981,8 +2992,8 @@ export default function TestExecution() {
           execution={editingExecution}
           readOnly={!canEditSelectedCycle || !projectIsActive || cycleIsLocked || (!user?.roles.includes('ADMIN') && editingExecution.assigned_to_id !== user?.id)}
           canAssign={canManageRunners && !!selectedCycle?.workspace_writable && projectIsActive && !cycleIsLocked}
-          canReassign={projectIsActive && !cycleIsLocked && canReassignExecution(editingExecution)}
-          canRemove={projectIsActive && !cycleIsLocked && removeFromCycleEligibility(editingExecution).eligible}
+          canReassign={!!selectedCycle?.workspace_writable && projectIsActive && !cycleIsLocked && canReassignExecution(editingExecution)}
+          canRemove={!!selectedCycle?.workspace_writable && projectIsActive && !cycleIsLocked && removeFromCycleEligibility(editingExecution).eligible}
           removeBlockedReason={removeFromCycleEligibility(editingExecution).reason}
           runnerCandidates={runnerCandidates}
           onAssigned={(saved) => {

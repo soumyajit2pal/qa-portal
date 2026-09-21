@@ -868,6 +868,7 @@ class FunctionalOut(ORMModel):
     created_at: datetime.datetime
     updated_at: datetime.datetime
     qa_request: Optional[LinkedRequestRef] = None
+    qa_workspace_id: Optional[int] = None
     active_delegation: Optional[QARequestDelegationOut] = None
     # Delegated from the linked QA Request gateway.
     application_name: Optional[str] = None
@@ -1271,6 +1272,7 @@ class SASTOut(ORMModel):
     # apply here. Keep this consistent with DASTOut and PerformanceOut.
     qa_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
+    qa_workspace_id: Optional[int] = None
     active_delegation: Optional[QARequestDelegationOut] = None
     # Read-only lookups (via the linked QA Request, if any) -- lets the
     # Suppression "Request ID" autosuggest auto-populate Department/Owner.
@@ -1378,6 +1380,7 @@ class DASTOut(ORMModel):
     # raised directly through this module.
     qa_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
+    qa_workspace_id: Optional[int] = None
     active_delegation: Optional[QARequestDelegationOut] = None
     # Read-only lookups (via the linked QA Request, if any) -- lets the
     # Suppression "Request ID" autosuggest auto-populate Department/Owner.
@@ -1545,6 +1548,7 @@ class PerformanceOut(ORMModel):
     updated_at: datetime.datetime
     qa_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
+    qa_workspace_id: Optional[int] = None
     active_delegation: Optional[QARequestDelegationOut] = None
     department: Optional[str] = None
     application_owner: Optional[str] = None
@@ -2403,6 +2407,8 @@ class TestProjectOut(ORMModel):
     application_master_id: Optional[int] = None
     qa_workspace_id: Optional[int] = None
     qa_workspace_name: Optional[str] = None
+    workspace_contributable: bool = False
+    workspace_writable: bool = False
     department: Optional[str] = None
     department_unit_id: Optional[int] = None
     department_unit_name: Optional[str] = None

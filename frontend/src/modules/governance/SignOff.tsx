@@ -843,7 +843,7 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
         </div>
       </>}
 
-      <JiraActivity entityType="SIGNOFF" entityId={item.id} items={history} onPosted={(entry) => setHistory((prev) => [...prev, entry])} />
+      <JiraActivity ownerWorkspaceId={item.qa_workspace_id} entityType="SIGNOFF" entityId={item.id} items={history} onPosted={(entry) => setHistory((prev) => [...prev, entry])} />
       </div>
       <div className="clearance-tab-panel" role="tabpanel" id="clearance-panel-documents" aria-labelledby="clearance-tab-documents" hidden={detailTab !== 'documents'} tabIndex={0}>
       <div className="clearance-section-heading"><div><span>Supporting material</span><h3>Documents</h3><p>Evidence and attachments linked to this certificate</p></div></div>

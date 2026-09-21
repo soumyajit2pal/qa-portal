@@ -19,6 +19,7 @@ const { createLatestRequestGate } = await loadTypeScriptModule('../src/latestReq
 const { isKeyboardActivationKey } = await loadTypeScriptModule('../src/keyboard.ts')
 const { shouldActivateTableRow } = await loadTypeScriptModule('../src/tableInteraction.ts')
 const { boundedRetryDelay } = await loadTypeScriptModule('../src/retryPolicy.ts')
+const { isActivityReadOnly } = await loadTypeScriptModule('../src/activityAccess.ts')
 
 test('testcase approver badges use the record-specific eligibility endpoint', () => {
   const stageOne = approvalDirectoryRequest({
@@ -129,6 +130,23 @@ test('clickable table rows ignore only nested interactive controls', () => {
   assert.equal(shouldActivateTableRow({ closest: () => null }, row), true, 'row background has no closer control')
   assert.equal(shouldActivateTableRow({ closest: () => nestedButton }, row), false, 'button handles its own click')
   assert.equal(shouldActivateTableRow({ closest: () => nestedLink }, row), false, 'link handles its own click')
+})
+
+test('activity comments are writable only in the record owning workspace', () => {
+  assert.equal(isActivityReadOnly(false, 7, 7), false)
+  assert.equal(isActivityReadOnly(false, 8, 7), true)
+  assert.equal(isActivityReadOnly(false, null, 7), true)
+  assert.equal(isActivityReadOnly(true, 7, 7), true)
+  assert.equal(isActivityReadOnly(false, 7, null), false, 'legacy records without ownership keep existing behavior')
+})
+
+test('test repository and execution activity pass both server writability and workspace ownership', async () => {
+  const repository = await readFile(new URL('../src/modules/test-management/TestRepository.tsx', import.meta.url), 'utf8')
+  const execution = await readFile(new URL('../src/modules/test-management/TestExecution.tsx', import.meta.url), 'utf8')
+  assert.match(repository, /readOnly=\{!existing\.workspace_writable\}/)
+  assert.match(repository, /ownerWorkspaceId=\{existing\.origin_workspace_id \|\| currentProject\.qa_workspace_id\}/)
+  assert.match(execution, /readOnly=\{!selectedCycle\?\.workspace_writable\}/)
+  assert.match(execution, /ownerWorkspaceId=\{selectedCycle\?\.origin_workspace_id \|\| selectedProject\?\.qa_workspace_id\}/)
 })
 
 test('privileged configuration routes are wrapped in the AdminOnly guard', async () => {

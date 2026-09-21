@@ -1068,7 +1068,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
       {tab === 'documents' && <RequestDocuments apiBase="/api/dast-requests" reqId={req.id} canManage={canManageDocuments} />}
 
       {tab === 'history' && (
-        <JiraActivity entityType="DAST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
+        <JiraActivity ownerWorkspaceId={req.qa_workspace_id} entityType="DAST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {showMarkFixed && <SecurityFixDialog

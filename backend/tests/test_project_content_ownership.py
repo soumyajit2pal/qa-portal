@@ -123,10 +123,57 @@ def test_view_only_cannot_create_even_with_workspace_share(setup):
     db.rollback()
 
 
+def test_workspace_writable_matches_full_project_contribution_policy(setup):
+    """The UI flag must fail closed for shared/read-only project access."""
+    db, _ = setup
+    contributor = m.User(
+        id=2,
+        username='workspace-b-engineer',
+        full_name='Workspace B Engineer',
+        hashed_password='x',
+        is_active=True,
+        role_assignments=[m.UserRole(role='QA_ENGINEER')],
+        qa_workspace_memberships=[m.QAWorkspaceMember(
+            workspace_id=2, role='WORKSPACE_MEMBER', is_active=True,
+        )],
+    )
+    db.add(contributor)
+    db.commit()
+    contributor.active_qa_workspace_id = 2
+    bind_actor(db, contributor)
+
+    project = db.get(m.TestProject, 1)
+    foreign_case = db.get(m.TestCase, 1)
+    assert project.workspace_contributable
+    assert not project.workspace_writable
+    assert not foreign_case.workspace_writable
+
+    own_case = m.TestCase(id=2, project_id=1, test_case_key='C2')
+    db.add(own_case)
+    db.commit()
+    assert own_case.origin_workspace_id == 2
+    assert own_case.workspace_writable
+
+    contributor.role_assignments = [m.UserRole(role='VIEW_ONLY')]
+    db.commit()
+    assert not project.workspace_contributable
+    assert not own_case.workspace_writable
+    request = SimpleNamespace(
+        method='POST',
+        url=SimpleNamespace(path='/api/approvals/TEST_CASE/2/rich-comments'),
+        path_params={'entity_type': 'TEST_CASE', 'entity_id': 2},
+    )
+    from app.project_workspace_ownership import guard_request
+    with pytest.raises(HTTPException):
+        guard_request(db, contributor, request)
+
+
 @pytest.mark.parametrize('path,params', [
     ('/api/test-repository/test-cases/1', {'case_id': 1}),
     ('/api/test-execution/cycles/1', {'cycle_id': 1}),
     ('/api/approvals/TEST_CASE/1/rich-comments', {'entity_type': 'TEST_CASE', 'entity_id': 1}),
+    ('/api/approvals/TEST_PROJECT/1/rich-comments', {'entity_type': 'TEST_PROJECT', 'entity_id': 1}),
+    ('/api/test-projects/1/archive', {'project_id': 1}),
 ])
 def test_foreign_mutations_are_rejected_before_side_effects(setup, path, params):
     from app.project_workspace_ownership import guard_request

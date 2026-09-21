@@ -3028,6 +3028,7 @@ tbody tr:hover { background: #f8f9fc; }
 .jira-activity-filters button { min-height: 26px; padding: 4px 8px; border: 0; border-radius: 5px; background: transparent; color: #747c8e; font-size: 9.5px; cursor: pointer; }
 .jira-activity-filters button.active { background: #fff; color: #3f4659; box-shadow: 0 1px 2px rgba(20,26,42,.08); font-weight: 650; }
 .jira-activity-filters button span { margin-left: 3px; color: #9ba2b1; }
+.jira-activity-read-only { margin-bottom: 18px; padding: 10px 12px; border: 1px solid #dce4ec; border-radius: 7px; background: #f7f9fb; color: #626d7d; font-size: 10.5px; line-height: 1.5; }
 .jira-comment-composer { display: grid; grid-template-columns: 32px 1fr; gap: 10px; margin-bottom: 18px; }
 .jira-avatar { width: 32px; height: 32px; flex-shrink: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: #5964a8; color: #fff; font-size: 9px; font-weight: 750; }
 .jira-avatar.current { background: #635bdf; }
