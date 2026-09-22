@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { IconSearch } from './Icons'
+import { IconSearch, IconStar } from './Icons'
 import { computePanelPos, PanelPos } from './panelPosition'
 import ClearableSearchInput from './ClearableSearchInput'
 import { isKeyboardActivationKey } from '../keyboard'
@@ -30,6 +30,12 @@ interface SearchableSelectProps {
   // icon should take the user directly to searchable suggestions rather than
   // requiring a second click on another dropdown trigger.
   autoOpen?: boolean
+  // Optional favorite controls for large, frequently-used option sets.
+  // Favorites are displayed first while the caller owns persistence.
+  favoriteValues?: ReadonlySet<string>
+  favoriteGroupLabel?: string
+  optionsGroupLabel?: string
+  searchPlaceholder?: string
   // Passed through to the root wrapper -- e.g. a toolbar dropdown that
   // isn't already inside a width-constraining Field wrapper (native
   // <select>s in the same spot would otherwise just size to content too,
@@ -49,7 +55,7 @@ function normalize(options: string[] | SearchableSelectOption[]): SearchableSele
 // Short, fixed-size enums (Priority, Risk, Status, Environment and the like)
 // use `searchable={false}` so they keep this same visual and interaction
 // pattern without displaying an unnecessary search field.
-export default function SearchableSelect({ value, onChange, options, ariaLabel, placeholder, disabled, searchable = true, autoOpen = false, style }: SearchableSelectProps) {
+export default function SearchableSelect({ value, onChange, options, ariaLabel, placeholder, disabled, searchable = true, autoOpen = false, favoriteValues, favoriteGroupLabel = 'Favorites', optionsGroupLabel = 'All options', searchPlaceholder = 'Search...', style }: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [panelPos, setPanelPos] = useState<PanelPos>({ top: 0, bottom: 'auto', left: 0, width: 0 })
@@ -111,11 +117,42 @@ export default function SearchableSelect({ value, onChange, options, ariaLabel, 
   const filtered = searchable
     ? opts.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()))
     : opts
+  const hasFavoriteGrouping = favoriteValues !== undefined
+  const favoriteOptions = hasFavoriteGrouping
+    ? filtered.filter((option) => favoriteValues?.has(option.value))
+    : []
+  const regularOptions = hasFavoriteGrouping
+    ? filtered.filter((option) => !favoriteValues?.has(option.value))
+    : filtered
 
   function select(opt: SearchableSelectOption) {
     onChange(opt.value)
     setOpen(false)
     setQuery('')
+  }
+
+  function renderOption(opt: SearchableSelectOption) {
+    const active = opt.value === value
+    const favorite = Boolean(favoriteValues?.has(opt.value))
+    return (
+      <div
+        key={opt.value}
+        className={`searchable-select-option ${active ? 'active' : ''}`}
+        role="option"
+        aria-selected={active}
+        tabIndex={0}
+        onClick={() => select(opt)}
+        onKeyDown={(event) => {
+          if (isKeyboardActivationKey(event.key)) { event.preventDefault(); select(opt) }
+          if (event.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
+        }}
+      >
+        <span className="searchable-select-option-content">
+          {favorite && <IconStar className="searchable-select-option-star" aria-hidden="true" />}
+          <span>{opt.label}</span>
+        </span>
+      </div>
+    )
   }
 
   // Reported bug: when this control sits inside a scroll container that
@@ -149,7 +186,10 @@ export default function SearchableSelect({ value, onChange, options, ariaLabel, 
         disabled={disabled}
         onClick={toggleOpen}
       >
-        <span className={current ? '' : 'muted'}>{current ? current.label : (placeholder || 'Select...')}</span>
+        <span className={`searchable-select-trigger-value ${current ? '' : 'muted'}`}>
+          {current && favoriteValues?.has(current.value) && <IconStar className="searchable-select-trigger-star" aria-hidden="true" />}
+          <span>{current ? current.label : (placeholder || 'Select...')}</span>
+        </span>
         <span className="caret">&#9662;</span>
       </button>
       {open && (
@@ -162,7 +202,7 @@ export default function SearchableSelect({ value, onChange, options, ariaLabel, 
               <IconSearch width={13} height={13} />
               <ClearableSearchInput
                 ref={inputRef}
-                placeholder="Search..."
+                placeholder={searchPlaceholder}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onClear={() => setQuery('')}
@@ -172,22 +212,10 @@ export default function SearchableSelect({ value, onChange, options, ariaLabel, 
           )}
           <div className="searchable-select-list" role="listbox" aria-label={ariaLabel || placeholder || 'Options'}>
             {filtered.length === 0 && <div className="searchable-select-empty">No matches</div>}
-            {filtered.map((opt) => (
-              <div
-                key={opt.value}
-                className={`searchable-select-option ${opt.value === value ? 'active' : ''}`}
-                role="option"
-                aria-selected={opt.value === value}
-                tabIndex={0}
-                onClick={() => select(opt)}
-                onKeyDown={(event) => {
-                  if (isKeyboardActivationKey(event.key)) { event.preventDefault(); select(opt) }
-                  if (event.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
-                }}
-              >
-                {opt.label}
-              </div>
-            ))}
+            {favoriteOptions.length > 0 && <div className="searchable-select-group-label" role="presentation">{favoriteGroupLabel}</div>}
+            {favoriteOptions.map(renderOption)}
+            {regularOptions.length > 0 && hasFavoriteGrouping && <div className="searchable-select-group-label" role="presentation">{optionsGroupLabel}</div>}
+            {regularOptions.map(renderOption)}
           </div>
         </div>
       )}

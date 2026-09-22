@@ -12,6 +12,11 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
+    "jsxImportSource": "@qualityops/csp-runtime",
+    "baseUrl": ".",
+    "paths": {
+      "@qualityops/csp-runtime/*": ["src/csp-runtime/*"]
+    },
 
     "strict": false,
     "noImplicitAny": false,

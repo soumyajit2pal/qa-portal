@@ -7,6 +7,7 @@ import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
+import ProjectSelect from '../../components/ProjectSelect'
 import { ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
 import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOption, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -17,6 +18,7 @@ import LinkedDefects from '../../components/LinkedDefects'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconFolder, IconGrid, IconInbox, IconLock, IconPlus, IconTrash, IconWorkflow } from '../../components/Icons'
 import { defectEvidenceError, DEFECT_EVIDENCE_EXTENSIONS } from '../../defectEvidence'
+import { resolvePreferredProjectId } from '../../projectPreferences'
 
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
@@ -2211,15 +2213,11 @@ export default function TestExecution() {
     // A project picker must not silently omit projects after the first page.
     api.getAll<TestProjectOut>('/api/test-projects?include_inactive=true').then((p) => {
       setProjects(p)
-      const requested = Number(searchParams.get('project'))
-      if (requested && p.some((project) => project.id === requested)) {
-        setProjectId((current) => current === requested ? current : requested)
-      } else if (p.length) {
-        setProjectId((current) => current || p[0].id)
-      }
+      const requested = Number(searchParams.get('project')) || null
+      setProjectId((current) => resolvePreferredProjectId(p, requested, current, user?.id))
     }).catch(setError)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams])
+  }, [searchParams, user?.id])
 
   // Loaded once, up front, rather than only when the (rarely-opened) folder
   // access modal is reachable -- same tradeoff TestProjects.tsx already
@@ -2571,20 +2569,17 @@ export default function TestExecution() {
         subtitle="Organize test cycles, execute step-by-step, capture evidence, and connect failures to defects."
         actions={(
           <div style={{ display: 'flex', gap: 8 }}>
-            <SearchableSelect
-              value={projectId === '' ? '' : String(projectId)}
-              onChange={(v) => {
-                setProjectId(v ? Number(v) : '')
+            <ProjectSelect
+              projects={projects}
+              value={projectId}
+              onChange={(nextProjectId) => {
+                setProjectId(nextProjectId)
                 setCycleId('')
                 setCycles([])
                 setSelectedCycleFolder('')
               }}
               placeholder={projects.length === 0 ? 'No Test Projects yet' : 'Select a project...'}
               style={{ minWidth: 220 }}
-              options={projects.map((p) => ({
-                value: String(p.id),
-                label: `${p.project_key} -- ${p.name}${p.is_active ? '' : ' [Inactive]'}`,
-              }))}
             />
             {canExec && projectId && projectCanContribute && (
               <button className="btn" onClick={() => setShowNewCycle(true)}>+ Cycle</button>

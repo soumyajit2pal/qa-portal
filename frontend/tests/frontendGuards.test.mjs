@@ -185,14 +185,20 @@ test('modern duplicate workflow selects a canonical defect by business identity,
   assert.match(panel, /duplicate_defect_id: value \? Number\(value\) : null/)
 })
 
-test('defect workflow exposes all permitted actions in a descriptive accessible selector', async () => {
+test('defect workflow exposes every permitted action through the shared Actions menu', async () => {
   const panel = await readFile(new URL('../src/components/DefectWorkflowPanel.tsx', import.meta.url), 'utf8')
+  const defects = await readFile(new URL('../src/modules/test-management/Defects.tsx', import.meta.url), 'utf8')
 
   assert.doesNotMatch(panel, /defect-workflow-other/)
-  assert.match(panel, /className="defect-action-grid"/)
-  assert.match(panel, /aria-pressed=\{isSelected\}/)
-  assert.match(panel, /<em>Recommended<\/em>/)
-  assert.match(panel, /actionDescriptions\[target\]/)
+  assert.match(panel, /export function availableDefectWorkflowActions/)
+  assert.match(panel, /assess: 'Review production impact'/)
+  assert.match(panel, /occurrence: 'Record affected environment'/)
+  assert.match(defects, /<span>Workflow actions<\/span>/)
+  assert.match(defects, /modernWorkflowActions\.map/)
+  assert.match(defects, /setWorkflowAction\(action\); setDetailTab\('resolution'\)/)
+  assert.match(defects, /showActionPicker=\{false\}/)
+  assert.match(defects, /requestedAction=\{workflowAction\}/)
+  assert.match(panel, /ACTION DETAILS/)
 })
 
 test('defect stage ownership follows QA handoff and never displays the developer team for QA', () => {
@@ -225,4 +231,33 @@ test('privileged configuration routes are wrapped in the AdminOnly guard', async
     const route = app.split('\n').find((line) => line.includes(`path="${path}"`))
     assert.match(route || '', /<AdminOnly>/, path)
   }
+})
+
+test('production CSP forbids inline scripts, style elements, and style attributes', async () => {
+  for (const relativePath of ['../nginx.conf', '../nginx.conf.template']) {
+    const config = await readFile(new URL(relativePath, import.meta.url), 'utf8')
+    const policies = [...config.matchAll(/Content-Security-Policy\s+"([^"]+)"/g)].map((match) => match[1])
+
+    assert.ok(policies.length > 0, `${relativePath} must define a CSP`)
+    for (const policy of policies) {
+      assert.doesNotMatch(policy, /'unsafe-inline'/, relativePath)
+      assert.match(policy, /script-src-attr 'none'/, relativePath)
+      assert.match(policy, /style-src-elem 'self'/, relativePath)
+      assert.match(policy, /style-src-attr 'none'/, relativePath)
+    }
+  }
+})
+
+test('React inline style objects are converted through the CSP-safe JSX runtime', async () => {
+  const tsconfig = JSON.parse(await readFile(new URL('../tsconfig.json', import.meta.url), 'utf8'))
+  const index = await readFile(new URL('../index.html', import.meta.url), 'utf8')
+  const registry = await readFile(new URL('../src/csp-runtime/styleRegistry.ts', import.meta.url), 'utf8')
+  const documentPortal = await readFile(new URL('../src/modules/governance/DocumentPortal.tsx', import.meta.url), 'utf8')
+
+  assert.equal(tsconfig.compilerOptions.jsxImportSource, '@qualityops/csp-runtime')
+  assert.match(index, /id="qap-csp-runtime-styles"[^>]+href="\/csp-runtime\.css"/)
+  assert.match(registry, /sheet\.insertRule/)
+  assert.match(registry, /parsed\.setProperty/)
+  assert.doesNotMatch(documentPortal, /document\.body\.style\.overflow/)
+  assert.match(documentPortal, /qap-scroll-locked/)
 })

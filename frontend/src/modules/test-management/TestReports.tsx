@@ -4,6 +4,9 @@ import { api } from '../../api'
 import { PageHeader, Field, ErrorText, Badge, Table, EmptyState } from '../../components/Common'
 import { formatDateIST } from '../../time'
 import SearchableSelect from '../../components/SearchableSelect'
+import ProjectSelect from '../../components/ProjectSelect'
+import { useAuth } from '../../context/AuthContext'
+import { resolvePreferredProjectId } from '../../projectPreferences'
 import {
   TestProjectOut, TestCycleOut, ReportCountRow, ReportStatusCountRow,
   RepositoryHealthOut, CycleProgressOut, DefectQualityOut,
@@ -486,6 +489,7 @@ function IncompleteDefectTraceabilityPanel({ onExportPath }: { onExportPath: (pa
 }
 
 export default function TestReports() {
+  const { user } = useAuth()
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [projectId, setProjectId] = useState<number | ''>('')
   const [tab, setTab] = useState<ReportTab>('traceability')
@@ -498,9 +502,9 @@ export default function TestReports() {
     try {
       const p = await api.getAll<TestProjectOut>('/api/test-projects')
       setProjects(p)
-      if (p.length) setProjectId(p[0].id)
+      setProjectId((current) => resolvePreferredProjectId(p, null, current, user?.id))
     } catch (err) { setError(err) }
-  }, [])
+  }, [user?.id])
   useEffect(() => { load() }, [load])
 
   const activeTab = useMemo(() => TABS.find((t) => t.id === tab)!, [tab])
@@ -562,11 +566,12 @@ export default function TestReports() {
             {activeTab.scope !== 'none' && (
               <div className="tm-report-project-control">
                 <Field label="Project scope">
-                  <SearchableSelect
-                    value={projectId === '' ? '' : String(projectId)}
-                    onChange={(v) => { setActiveExportPath(null); setProjectId(v ? Number(v) : '') }}
+                  <ProjectSelect
+                    projects={projects}
+                    value={projectId}
+                    onChange={(nextProjectId) => { setActiveExportPath(null); setProjectId(nextProjectId) }}
                     placeholder={projects.length ? 'Select a project...' : 'No Test Projects yet'}
-                    options={projects.map((p) => ({ value: String(p.id), label: `${p.project_key} · ${p.name}` }))}
+                    includeStatus={false}
                   />
                 </Field>
               </div>

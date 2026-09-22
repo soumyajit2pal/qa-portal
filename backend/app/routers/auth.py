@@ -141,9 +141,16 @@ def login_key(response: Response):
     return public_login_key()
 
 
-@router.post("/login", response_model=schemas.Token)
+@router.post("/login", response_model=schemas.SessionEstablished)
 def login(request: Request, response: Response, form_data = Depends(encrypted_login_credentials), db: Session = Depends(get_db)):
     reject_cross_site_request(request)
+    # A login attempt is an identity boundary, including when credentials are
+    # invalid. Revoke any session already presented by this browser before
+    # evaluating the new identity. Otherwise a manipulated failed-login
+    # response could make the client continue with a previously authenticated
+    # administrator cookie and `/me` would correctly—but dangerously—resolve
+    # that old administrator rather than the account being attempted.
+    revoke_presented_session(db, request)
     username = _canonical_login_username(form_data.username)
     _enforce_login_rate_limit(request, username)
     user = db.query(models.User).filter(func.lower(models.User.username) == username).first()
@@ -249,7 +256,6 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     _clear_login_failures(request, username)
-    revoke_presented_session(db, request)
     session_secret, csrf_secret = create_session(db, user.id, request)
     set_session_cookies(response, session_secret, csrf_secret)
     if just_provisioned:
@@ -272,7 +278,7 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
     write_audit(db, event_type="AUTHENTICATION", action="LOGIN_SUCCESS", actor=user,
                 request=request, status_code=200,
                 details={"login_type": user.login_type, "just_provisioned": just_provisioned})
-    return schemas.Token(roles=user.roles, full_name=user.full_name, username=user.username)
+    return schemas.SessionEstablished()
 
 
 @router.post("/logout")
@@ -299,7 +305,7 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     return {"status": "ok"}
 
 
-@router.post("/renew", response_model=schemas.Token)
+@router.post("/renew", response_model=schemas.SessionEstablished)
 def renew(response: Response, request: Request, db: Session = Depends(get_db),
           current_user: models.User = Depends(get_current_user)):
     # Cookie sessions renew their idle deadline in resolve_session; no bearer
@@ -311,12 +317,16 @@ def renew(response: Response, request: Request, db: Session = Depends(get_db),
     # above and never accept a bearer token.
     if isinstance(request, str) and not isinstance(current_user, models.User):
         current_user = db
-    return schemas.Token(roles=current_user.roles,
-                         full_name=current_user.full_name, username=current_user.username)
+    return schemas.SessionEstablished()
 
 
 @router.get("/me", response_model=schemas.UserOut)
-def me(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def me(response: Response, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # Authenticated identity must never be reused by a shared/intermediary
+    # cache. The frontend also bypasses its own GET cache for this endpoint.
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Vary"] = "Cookie"
     if current_user.has_role(Role.SCALE_6_PLUS):
         out = schemas.UserOut.model_validate(current_user)
         workspaces = db.query(models.QAWorkspace).filter(

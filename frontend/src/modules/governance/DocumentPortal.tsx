@@ -353,15 +353,15 @@ export default function DocumentPortal() {
   }, [isUploading]);
   useEffect(() => {
     if (!isFullscreen) return;
-    const previousOverflow = document.body.style.overflow;
+    const wasScrollLocked = document.body.classList.contains("qap-scroll-locked");
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !dialog && !showFolderGuide)
         setIsFullscreen(false);
     };
-    document.body.style.overflow = "hidden";
+    document.body.classList.add("qap-scroll-locked");
     window.addEventListener("keydown", closeOnEscape);
     return () => {
-      document.body.style.overflow = previousOverflow;
+      if (!wasScrollLocked) document.body.classList.remove("qap-scroll-locked");
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [isFullscreen, dialog, showFolderGuide]);

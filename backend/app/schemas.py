@@ -67,13 +67,14 @@ class ORMModel(BaseModel):
 
 
 # ---------------- Auth / Users ----------------
-class Token(ORMModel):
-    """Non-secret login result; authentication is carried only by HttpOnly cookie."""
-    roles: List[str]
-    full_name: str
-    username: str
+class SessionEstablished(BaseModel):
+    """Non-authoritative acknowledgement for login and session renewal.
 
-    _normalize_full_name = field_validator("full_name", mode="before")(_plain_person_name)
+    Identity and authorization data are deliberately absent. The browser must
+    obtain the authenticated principal from ``/api/auth/me``, whose identity
+    is resolved from the opaque server-side session and live database roles.
+    """
+    authenticated: Literal[True] = True
 
 
 class QAWorkspaceAccessOut(ORMModel):

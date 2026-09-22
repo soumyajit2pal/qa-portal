@@ -57,4 +57,4 @@ def test_renewal_response_is_not_cacheable():
     response = Response()
     result = renew(response, token, SimpleNamespace(username='tester', roles=[], full_name='Tester'))
     assert response.headers['cache-control'] == 'no-store'
-    assert result.username == 'tester'
+    assert result.model_dump() == {'authenticated': True}

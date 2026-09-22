@@ -82,6 +82,8 @@ def test_nginx_csp_and_tls():
         config = (root / 'frontend' / name).read_text()
         assert "script-src 'self'; script-src-attr 'none'" in config
         assert "style-src-elem 'self'" in config
+        assert "style-src-attr 'none'" in config
+        assert "unsafe-inline" not in config
         assert 'TLSv1.2 TLSv1.3' in config
         assert "location ~ ^/api/test-execution/executions/[0-9]+/rich-result$" in config
         assert 'proxy_request_buffering off' in config

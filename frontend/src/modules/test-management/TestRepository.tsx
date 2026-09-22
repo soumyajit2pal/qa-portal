@@ -6,6 +6,7 @@ import { formatDateIST, formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge, InfoTooltip, WorkflowDecisionPanel } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
+import ProjectSelect from '../../components/ProjectSelect'
 import {
   hasWorkflowRole as hasRole, hasDepartment, TEST_CASE_TYPES, TEST_CASE_CURRENT_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PENDING_WITH, TEST_CASE_PRIORITIES,
   TEST_CASE_PENDING_DECISION_STATUSES, TEST_CASE_TERMINAL_STATUSES, TEST_CASE_REVIEW_ACTION_LABELS,
@@ -25,6 +26,7 @@ import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconArchive, IconFolder, IconGrid, IconInbox, IconTrash } from '../../components/Icons'
 import { testCaseRejectionNote } from '../../testCaseRejectionNote'
 import { createLatestRequestGate } from '../../latestRequest'
+import { resolvePreferredProjectId } from '../../projectPreferences'
 
 // Test Repository module -- folder tree + test case authoring/import, under
 // a selected Test Project. QA Engineer + QA Lead both author (create/edit/
@@ -2763,11 +2765,11 @@ export default function TestRepository() {
     // A project picker must not silently omit projects after the first page.
     api.getAll<TestProjectOut>('/api/test-projects?include_inactive=true').then((p) => {
       setProjects(p)
-      const requested = Number(searchParams.get('project'))
-      if (p.length && !projectId) setProjectId(p.some((x) => x.id === requested) ? requested : p[0].id)
+      const requested = Number(searchParams.get('project')) || null
+      setProjectId((current) => resolvePreferredProjectId(p, requested, current, user?.id))
     }).catch(setError)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams])
+  }, [searchParams, user?.id])
 
   // Author-tier approver assignment (PATCH .../approvers) uses the shared
   // user picker and is scoped to the selected workspace via the
@@ -3214,14 +3216,11 @@ export default function TestRepository() {
             <strong>{selectedProject?.name || 'Choose a project'}</strong>
           </div>
           <div className="tm-repository-project-select">
-            <SearchableSelect
-              value={projectId === '' ? '' : String(projectId)}
-              onChange={(v) => { setProjectId(v ? Number(v) : ''); setSelectedFolder('') }}
+            <ProjectSelect
+              projects={projects}
+              value={projectId}
+              onChange={(nextProjectId) => { setProjectId(nextProjectId); setSelectedFolder('') }}
               placeholder={projects.length === 0 ? 'No Test Projects yet' : 'Select a project...'}
-              options={projects.map((p) => ({
-                value: String(p.id),
-                label: `${p.project_key} -- ${p.name}${p.is_active ? '' : ' [Inactive]'}`,
-              }))}
             />
           </div>
           {selectedProject && <span className={`tm-project-state ${projectIsActive ? 'active' : 'inactive'}`}>{projectIsActive ? 'Active' : 'Inactive'}</span>}

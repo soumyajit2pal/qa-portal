@@ -3,7 +3,11 @@ import { defectEvidenceError, DEFECT_EVIDENCE_EXTENSIONS } from '../../defectEvi
 import { useUserOptions } from '../../hooks/useUserOptions'
 import DefectWorkflowDiagram from '../../components/DefectWorkflowDiagram'
 import LinkDefectRequest from '../../components/LinkDefectRequest'
-import DefectWorkflowPanel from '../../components/DefectWorkflowPanel'
+import DefectWorkflowPanel, {
+  availableDefectWorkflowActions,
+  DEFECT_WORKFLOW_ACTION_DESCRIPTIONS,
+  DEFECT_WORKFLOW_ACTION_LABELS,
+} from '../../components/DefectWorkflowPanel'
 import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {useSearchParams} from 'react-router-dom'
@@ -842,9 +846,10 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const [showLinkedExecutions, setShowLinkedExecutions] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [actionsOpen, setActionsOpen] = useState(false)
+  const [workflowAction, setWorkflowAction] = useState('')
   const [detailTab, setDetailTab] = useState('overview')
   const detailTabs = [['overview', 'Overview'], ['resolution', 'Resolution'], ['trace', 'Linked work'], ['evidence', 'Evidence'], ['activity', 'Activity']]
-  useEffect(() => { setDetailTab('overview') }, [defect.id])
+  useEffect(() => { setDetailTab('overview'); setWorkflowAction('') }, [defect.id])
   const actionsRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=DEFECT&entity_id=${defect.id}`).then(setActivity).catch(() => setActivity([]))
@@ -961,7 +966,9 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const hasRetestRecord = !!(defect.retest_actual_result || defect.retest_remarks || defect.closure_remarks || defect.retest_result || defect.tested_build_version)
   const hasWorkflowRecord = !!(defect.assignment_remarks || hasResolutionRecord || hasRetestRecord || defect.reopen_reason || defect.deferral_reason || defect.rejection_reason || defect.not_a_defect_reason)
   const canEdit = defect.status === 'New' && (manager || defect.reporter_id === user?.id)
-  const showActions = !viewOnly && (canEdit || canLinkExecution || canReassignDefect || allowedTransitions.length > 0)
+  const modernWorkflowActions = defect.workflow ? availableDefectWorkflowActions(defect, user) : []
+  const primaryWorkflowAction = defect.workflow_transitions?.[0]
+  const showActions = !viewOnly && (canEdit || canLinkExecution || canReassignDefect || allowedTransitions.length > 0 || modernWorkflowActions.length > 0)
   const traceRows = defectTraceRows(defect)
   const traceCycleCount = new Set(traceRows.map((row) => row.cycle_id || row.cycle_key).filter(Boolean)).size
   const productionImpact = defect.workflow_state?.production_impact || (defect.environment === 'Production' ? 'Reported in Production' : 'Not assessed')
@@ -999,6 +1006,10 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
               <span>Change status</span>
               {allowedTransitions.map((status) => <button key={status} type="button" role="menuitem" className={status === 'Rejected' ? 'danger' : ''} onClick={() => runAction(() => setTransition(status))}><strong>{defectTransitionLabel(status)}</strong><small>{defectTransitionDescription(defect.status, status)}</small></button>)}
             </div>}
+            {modernWorkflowActions.length > 0 && <div className="defect-actions-group">
+              <span>Workflow actions</span>
+              {modernWorkflowActions.map((action) => <button key={action} type="button" role="menuitem" className={['Rejected', 'Reopened', 'Deferred', 'block'].includes(action) ? 'danger' : ''} onClick={() => runAction(() => { setWorkflowAction(action); setDetailTab('resolution') })}><strong>{DEFECT_WORKFLOW_ACTION_LABELS[action] || action}</strong><small>{action === primaryWorkflowAction ? 'Recommended · ' : ''}{DEFECT_WORKFLOW_ACTION_DESCRIPTIONS[action] || 'Record this workflow action and its supporting evidence.'}</small></button>)}
+            </div>}
           </div>}
         </div>}
       </div>
@@ -1027,7 +1038,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
       </div>
       </div>
       <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-resolution`} aria-labelledby={`defect-${defect.id}-tab-resolution`} hidden={detailTab !== 'resolution'} tabIndex={0}>
-      {defect.workflow && <DefectWorkflowPanel key={`${defect.id}-${defect.workflow_revision}`} defect={defect} defects={defects} users={users} departments={departments} onChanged={onChanged} />}
+      {defect.workflow && <DefectWorkflowPanel key={`${defect.id}-${defect.workflow_revision}`} defect={defect} defects={defects} users={users} departments={departments} showActionPicker={false} requestedAction={workflowAction} onRequestedActionChange={setWorkflowAction} onChanged={onChanged} />}
       {!defect.workflow && <div className="defect-lifecycle">
         <div className="defect-lifecycle-track" aria-label="Defect lifecycle">
           {lifecycle.map((stage, index) => <div key={stage} className={`${index === lifecycleIndex ? 'current' : ''} ${lifecycleIndex >= 0 && index < lifecycleIndex ? 'complete' : ''}`}><i>{index < lifecycleIndex ? '✓' : index + 1}</i><span>{stage}</span></div>)}

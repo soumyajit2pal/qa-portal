@@ -1,0 +1,9 @@
+/*
+ * CSP-approved destination for presentation rules generated from React style
+ * objects. The application inserts rules into this same-origin stylesheet via
+ * CSSOM; it never emits style attributes or inline <style> elements.
+ */
+
+body.qap-scroll-locked {
+  overflow: hidden !important;
+}

@@ -5,9 +5,7 @@ import { uniqueWorkspaceAccess } from '../constants'
 import { isWorkspaceSelectionStorageChange } from '../workspaceTransition'
 
 interface LoginResult {
-  roles: string[]
-  full_name: string
-  username: string
+  authenticated: true
 }
 
 interface AuthContextValue {
@@ -114,6 +112,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Resolve /me without sending that stale tenant selection.
     localStorage.removeItem('active_workspace_id')
     localStorage.removeItem('qa_active_workspace_id')
+    // The login response intentionally contains no identity or role data.
+    // Only this cookie-authenticated server lookup may populate authorization
+    // state, so changing the visible login response cannot elevate the UI.
     const me = await api.get<UserOut>('/api/auth/me')
     syncWorkspaceSelection(me)
     setUser(me)

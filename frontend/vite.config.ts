@@ -27,6 +27,11 @@ export default defineConfig(({ mode, command }) => {
 
   return {
     plugins: [react()],
+    resolve: {
+      alias: {
+        '@qualityops/csp-runtime': resolve(frontendDir, 'src/csp-runtime'),
+      },
+    },
     build: { sourcemap: false, minify: 'oxc' },
     server: {
       https,

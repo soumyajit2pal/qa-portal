@@ -24,7 +24,7 @@ from app.session_security import (
 )
 
 
-def _request(method="GET", cookies="", csrf="", fetch_site="same-origin"):
+def _request(method="GET", cookies="", csrf="", fetch_site="same-origin", path="/api/test"):
     headers = []
     if cookies:
         headers.append((b"cookie", cookies.encode()))
@@ -32,7 +32,7 @@ def _request(method="GET", cookies="", csrf="", fetch_site="same-origin"):
         headers.append((CSRF_HEADER.lower().encode(), csrf.encode()))
     if fetch_site:
         headers.append((b"sec-fetch-site", fetch_site.encode()))
-    return Request({"type": "http", "method": method, "path": "/api/test", "headers": headers})
+    return Request({"type": "http", "method": method, "path": path, "headers": headers})
 
 
 @pytest.fixture
@@ -124,9 +124,7 @@ def test_login_returns_no_javascript_credential_and_logout_revokes_server_sessio
             _request("POST"), login_response,
             SimpleNamespace(username=user.username, password="valid-password"), db,
         )
-    assert result.model_dump() == {
-        "roles": [], "full_name": user.full_name, "username": user.username,
-    }
+    assert result.model_dump() == {"authenticated": True}
     assert db.query(models.AuthSession).filter_by(user_id=user.id, revoked_at=None).count() == 1
 
     cookies = "; ".join(value.split(";", 1)[0] for value in login_response.headers.getlist("set-cookie"))
@@ -137,6 +135,52 @@ def test_login_returns_no_javascript_credential_and_logout_revokes_server_sessio
         assert auth_router.logout(_request("POST", cookies, csrf), logout_response, db) == {"status": "ok"}
     assert db.query(models.AuthSession).filter_by(user_id=user.id, revoked_at=None).count() == 0
     assert any("Max-Age=0" in value for value in logout_response.headers.getlist("set-cookie"))
+
+
+def test_failed_login_revokes_preexisting_privileged_session(session_db):
+    """Response tampering cannot fall back to an older administrator cookie."""
+    db, admin = session_db
+    admin.login_type = "STANDARD"
+    admin.hashed_password = hash_password("admin-password")
+    admin.role_assignments = [models.UserRole(role="ADMIN")]
+    requester = models.User(
+        username="requester", full_name="Requester", is_active=True,
+        login_type="STANDARD", hashed_password=hash_password("requester-password"),
+        role_assignments=[models.UserRole(role="REQUESTER")],
+    )
+    db.add(requester)
+    db.commit()
+    _, _, _, admin_cookies = _issued_session(db, admin)
+
+    with patch.object(auth_router, "_enforce_login_rate_limit"), \
+         patch.object(auth_router, "_record_login_failure"), \
+         patch.object(auth_router, "write_audit"):
+        with pytest.raises(HTTPException) as failed:
+            auth_router.login(
+                _request("POST", admin_cookies, path="/api/auth/login"), Response(),
+                SimpleNamespace(username="requester", password="wrong-password"), db,
+            )
+
+    assert failed.value.status_code == 401
+    with pytest.raises(HTTPException) as stale_admin:
+        resolve_session(_request("GET", admin_cookies, path="/api/auth/me"), db)
+    assert stale_admin.value.status_code == 401
+
+
+def test_session_identity_cannot_be_changed_by_login_response_fields(session_db):
+    db, requester = session_db
+    requester.role_assignments = [models.UserRole(role="REQUESTER")]
+    admin = models.User(
+        username="admin", full_name="Administrator", is_active=True,
+        role_assignments=[models.UserRole(role="ADMIN")],
+    )
+    db.add(admin)
+    db.commit()
+    _, _, _, requester_cookies = _issued_session(db, requester)
+
+    session = resolve_session(_request("GET", requester_cookies, path="/api/auth/me"), db)
+    assert session.user_id == requester.id
+    assert session.user_id != admin.id
 
 
 def test_disabled_login_is_generic_and_rate_limited(session_db):

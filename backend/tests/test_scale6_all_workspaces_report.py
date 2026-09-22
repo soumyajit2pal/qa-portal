@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from starlette.requests import Request
+from starlette.responses import Response
 from app import models
 from app.constants import Role
 from app.deps import _enforce_view_only_request, require_roles
@@ -41,7 +42,7 @@ def test_scale6_selects_active_workspaces_without_granting_memberships(setup):
     assert selectable_workspace_ids(db, user) == {parent.id, child.id, other.id}
     assert active_workspace_scope_ids(db, user, parent.id) == {parent.id, child.id}
     assert inherited_workspace_access_mode(db, user, other.id) == 'PARENT_VIEWER'
-    out = auth.me(db=db, current_user=user)
+    out = auth.me(response=Response(), db=db, current_user=user)
     assert {item.workspace_id for item in out.workspace_access} == {parent.id, child.id, other.id}
     assert all(item.role == 'WORKSPACE_VIEWER' for item in out.workspace_access)
     assert not user.qa_workspace_access

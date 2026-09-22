@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useDefectSubmissionConfirmation } from '../defectSubmission'
-import { DefectListOut, DefectOut, UserOption, DepartmentOut, RequestDocumentOut } from '../types'
+import { DefectListOut, DefectOut, UserOption, UserOut, DepartmentOut, RequestDocumentOut } from '../types'
 import { useAuth } from '../context/AuthContext'
 import { ENVIRONMENTS, isViewOnly, hasWorkflowRole } from '../constants'
 import { ErrorText, Field } from './Common'
@@ -11,8 +11,85 @@ import JiraRichTextField from './JiraRichTextField'
 import { MarkdownComment } from './JiraActivity'
 import { defectStageOwnership } from '../defectOwnership'
 
-export default function DefectWorkflowPanel({ defect, defects, users, departments, onChanged }: {
+export const DEFECT_WORKFLOW_ACTION_LABELS: Record<string, string> = {
+  Triaged: 'Triage & assign owner', 'In Progress': 'Start work', 'Ready for QA': 'Send fix to QA',
+  'QA Testing': 'Start QA testing', 'Business Acceptance': 'Send for business acceptance',
+  'Ready for Release': 'Approve for release', 'Production Verification': 'Record deployment',
+  Closed: 'Verify & close defect', Reopened: 'Reopen defect',
+  Deferred: 'Defer defect', Duplicate: 'Mark as duplicate', Rejected: 'Reject defect',
+  'Not a Defect Review': 'Propose Not a Defect', 'Not a Defect': 'Confirm Not a Defect',
+  'Change Request Raised': 'Close as Enhancement / CR', 'Accept Risk': 'Accept risk & close',
+  assess: 'Review production impact', occurrence: 'Record affected environment',
+  block: 'Report a blocker', unblock: 'Clear blocker',
+}
+
+export const DEFECT_WORKFLOW_ACTION_DESCRIPTIONS: Record<string, string> = {
+  Triaged: 'Assess impact and assign the defect to a resolver.',
+  'In Progress': 'Begin investigation and active resolution work.',
+  'Ready for QA': 'Submit the fix, build, and evidence for QA verification.',
+  'QA Testing': 'Start independent QA verification of the submitted fix.',
+  'Business Acceptance': 'Route the verified build for business sign-off.',
+  'Ready for Release': 'Approve the verified fix for release.',
+  'Production Verification': 'Record deployment and verify the production build.',
+  Closed: 'Complete verification and close the defect.',
+  Reopened: 'Return the defect to active work with supporting evidence.',
+  Deferred: 'Postpone work with approval and a target review date.',
+  Duplicate: 'Link this report to the defect that already tracks the issue.',
+  Rejected: 'Reject this report with a documented reason and evidence.',
+  'Not a Defect Review': 'Send the developer rationale to an independent QA reviewer.',
+  'Not a Defect': 'Confirm the reviewed Not a Defect outcome.',
+  'Change Request Raised': 'Convert the requirement gap to a referenced CR or enhancement.',
+  'Accept Risk': 'Close through an authorized, documented risk decision.',
+  assess: 'Confirm whether the issue affects the live production system.',
+  occurrence: 'Add another environment and build where this defect was observed.',
+  block: 'Pause progress and record the blocker owner and review date.',
+  unblock: 'Clear the current blocker and resume workflow actions.',
+}
+
+export function availableDefectWorkflowActions(defect: DefectOut, user?: UserOut | null): string[] {
+  if (!defect.workflow || !user || isViewOnly(user)) return []
+  const state = defect.workflow_state || {}
+  const roles = user.roles || []
+  const manager = hasWorkflowRole(user, 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
+  const canTriage = manager || roles.includes('QA_ENGINEER')
+  const resolver = defect.assignee_id === user.id
+  const qa = defect.retest_tester_id === user.id
+  const business = state.business_owner_id === user.id
+  const release = state.release_owner_id === user.id
+  const reporter = defect.reporter_id === user.id
+  const participant = manager || resolver || qa || business || release || reporter
+  const permitted = (defect.workflow_transitions || []).filter(target => {
+    if (target === 'Accept Risk') return roles.includes('ADMIN') || roles.includes('APPLICATION_OWNER')
+    if (target === 'Triaged') return canTriage
+    if (['In Progress', 'Ready for QA'].includes(target)) return manager || resolver
+    if (target === 'Deferred') return manager || roles.includes('APPLICATION_OWNER')
+    if (target === 'Not a Defect Review') return resolver
+    if (target === 'Not a Defect') return defect.status === 'Not a Defect Review' && (manager || qa)
+    if (target === 'Change Request Raised') return defect.status === 'Not a Defect Review' && (manager || qa)
+    if (target === 'Reopened' && defect.status === 'Not a Defect Review') return manager || qa
+    if (['Duplicate', 'Rejected'].includes(target)) return manager || resolver || reporter
+    if (defect.status === 'Closed') return manager || reporter
+    if (target === 'QA Testing' || ['QA Testing', 'Ready for QA'].includes(defect.status)) return manager || qa
+    if (defect.status === 'Business Acceptance') return manager || business
+    if (['Ready for Release', 'Production Verification'].includes(defect.status)) return manager || release
+    return manager || resolver || reporter
+  })
+  const closed = ['Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'].includes(defect.status)
+  const canManageBlocker = !closed && (manager || resolver || qa || business || release)
+  if (state.blocked) return canManageBlocker ? ['unblock'] : []
+  const primaryTarget = (defect.workflow_transitions || [])[0]
+  return Array.from(new Set([
+    ...(primaryTarget && permitted.includes(primaryTarget) ? [primaryTarget] : []),
+    ...permitted.filter(target => target !== primaryTarget),
+    ...(canTriage && !closed ? ['assess'] : []),
+    ...(participant && !closed ? ['occurrence'] : []),
+    ...(canManageBlocker ? ['block'] : []),
+  ]))
+}
+
+export default function DefectWorkflowPanel({ defect, defects, users, departments, onChanged, showActionPicker = true, requestedAction, onRequestedActionChange }: {
   defect: DefectOut; defects: DefectListOut[]; users: UserOption[]; departments: DepartmentOut[]; onChanged: (d: DefectOut) => void
+  showActionPicker?: boolean; requestedAction?: string; onRequestedActionChange?: (action: string) => void
 }) {
   const { confirmDefectSubmission, confirmationModal } = useDefectSubmissionConfirmation()
   const { user } = useAuth()
@@ -97,6 +174,20 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
     setChoice(value); setError(null); setFiles([]); setFieldImages({}); setEditorVersion(v => v + 1); setUploadStatus('')
     setData({ production_impact: productionImpactLocked ? 'Affected' : state.production_impact || 'Unknown', build: state.deployed_build || defect.build_version || '', environment: workflow.qa_environment, assigned_team: defect.assigned_team || defect.project_department || '', release_owner_id: state.release_owner_id, business_owner_id: state.business_owner_id, ...(value === 'Not a Defect' ? { resolution_type: 'Working as Designed' } : {}) })
   }
+  function chooseAction(value: string) {
+    select(value)
+    onRequestedActionChange?.(value)
+  }
+  function clearAction() {
+    if (busy) return
+    setChoice('')
+    onRequestedActionChange?.('')
+  }
+  useEffect(() => {
+    if (requestedAction === undefined || requestedAction === choice) return
+    if (requestedAction) select(requestedAction)
+    else setChoice('')
+  }, [requestedAction, defect.id])
   const permitted = (defect.workflow_transitions || []).filter(target => {
     if (target === 'Accept Risk') return roles.includes('ADMIN') || roles.includes('APPLICATION_OWNER')
     if (target === 'Triaged') return canTriage
@@ -118,36 +209,8 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
   const productionRequired = defect.workflow_stages?.includes('Production Verification')
   const primaryTarget = (defect.workflow_transitions || [])[0]
   const stageIndex = (defect.workflow_stages || []).indexOf(defect.status)
-  const actionLabels: Record<string, string> = {
-    Triaged: 'Triage & assign owner', 'In Progress': 'Start work', 'Ready for QA': 'Send fix to QA',
-    'QA Testing': 'Start QA testing', 'Business Acceptance': 'Send for business acceptance',
-    'Ready for Release': 'Approve for release', 'Production Verification': 'Record deployment',
-    Closed: 'Verify & close defect', Reopened: 'Reopen defect',
-    Deferred: 'Defer defect', Duplicate: 'Mark as duplicate', Rejected: 'Reject defect',
-    'Not a Defect Review': 'Propose Not a Defect', 'Not a Defect': 'Confirm Not a Defect',
-    'Change Request Raised': 'Close as Enhancement / CR', 'Accept Risk': 'Accept risk & close',
-    block: 'Report a blocker', unblock: 'Clear blocker',
-  }
-  const actionDescriptions: Record<string, string> = {
-    Triaged: 'Assess impact and assign the defect to a resolver.',
-    'In Progress': 'Begin investigation and active resolution work.',
-    'Ready for QA': 'Submit the fix, build, and evidence for QA verification.',
-    'QA Testing': 'Start independent QA verification of the submitted fix.',
-    'Business Acceptance': 'Route the verified build for business sign-off.',
-    'Ready for Release': 'Approve the verified fix for release.',
-    'Production Verification': 'Record deployment and verify the production build.',
-    Closed: 'Complete verification and close the defect.',
-    Reopened: 'Return the defect to active work with supporting evidence.',
-    Deferred: 'Postpone work with approval and a target review date.',
-    Duplicate: 'Link this report to the defect that already tracks the issue.',
-    Rejected: 'Reject this report with a documented reason and evidence.',
-    'Not a Defect Review': 'Send the developer rationale to an independent QA reviewer.',
-    'Not a Defect': 'Confirm the reviewed Not a Defect outcome.',
-    'Change Request Raised': 'Convert the requirement gap to a referenced CR or enhancement.',
-    'Accept Risk': 'Close through an authorized, documented risk decision.',
-    block: 'Pause progress and record the blocker owner and review date.',
-    unblock: 'Clear the current blocker and resume workflow actions.',
-  }
+  const actionLabels = DEFECT_WORKFLOW_ACTION_LABELS
+  const actionDescriptions = DEFECT_WORKFLOW_ACTION_DESCRIPTIONS
   const guidance: Record<string, string> = {
     New: 'Assess the impact and assign a resolver so investigation can begin.',
     Triaged: 'The resolver is assigned. Start work when investigation or the fix begins.',
@@ -168,14 +231,25 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
   }
   const stageOwnership = defectStageOwnership(defect, users)
   const stageHelp: Record<string, string> = { New: 'Report', Triaged: 'Assess & assign', 'In Progress': 'Investigate & fix', 'Not a Defect Review': 'Independent QA triage', 'Not a Defect': 'QA-confirmed outcome', 'Change Request Raised': 'Enhancement recorded', 'Ready for QA': 'QA handoff', 'QA Testing': 'Test & verify', 'Business Acceptance': 'Business sign-off', 'Ready for Release': 'Release approval', 'Production Verification': 'Verify live fix', Closed: 'Complete' }
-  const canManageBlocker = !closed && (manager || resolver || qa || business || release)
-  const availableActions = Array.from(new Set(state.blocked
-    ? (canManageBlocker ? ['unblock'] : [])
-    : [
-      ...(primaryTarget && permitted.includes(primaryTarget) ? [primaryTarget] : []),
-      ...permitted.filter(target => target !== primaryTarget),
-      ...(canManageBlocker ? ['block'] : []),
-    ]))
+  const availableActions = availableDefectWorkflowActions(defect, user)
+  const recommendedAction = availableActions.find(target => target === primaryTarget)
+    || (state.blocked ? availableActions[0] : undefined)
+  const alternativeActions = availableActions.filter(target => target !== recommendedAction)
+  const submitActionLabel = ({
+    assess: 'Save impact assessment', occurrence: 'Save environment record', block: 'Confirm blocker', unblock: 'Clear blocker',
+  } as Record<string, string>)[choice] || actionLabels[choice] || 'Save action'
+  const actionChoice = (target: string, featured = false) => {
+    const isSelected = choice === target
+    const isCaution = ['Rejected', 'Reopened', 'Deferred', 'block'].includes(target)
+    return <button type="button" className={`defect-action-choice${featured ? ' recommended featured' : ''}${isSelected ? ' selected' : ''}${isCaution ? ' caution' : ''}`} disabled={busy} aria-pressed={isSelected} key={target} onClick={() => chooseAction(target)}>
+      <span className="defect-action-choice-marker" aria-hidden="true">{isSelected ? '✓' : featured ? '→' : ''}</span>
+      <span className="defect-action-choice-copy">
+        <span className="defect-action-choice-top"><strong>{actionLabels[target] || target}</strong>{featured && <em>Recommended next step</em>}</span>
+        <small>{actionDescriptions[target] || 'Record this workflow decision with its supporting rationale.'}</small>
+      </span>
+      <span className="defect-action-choice-cta">{isSelected ? 'Selected' : featured ? 'Continue' : 'Choose'}<span aria-hidden="true">→</span></span>
+    </button>
+  }
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setError(null)
     if (busy) return
@@ -201,7 +275,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
       const updated = await api.post<DefectOut>(`/api/defects/${defect.id}/workflow-action`, {
         ...data, evidence_document_ids: pendingFiles.map(file => uploaded.current.get(file)!.id), action, status: action === 'transition' ? choice : undefined, revision: defect.workflow_revision,
       })
-      setChoice(''); onChanged(updated)
+      setChoice(''); onRequestedActionChange?.(''); onChanged(updated)
     } catch (e) { setError(e) } finally { setBusy(false); setUploadStatus('') }
   }
   return <section className="workflow-panel">
@@ -209,27 +283,28 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
     <header className="defect-workflow-heading"><div><span className="workflow-action-eyebrow">RESOLUTION WORKFLOW</span><h3>{state.blocked ? 'Work is blocked' : defect.status}</h3><p>{guidance[defect.status] || 'Review the current decision and choose an available action.'}</p></div><div className="defect-workflow-owner"><span>{stageOwnership.heading}</span><strong>{stageOwnership.ownerName || 'Not assigned yet'}</strong><small>{stageOwnership.departmentLabel}</small></div></header>
     <ol className="workflow-stages defect-workflow-path" aria-label="Defect resolution stages">{defect.workflow_stages?.map((stage, index) => <li key={stage} className={stageIndex >= 0 && index < stageIndex ? 'completed' : ''} aria-current={stage === defect.status ? 'step' : undefined}><span className="defect-stage-number">{stageIndex >= 0 && index < stageIndex ? '✓' : index + 1}</span><div><strong>{stage}</strong><small>{stageHelp[stage] || stage}</small></div></li>)}</ol>
     <div className="defect-workflow-context">
-      <section className={`defect-impact-card impact-${impact.toLowerCase()}`}><span className="workflow-action-eyebrow">PRODUCTION IMPACT</span><h4>{impact === 'Affected' ? 'Production is affected' : impact === 'Unaffected' ? 'Production is not affected' : 'Impact needs assessment'}</h4><p>{impact === 'Unknown' ? 'QA must assess whether the issue affects production before verification can be completed.' : productionRequired ? 'Release and production verification are required before closure.' : 'Close after the required QA' + (workflow.business_acceptance ? ' and business' : '') + ' verification passes.'}</p>{workflow.production_for_all && <small>Workspace policy requires production verification for every fix.</small>}{!viewOnly && canTriage && !closed && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => select('assess')}>{impact === 'Unknown' ? 'Assess production impact' : 'Review production impact'}</button>}</section>
+      <section className={`defect-impact-card impact-${impact.toLowerCase()}`}><span className="workflow-action-eyebrow">PRODUCTION IMPACT</span><h4>{impact === 'Affected' ? 'Production is affected' : impact === 'Unaffected' ? 'Production is not affected' : 'Impact needs assessment'}</h4><p>{impact === 'Unknown' ? 'QA must assess whether the issue affects production before verification can be completed.' : productionRequired ? 'Release and production verification are required before closure.' : 'Close after the required QA' + (workflow.business_acceptance ? ' and business' : '') + ' verification passes.'}</p>{workflow.production_for_all && <small>Workspace policy requires production verification for every fix.</small>}{showActionPicker && !viewOnly && canTriage && !closed && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => chooseAction('assess')}>{impact === 'Unknown' ? 'Assess production impact' : 'Review production impact'}</button>}</section>
       <section className="defect-verification-card"><span className="workflow-action-eyebrow">REQUIRED CHECKS</span><h4>Before this defect can close</h4><ul><li>QA verification in <strong>{workflow.qa_environment}</strong></li>{workflow.business_acceptance && <li>Business acceptance in <strong>{workflow.business_environment}</strong></li>}{productionRequired && <li>Deployment & verification in <strong>Production</strong></li>}{impact === 'Unknown' && <li>Confirm production impact to determine the release path</li>}</ul></section>
     </div>
     {state.blocked && <div className="defect-workflow-blocker" role="status"><strong>Blocked: {state.blocked.reason}</strong><span>Review by {state.blocked.review_date}. Clear the blocker before moving forward.</span></div>}
-    {!viewOnly && <section className="defect-action-picker" aria-labelledby="defect-action-picker-title">
+    {!viewOnly && showActionPicker && <section className="defect-action-picker" aria-labelledby="defect-action-picker-title">
       <header className="defect-action-picker-heading"><div><span className="workflow-action-eyebrow">{closed ? 'FOLLOW-UP ACTIONS' : 'CHOOSE NEXT ACTION'}</span><h4 id="defect-action-picker-title">{state.blocked ? 'Resolve the blocker to continue' : 'What do you want to do?'}</h4><p>Select an action to review its required information before submitting.</p></div><span className="defect-action-count">{availableActions.length} available</span></header>
       {primaryTarget && !permitted.includes(primaryTarget) && !state.blocked && <div className="defect-action-waiting" role="status"><strong>Next required step: {actionLabels[primaryTarget] || primaryTarget}</strong><span>Waiting for the authorized stage owner or QA lead. Your available actions are shown below.</span></div>}
-      {availableActions.length > 0 ? <div className="defect-action-grid">{availableActions.map(target => {
-        const isPrimary = target === primaryTarget
-        const isSelected = choice === target
-        const isCaution = ['Rejected', 'Reopened', 'block'].includes(target)
-        return <button type="button" className={`defect-action-choice${isPrimary ? ' recommended' : ''}${isSelected ? ' selected' : ''}${isCaution ? ' caution' : ''}`} disabled={busy} aria-pressed={isSelected} key={target} onClick={() => select(target)}>
-          <span className="defect-action-choice-top"><strong>{actionLabels[target] || target}</strong>{isPrimary && <em>Recommended</em>}</span>
-          <small>{actionDescriptions[target] || 'Record this workflow decision with its supporting rationale.'}</small>
-          <span className="defect-action-choice-cta">{isSelected ? 'Selected — complete below' : 'Select action'} <span aria-hidden="true">→</span></span>
-        </button>
-      })}</div> : <p className="defect-action-empty">No workflow action is available for your role at this stage.</p>}
+      {availableActions.length > 0 ? <div className="defect-action-selector">
+        {recommendedAction && <section className="defect-action-recommended" aria-label="Recommended next action">
+          <span className="defect-action-section-label">Primary path</span>
+          {actionChoice(recommendedAction, true)}
+        </section>}
+        {alternativeActions.length > 0 && <section className="defect-action-alternatives" aria-label="Other valid workflow outcomes">
+          <header><div><strong>Other valid outcomes</strong><span>Use these when the recommended path does not match the actual result.</span></div><small>{alternativeActions.length}</small></header>
+          <div className="defect-action-grid">{alternativeActions.map(target => actionChoice(target))}</div>
+        </section>}
+      </div> : <p className="defect-action-empty">No workflow action is available for your role at this stage.</p>}
+      {choice && <div className="defect-action-selection" role="status"><span aria-hidden="true">✓</span><div><strong>{actionLabels[choice] || actionTitle}</strong><small>Selected. Complete the required details below, then confirm the action.</small></div><button type="button" disabled={busy} onClick={clearAction}>Change</button></div>}
     </section>}
-    <details className="defect-environment-details"><summary>Where has this defect been observed? <span>{state.occurrences?.length || 0} environment record(s)</span></summary><p>These are reported occurrences. Verification results are recorded separately in the activity history.</p><div className="defect-environment-records">{state.occurrences?.map((e, i) => <article key={i}><header><strong>{e.environment}</strong><span>Build: {e.build || 'Not recorded'}</span></header><MarkdownComment value={e.remarks || 'No reproduction notes recorded.'} /></article>)}</div>{!viewOnly && !closed && participant && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => select('occurrence')}>+ Record another affected environment</button>}</details>
+    <details className="defect-environment-details"><summary>Where has this defect been observed? <span>{state.occurrences?.length || 0} environment record(s)</span></summary><p>These are reported occurrences. Verification results are recorded separately in the activity history.</p><div className="defect-environment-records">{state.occurrences?.map((e, i) => <article key={i}><header><strong>{e.environment}</strong><span>Build: {e.build || 'Not recorded'}</span></header><MarkdownComment value={e.remarks || 'No reproduction notes recorded.'} /></article>)}</div>{showActionPicker && !viewOnly && !closed && participant && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => chooseAction('occurrence')}>+ Record another affected environment</button>}</details>
     {choice && <form ref={actionForm} onSubmit={submit} className="workflow-action-form workflow-action-redesign">
-      <header className="workflow-action-heading"><div><span className="workflow-action-eyebrow">WORKFLOW ACTION</span><h4>{actionTitle}</h4><p>{choice === 'Ready for QA' ? 'Document the fix, select the QA owner, and provide the build and evidence for verification.' : 'Record the details and supporting evidence for this decision.'}</p></div><span className="workflow-current-stage">From {defect.status}</span></header>
+      <header className="workflow-action-heading"><div><span className="workflow-action-eyebrow">ACTION DETAILS</span><h4>{actionTitle}</h4><p>{choice === 'Ready for QA' ? 'Document the fix, select the QA owner, and provide the build and evidence for verification.' : 'Record the details and supporting evidence for this decision.'}</p></div><div className="workflow-action-heading-meta"><span className="workflow-current-stage">From {defect.status}</span><button type="button" disabled={busy} onClick={clearAction} aria-label="Close selected action">×</button></div></header>
       {(['Triaged', 'assess', 'Ready for QA', 'Not a Defect Review', 'Change Request Raised', 'occurrence', 'Production Verification', 'Ready for Release', 'Deferred', 'block', 'Duplicate', 'Business Acceptance'].includes(choice) || verification) && <fieldset disabled={busy} className="workflow-action-fieldset"><legend>{choice === 'assess' ? 'Does this issue affect the live production system?' : 'Assignment and build details'}</legend><div className="workflow-fields">
       {['Triaged', 'assess'].includes(choice) && <Field label="Production impact *"><select value={data.production_impact} onChange={e => setData({ ...data, production_impact: e.target.value })}>{['Unknown', 'Unaffected', 'Affected'].map(x => <option key={x} value={x} disabled={!!productionImpactLocked && x !== 'Affected'}>{x === 'Unknown' ? 'Unknown — assessment pending' : x === 'Affected' ? 'Affected — production needs this fix' : 'Unaffected — issue is limited to test environments'}</option>)}</select></Field>}
       {['Triaged', 'assess'].includes(choice) && productionImpactLocked && <p className="muted small">Production impact must remain Affected because this defect was reported in Production or production delivery is already underway. Production verification is required before closure.</p>}
@@ -261,7 +336,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
         {requiresReference && <p className="muted small">Provide an attachment or an evidence reference before saving.</p>}
       </section>
       {defect.status === 'QA Testing' && forward && <label className="workflow-regression-check"><input disabled={busy} type="checkbox" required checked={!!data.regression_confirmed} onChange={e => setData({ ...data, regression_confirmed: e.target.checked })} /> Confirmation and applicable regression testing passed</label>}
-      <ErrorText error={candidateError || error} /><div className="workflow-action-footer"><span role="status">{uploadStatus || 'Review before submitting. Submitted action details cannot be edited.'}</span><div className="workflow-actions"><button className="btn btn-primary" disabled={busy || loadingCandidates || !!candidateError}>{busy ? 'Saving…' : 'Save action'}</button><button type="button" className="btn" disabled={busy} onClick={() => setChoice('')}>Cancel</button></div></div>
+      <ErrorText error={candidateError || error} /><div className="workflow-action-footer"><span role="status">{uploadStatus || 'Review before submitting. Submitted action details cannot be edited.'}</span><div className="workflow-actions"><button className="btn btn-primary" disabled={busy || loadingCandidates || !!candidateError}>{busy ? 'Saving…' : submitActionLabel}</button><button type="button" className="btn" disabled={busy} onClick={clearAction}>Cancel</button></div></div>
     </form>}
 
   </section>

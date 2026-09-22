@@ -357,7 +357,7 @@ export const api = {
   patch: <T = any>(path: string, body?: unknown): Promise<T> => request<T>(path, { method: 'PATCH', body }),
   del: <T = any>(path: string): Promise<T> => request<T>(path, { method: 'DELETE' }),
 
-  login: async (username: string, password: string): Promise<{ roles: string[]; full_name: string; username: string }> => {
+  login: async (username: string, password: string): Promise<{ authenticated: true }> => {
     if (import.meta.env.PROD && window.location.protocol !== 'https:') {
       throw new Error('HTTPS is required. Open the secure portal URL before signing in.')
     }
