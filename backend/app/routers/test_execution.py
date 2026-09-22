@@ -1832,23 +1832,6 @@ def list_cycle_candidate_test_cases(
     }
 
 
-@router.get("/cycles/{cycle_id}/executions/case-ids", response_model=List[int], deprecated=True)
-def list_execution_case_ids(cycle_id: int, db: Session = Depends(get_db),
-                             current_user: models.User = Depends(get_current_user)):
-    """PAG-010 -- deliberately NOT paginated, same reasoning as Test Cases'
-    own `/test-cases/all`. TestExecution.tsx's "Add test cases to cycle"
-    picker needs the complete set of test_case_ids already in this cycle
-    (to exclude them from the candidate pool), not one page of the full
-    execution rows -- just the ids, so this is far cheaper than the main
-    list endpoint above even at full cycle size."""
-    cycle = _get_cycle_or_404(db, cycle_id)
-    _require_cycle_visibility(db, cycle, current_user)
-    return [
-        row[0] for row in
-        db.query(models.TestExecution.test_case_id).filter(models.TestExecution.cycle_id == cycle_id).all()
-    ]
-
-
 @router.get("/executions/{execution_id}", response_model=schemas.TestExecutionOut)
 def get_execution(execution_id: int, db: Session = Depends(get_db),
                    current_user: models.User = Depends(get_current_user)):

@@ -98,6 +98,19 @@ test('cookie-session requests include CSRF and workspace scope without a bearer 
   assert.equal(options.headers.Authorization, undefined)
 })
 
+test('post-login identity confirmation binds the session to the submitted username', async () => {
+  const { api, calls } = harness()
+  await api.api.confirmLoginIdentity('requester')
+
+  assert.equal(calls.length, 1)
+  const [{ url, options }] = calls
+  assert.equal(url, '/api/auth/me')
+  assert.equal(options.method, 'GET')
+  assert.equal(options.credentials, 'include')
+  assert.equal(options.headers['X-Expected-Username'], 'requester')
+  assert.equal(options.headers.Authorization, undefined)
+})
+
 test('legacy token compatibility code only removes browser-stored credentials', () => {
   const { api, localStorage, sessionStorage } = harness()
 

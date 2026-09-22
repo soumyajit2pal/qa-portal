@@ -61,9 +61,7 @@ def _enforce_view_only_request(
     if request.url.path in _VIEW_ONLY_SELF_SERVICE_PATHS:
         return
     if Role.SCALE_6_PLUS in user.roles:
-        if request.url.path in {
-            "/api/workspaces/preference/current", "/api/qa-workspaces/preference/current",
-        } or request.url.path.endswith("/export-xlsx/jobs"):
+        if request.url.path == "/api/workspaces/preference/current" or request.url.path.endswith("/export-xlsx/jobs"):
             return
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -111,7 +109,7 @@ def _enforce_parent_workspace_viewer_request(request: Request, access_mode: str 
         return
     if request.url.path in (
         _VIEW_ONLY_SELF_SERVICE_PATHS
-        | {"/api/workspaces/preference/current", "/api/qa-workspaces/preference/current"}
+        | {"/api/workspaces/preference/current"}
     ) or request.url.path.endswith("/export-xlsx/jobs"):
         return
     raise HTTPException(

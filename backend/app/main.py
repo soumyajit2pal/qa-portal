@@ -237,7 +237,6 @@ _MODULE_PATH_PREFIXES = [
     ("/api/auth/users", "USER_MANAGEMENT"),
     ("/api/auth/local-admin", "USER_MANAGEMENT"),
     ("/api/auth", "AUTH"),
-    ("/api/qa-workspaces", "WORKSPACE"),
     ("/api/workspaces", "WORKSPACE"),
     ("/api/qa-requests", "QA_REQUEST"),
     ("/api/functional-requests", "FUNCTIONAL_REQUEST"),

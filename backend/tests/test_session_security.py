@@ -183,6 +183,46 @@ def test_session_identity_cannot_be_changed_by_login_response_fields(session_db)
     assert session.user_id != admin.id
 
 
+def test_post_login_identity_mismatch_revokes_substituted_admin_session(session_db):
+    """A requester login must not accept an admin session from a changed response."""
+    db, requester = session_db
+    requester.username = "requester"
+    requester.role_assignments = [models.UserRole(role="REQUESTER")]
+    admin = models.User(
+        username="admin", full_name="Administrator", is_active=True,
+        role_assignments=[models.UserRole(role="ADMIN")],
+    )
+    db.add(admin)
+    db.commit()
+    _, _, _, admin_cookies = _issued_session(db, admin)
+    request = _request("GET", admin_cookies, path="/api/auth/me")
+    request.scope["headers"].append((b"x-expected-username", b"requester"))
+    session = resolve_session(request, db)
+    request.state.current_user = admin
+
+    with pytest.raises(HTTPException) as mismatch:
+        auth_router.me(request, Response(), db, admin)
+
+    assert mismatch.value.status_code == 401
+    with pytest.raises(HTTPException) as revoked:
+        resolve_session(_request("GET", admin_cookies, path="/api/auth/me"), db)
+    assert revoked.value.status_code == 401
+
+
+def test_post_login_identity_match_keeps_requester_session(session_db):
+    db, requester = session_db
+    requester.username = "requester"
+    requester.role_assignments = [models.UserRole(role="REQUESTER")]
+    db.commit()
+    _, _, _, requester_cookies = _issued_session(db, requester)
+    request = _request("GET", requester_cookies, path="/api/auth/me")
+    request.scope["headers"].append((b"x-expected-username", b"REQUESTER"))
+    resolve_session(request, db)
+
+    assert auth_router.me(request, Response(), db, requester).username == "requester"
+    assert resolve_session(_request("GET", requester_cookies), db).user_id == requester.id
+
+
 def test_disabled_login_is_generic_and_rate_limited(session_db):
     db, user = session_db
     user.is_active = False

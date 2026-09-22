@@ -59,9 +59,6 @@ def _workspace_user(db: Session, workspace: models.QAWorkspace, username: str, r
     lambda project_id, db, user: test_repository.get_test_case_summary(
         project_id, folder_id=None, db=db, current_user=user,
     ),
-    lambda project_id, db, user: test_repository.list_all_test_cases_for_project(
-        project_id, db=db, current_user=user,
-    ),
     lambda project_id, db, user: test_repository.list_recycle_bin(
         project_id, params=_page_params(), db=db, current_user=user,
     ),
@@ -241,9 +238,6 @@ def test_queued_exports_rebuild_and_revalidate_workspace_scope(export_kind, revo
         params=_page_params(), db=db, current_user=user,
     ),
     lambda cycle_id, db, user: test_execution.get_execution_summary(
-        cycle_id, db=db, current_user=user,
-    ),
-    lambda cycle_id, db, user: test_execution.list_execution_case_ids(
         cycle_id, db=db, current_user=user,
     ),
     lambda cycle_id, db, user: test_execution.export_test_cycle(

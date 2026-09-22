@@ -115,7 +115,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // The login response intentionally contains no identity or role data.
     // Only this cookie-authenticated server lookup may populate authorization
     // state, so changing the visible login response cannot elevate the UI.
-    const me = await api.get<UserOut>('/api/auth/me')
+    const expectedUsername = username.trim().toLowerCase()
+    const me = await api.confirmLoginIdentity<UserOut>(expectedUsername)
     syncWorkspaceSelection(me)
     setUser(me)
     setJustLoggedIn(true)

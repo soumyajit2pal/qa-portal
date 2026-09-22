@@ -730,28 +730,6 @@ def get_test_case_summary(
     )
 
 
-@router.get("/projects/{project_id}/test-cases/all", response_model=List[schemas.TestCaseListOut], deprecated=True)
-def list_all_test_cases_for_project(project_id: int, db: Session = Depends(get_db),
-                                     current_user: models.User = Depends(get_current_user)):
-    """PAG-010 -- deliberately NOT paginated, unlike list_test_cases above.
-    This exists solely to source bulk-selection candidate pools that
-    genuinely need the complete set, not one page of it -- currently
-    TestExecution.tsx's "Add Test Cases to Cycle" modal, which needs every
-    Approved/non-Archived case in the project (minus whichever are already
-    in the target cycle) so "Select all" can mean all of them, and so the
-    "N testcases are unavailable" banner counts the real total pending
-    review, not just whatever page happened to be loaded. Same eager-loads
-    and response shape as the paginated endpoint -- just no page/limit."""
-    _get_project_or_404(db, project_id)
-    require_project_visibility(db, project_id, current_user)
-    return (
-        db.query(models.TestCase)
-        .filter(models.TestCase.project_id == project_id, models.TestCase.is_deleted == False)  # noqa: E712 - Oracle requires = 0, not IS 0
-        .options(*_LIST_CASE_EAGER_LOADS)
-        .order_by(models.TestCase.created_at.desc()).all()
-    )
-
-
 @router.get("/projects/{project_id}/export-xlsx")
 def export_test_repository(
     project_id: int,

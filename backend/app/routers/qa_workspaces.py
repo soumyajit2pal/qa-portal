@@ -97,7 +97,6 @@ def _ensure_workspace_fallback(db: Session, user: models.User, excluded_workspac
 
 
 @router.get("/api/workspaces", response_model=list[schemas.QAWorkspaceOut])
-@router.get("/api/qa-workspaces", response_model=list[schemas.QAWorkspaceOut], include_in_schema=False)
 def list_workspaces(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     query = db.query(models.QAWorkspace).options(
         joinedload(models.QAWorkspace.parent_workspace),
@@ -116,7 +115,6 @@ def list_workspaces(db: Session = Depends(get_db), current_user: models.User = D
 
 
 @router.post("/api/workspaces", response_model=schemas.QAWorkspaceOut)
-@router.post("/api/qa-workspaces", response_model=schemas.QAWorkspaceOut, include_in_schema=False)
 def create_workspace(payload: schemas.QAWorkspaceCreate, db: Session = Depends(get_db),
                      current_user: models.User = Depends(get_current_user)):
     key = payload.workspace_key.strip().upper().replace(" ", "-")
@@ -170,7 +168,6 @@ def create_workspace(payload: schemas.QAWorkspaceCreate, db: Session = Depends(g
 
 
 @router.patch("/api/workspaces/{workspace_id:int}", response_model=schemas.QAWorkspaceOut)
-@router.patch("/api/qa-workspaces/{workspace_id:int}", response_model=schemas.QAWorkspaceOut, include_in_schema=False)
 def update_workspace(workspace_id: int, payload: schemas.QAWorkspaceUpdate,
                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     row = _workspace(db, workspace_id)
@@ -243,7 +240,6 @@ def update_workspace(workspace_id: int, payload: schemas.QAWorkspaceUpdate,
 
 
 @router.put("/api/workspaces/{workspace_id:int}/members", response_model=schemas.QAWorkspaceOut)
-@router.put("/api/qa-workspaces/{workspace_id:int}/members", response_model=schemas.QAWorkspaceOut, include_in_schema=False)
 def replace_members(workspace_id: int, payload: schemas.QAWorkspaceMembersReplace,
                     db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     workspace = _workspace(db, workspace_id)
@@ -494,7 +490,6 @@ def delete_department_coordinator(
 
 
 @router.post("/api/workspaces/{workspace_id:int}/coverage", response_model=schemas.QAWorkspaceCoverageOut)
-@router.post("/api/qa-workspaces/{workspace_id:int}/coverage", response_model=schemas.QAWorkspaceCoverageOut, include_in_schema=False)
 def add_coverage(workspace_id: int, payload: schemas.QAWorkspaceCoverageCreate,
                  db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     workspace = _workspace(db, workspace_id)
@@ -527,7 +522,6 @@ def add_coverage(workspace_id: int, payload: schemas.QAWorkspaceCoverageCreate,
 
 
 @router.delete("/api/workspaces/{workspace_id:int}/coverage/{coverage_id:int}", status_code=204)
-@router.delete("/api/qa-workspaces/{workspace_id:int}/coverage/{coverage_id:int}", status_code=204, include_in_schema=False)
 def delete_coverage(workspace_id: int, coverage_id: int, db: Session = Depends(get_db),
                     current_user: models.User = Depends(get_current_user)):
     if not can_configure_workspace(current_user, _workspace(db, workspace_id)):
@@ -543,7 +537,6 @@ def delete_coverage(workspace_id: int, coverage_id: int, db: Session = Depends(g
 
 
 @router.patch("/api/workspaces/preference/current", response_model=schemas.UserOut)
-@router.patch("/api/qa-workspaces/preference/current", response_model=schemas.UserOut, include_in_schema=False)
 def set_preference(payload: schemas.QAWorkspacePreference, db: Session = Depends(get_db),
                    current_user: models.User = Depends(get_current_user)):
     workspace = db.get(models.QAWorkspace, payload.workspace_id)
@@ -556,7 +549,6 @@ def set_preference(payload: schemas.QAWorkspacePreference, db: Session = Depends
 
 
 @router.patch("/api/workspaces/requests/{request_id:int}/route", response_model=schemas.QARequestOut)
-@router.patch("/api/qa-workspaces/requests/{request_id:int}/route", response_model=schemas.QARequestOut, include_in_schema=False)
 def manually_route_request(request_id: int, payload: schemas.QAWorkspaceRouteRequest,
                            db: Session = Depends(get_db), _: models.User = Depends(require_roles(Role.ADMIN))):
     request = db.get(models.QARequest, request_id)

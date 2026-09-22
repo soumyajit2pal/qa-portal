@@ -321,12 +321,27 @@ def renew(response: Response, request: Request, db: Session = Depends(get_db),
 
 
 @router.get("/me", response_model=schemas.UserOut)
-def me(response: Response, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def me(request: Request, response: Response, db: Session = Depends(get_db),
+       current_user: models.User = Depends(get_current_user)):
     # Authenticated identity must never be reused by a shared/intermediary
     # cache. The frontend also bypasses its own GET cache for this endpoint.
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     response.headers["Vary"] = "Cookie"
+    # The first identity lookup after a login carries the username that the
+    # person actually submitted.  It is not an authorization input: roles and
+    # identity still come solely from this live database row.  It is a
+    # continuity assertion that fails closed if a proxy-modified response,
+    # stale shared-browser cookie, or cookie substitution makes the browser
+    # present a different account's session.  Revoke that mismatched session
+    # so it cannot be reused by a later request that omits the assertion.
+    expected_username = request.headers.get("X-Expected-Username", "").strip()
+    if expected_username and _canonical_login_username(expected_username) != _canonical_login_username(current_user.username):
+        revoke_session(db, getattr(request.state, "auth_session_hash", None))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="The authenticated session does not match the account that signed in. Sign in again.",
+        )
     if current_user.has_role(Role.SCALE_6_PLUS):
         out = schemas.UserOut.model_validate(current_user)
         workspaces = db.query(models.QAWorkspace).filter(

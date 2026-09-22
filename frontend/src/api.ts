@@ -30,6 +30,10 @@ interface RequestOptions {
   body?: unknown
   formEncoded?: boolean
   isBlob?: boolean
+  // Used only for the immediate post-login /me lookup. The backend compares
+  // it with the identity bound to the opaque session and revokes a mismatch.
+  // It never grants roles or permissions.
+  expectedUsername?: string
   // Some operations expose their own, more useful progress UI. Excluding
   // those requests prevents the generic page-loading indicator from
   // competing with that operation-specific status.
@@ -184,6 +188,7 @@ function formatBackendReason(detail: unknown): string {
 async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T> {
   const { method = 'GET', body, formEncoded = false, isBlob = false } = opts
   const headers: Record<string, string> = {}
+  if (opts.expectedUsername) headers['X-Expected-Username'] = opts.expectedUsername
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())) {
     const csrf = csrfToken()
     if (csrf) headers['X-CSRF-Token'] = csrf
@@ -342,6 +347,8 @@ export const api = {
     fetchAllPages<T>((pagePath) => request(pagePath), path),
   getWithoutActivity: <T = any>(path: string): Promise<T> =>
     request<T>(path, { trackActivity: false }),
+  confirmLoginIdentity: <T = any>(username: string): Promise<T> =>
+    request<T>('/api/auth/me', { expectedUsername: username }),
   // `timeoutMs` (optional, third arg) lets a caller whose POST triggers slow
   // server-side bulk work (e.g. adding a few thousand testcases to a Test
   // Cycle at once) raise the default 30s budget instead of racing it -- see

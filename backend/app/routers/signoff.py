@@ -429,7 +429,6 @@ def qa_lead_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Ses
     return obj
 
 
-@router.post("/{signoff_id}/department-head-coe-decision", response_model=schemas.SignOffOut, include_in_schema=False)
 @router.post("/{signoff_id}/executive-coe-decision", response_model=schemas.SignOffOut)
 def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
                            current_user: models.User = Depends(require_roles(
