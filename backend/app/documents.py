@@ -21,6 +21,32 @@ from .constants import Role
 from .storage_config import get_upload_root, resolve_upload_path
 from .upload_limits import validate_document_uploads
 
+
+def _storage_component(value: str, label: str) -> str:
+    """Accept one filesystem component, never a client-controlled path."""
+    normalized = (value or "").strip()
+    if (
+        not normalized
+        or normalized in {".", ".."}
+        or "\x00" in normalized
+        or os.path.basename(normalized) != normalized
+        or "/" in normalized
+        or "\\" in normalized
+    ):
+        raise ValueError(f"Invalid {label}")
+    return normalized
+
+
+def _storage_relative_path(value: str, label: str) -> str:
+    """Validate a deliberately nested relative path one component at a time."""
+    normalized = (value or "").strip()
+    if not normalized or os.path.isabs(normalized) or "\\" in normalized:
+        raise ValueError(f"Invalid {label}")
+    return os.path.join(*(
+        _storage_component(component, label)
+        for component in normalized.split("/")
+    ))
+
 # Shares the same physical uploads folder as QARequest's own documents.
 # Request folders are always the top-level boundary; module/type is nested
 # inside them so one request does not create several sibling folders.
@@ -90,14 +116,21 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
     reads distinctly from a top-level Documents-tab one."""
     validate_document_uploads(files)
     upload_root = get_upload_root()
-    request_dir = os.path.join(upload_root, folder_name, module)
+    safe_folder = _storage_relative_path(folder_name, "upload folder")
+    safe_module = _storage_component(module, "document module")
+    relative_dir = os.path.join(safe_folder, safe_module)
+    request_dir = os.path.abspath(os.path.join(upload_root, relative_dir))
+    if os.path.commonpath((os.path.abspath(upload_root), request_dir)) != os.path.abspath(upload_root):
+        raise ValueError("Upload path escapes UPLOAD_STORAGE_ROOT")
     os.makedirs(request_dir, exist_ok=True)
 
     created = []
     written_paths = []
     try:
         for f in files:
-            original_name = os.path.basename(f.filename or "unnamed_file")
+            original_name = _storage_component(
+                os.path.basename(f.filename or "unnamed_file"), "file name"
+            )
             stem, ext = os.path.splitext(original_name)
             # Reserve the name atomically. An exists() check followed by open()
             # races when two workers upload the same original filename.
@@ -115,7 +148,7 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
             doc = models.RequestDocument(
                 module=module, request_id=request_id,
                 file_name=f.filename or original_name,
-                stored_path=os.path.join(folder_name, module, original_name),
+                stored_path=os.path.join(safe_folder, safe_module, original_name),
                 content_type=f.content_type,
                 file_size=os.path.getsize(dest_path),
                 uploaded_by_id=uploaded_by_id,
@@ -143,7 +176,7 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
                     try:
                         os.remove(path)
                     except OSError:
-                        logging.getLogger(__name__).exception("Could not clean up failed upload %s", path)
+                        logging.getLogger(__name__).exception("Could not clean up failed upload")
         except Exception:
             logging.getLogger(__name__).exception("Upload outcome uncertain; preserving files for reconciliation")
         raise

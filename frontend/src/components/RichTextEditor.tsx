@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { decodeMergedRichTable, encodeMergedRichTable, normalizeMergedRichTable } from '../richTableCodec'
+import { isMarkdownTableSeparator, parseMarkdownHeading, splitMarkdownTableRow } from '../markdownSyntax'
 
 // Shared low-level mechanics behind every Jira-style rich text editor in
 // this app: markdown <-> contentEditable-HTML conversion, the formatting
@@ -43,7 +44,7 @@ function tableToMarkdown(element: HTMLElement): string {
     Array.from(row.children).filter((cell) => cell instanceof HTMLTableCellElement).map((cell) => {
       const tableCell = cell as HTMLTableCellElement
       return {
-        t: textOf(tableCell).replace(/\s*\n\s*/g, ' ').trim(),
+        t: textOf(tableCell).split('\n').map((part) => part.trim()).join(' ').trim(),
         c: tableCell.colSpan > 1 ? tableCell.colSpan : undefined,
         r: tableCell.rowSpan > 1 ? tableCell.rowSpan : undefined,
         h: tableCell.tagName === 'TH' || undefined,
@@ -148,13 +149,25 @@ export function decodeRichImageName(value: string): string {
 }
 
 function inlineHtml(value: string): string {
-  return escapeHtml(value)
+  let linked = ''
+  let cursor = 0
+  while (cursor < value.length) {
+    const start = value.indexOf('[', cursor)
+    if (start < 0) { linked += escapeHtml(value.slice(cursor)); break }
+    linked += escapeHtml(value.slice(cursor, start))
+    const labelEnd = value.indexOf('](', start + 1)
+    const hrefEnd = labelEnd >= 0 ? value.indexOf(')', labelEnd + 2) : -1
+    const href = hrefEnd >= 0 ? safeRichTextLink(value.slice(labelEnd + 2, hrefEnd)) : null
+    if (!href || labelEnd < 0) { linked += '&#91;'; cursor = start + 1; continue }
+    linked += `<a href="${escapeHtml(href)}">${escapeHtml(value.slice(start + 1, labelEnd))}</a>`
+    cursor = hrefEnd + 1
+  }
+  return linked
     .replace(/\[u\]([\s\S]+?)\[\/u\]/g, '<u>$1</u>')
     .replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>')
     .replace(/~~([\s\S]+?)~~/g, '<s>$1</s>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+|mailto:[^)]+)\)/gi, '<a href="$2">$1</a>')
 }
 
 // Inverse of editorContentToMarkdown -- seeds a contentEditable's initial
@@ -203,10 +216,10 @@ export function markdownToEditorHtml(value: string): string {
       index += 1
       continue
     }
-    const heading = line.match(/^(#{1,6})\s+(.+)$/)
-    if (heading) { const level = heading[1].length; blocks.push(`<h${level}>${inlineHtml(heading[2])}</h${level}>`); index += 1; continue }
-    if (line.includes('|') && index + 1 < lines.length && /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[index + 1])) {
-      const cells = (entry: string) => entry.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((cell) => inlineHtml(cell.trim().replace(/\\\|/g, '|')))
+    const heading = parseMarkdownHeading(line)
+    if (heading) { blocks.push(`<h${heading.level}>${inlineHtml(heading.text)}</h${heading.level}>`); index += 1; continue }
+    if (line.includes('|') && index + 1 < lines.length && isMarkdownTableSeparator(lines[index + 1])) {
+      const cells = (entry: string) => splitMarkdownTableRow(entry).map(inlineHtml)
       const header = cells(line)
       index += 2
       const body: string[][] = []

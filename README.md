@@ -421,7 +421,7 @@ users without an email address are skipped.
 
 ### Enable HTTPS
 
-The frontend terminates TLS in nginx and publishes container port 443 on host port 8080. Keep the
+The frontend terminates TLS in nginx and publishes unprivileged container port 8443 on host port 8080. Keep the
 certificate and private key outside the image. Set one host directory in the environment file
 selected at deploy time; that directory must contain `qualityops.crt` and `qualityops.key`:
 
@@ -433,7 +433,11 @@ TLS_CERT_HOST_PATH=./certs/
 TLS_CERT_HOST_PATH=./certs/
 ```
 
-The directory and both required files must already exist and be readable before `compose up`:
+The directory and both required files must already exist before `compose up`. Nginx runs as
+non-root UID/GID 101, so grant that identity read-only access to the certificate and private key
+with a host ACL or an equivalent deployment-time group mapping; do not make the private key
+world-readable. The backend and document services run as UID/GID 10001, and their bind-mounted
+storage and log directories must be writable by that identity:
 
 ```text
 certs/
@@ -459,7 +463,7 @@ from the organization's certificate process and place the resulting files under 
 host directory using the two required filenames.
 
 This repository does not contain certificate-issuance/renewal automation, an HTTP listener, or an
-HTTP-to-HTTPS redirect. Nginx listens only on container port 443, mapped by Compose to host port
+HTTP-to-HTTPS redirect. Nginx listens only on container port 8443, mapped by Compose to host port
 8080, so the Compose URL is `https://<host>:8080`. Certificate issuance and renewal are operator
 responsibilities; after replacing a mounted certificate, recreate or reload the frontend container.
 If an external load balancer terminates public TLS, it must either re-encrypt to this nginx TLS

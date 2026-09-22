@@ -75,12 +75,16 @@ def smtp_readiness() -> tuple[bool, str | None]:
 
 def _send_message(message: EmailMessage, settings: dict) -> None:
     """Send one prepared message through the configured SMTP transport."""
+    tls_context = ssl.create_default_context(cafile=os.getenv("SMTP_CA_CERTS_FILE") or None)
+    tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    tls_context.check_hostname = True
+    tls_context.verify_mode = ssl.CERT_REQUIRED
     smtp_class = smtplib.SMTP_SSL if settings["ssl"] else smtplib.SMTP
     try:
         with smtp_class(settings["host"], settings["port"], timeout=settings["timeout"],
-                        **({"context": ssl.create_default_context(cafile=os.getenv("SMTP_CA_CERTS_FILE") or None)} if settings["ssl"] else {})) as client:
+                        **({"context": tls_context} if settings["ssl"] else {})) as client:
             if settings["starttls"]:
-                client.starttls(context=ssl.create_default_context(cafile=os.getenv("SMTP_CA_CERTS_FILE") or None))
+                client.starttls(context=tls_context)
             if settings["username"]:
                 client.login(settings["username"], settings["password"])
             client.send_message(message)

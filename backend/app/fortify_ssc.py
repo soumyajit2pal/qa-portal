@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .resilience import CircuitOpenError, fortify_circuit
-from .config import settings
 
 
 class FortifySSCError(Exception):
@@ -55,15 +54,20 @@ class FortifySSCClient:
         self.base_url = (os.getenv(f"{prefix}_URL") or os.getenv("FORTIFY_SSC_URL") or "").rstrip("/")
         self.basic_auth = os.getenv(f"{prefix}_AUTH") or os.getenv("FORTIFY_SSC_AUTH") or ""
         self.timeout = float(os.getenv("FORTIFY_SSC_TIMEOUT_SECONDS", "25"))
-        self.verify_tls = os.getenv("FORTIFY_SSC_VERIFY_TLS", "true").strip().lower() not in ("0", "false", "no")
-        if settings.app_env in {"uat", "prod", "production"} and not self.verify_tls:
-            raise FortifySSCError("Fortify SSC TLS verification must be enabled outside development")
+        if os.getenv("FORTIFY_SSC_VERIFY_TLS", "true").strip().lower() in ("0", "false", "no"):
+            raise FortifySSCError("Fortify SSC TLS verification cannot be disabled")
         if not self.base_url or not self.basic_auth:
             raise FortifySSCError(
                 f"Fortify SSC is not configured for {kind.upper()}. Set {prefix}_URL/{prefix}_AUTH "
                 "or the shared FORTIFY_SSC_URL/FORTIFY_SSC_AUTH environment variables."
             )
         self.api_url = f"{self.base_url}/api/v1"
+        self.tls_context = ssl.create_default_context(
+            cafile=os.getenv("FORTIFY_SSC_CA_CERTS_FILE") or None
+        )
+        self.tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        self.tls_context.check_hostname = True
+        self.tls_context.verify_mode = ssl.CERT_REQUIRED
         self._token: Optional[str] = None
 
     def _request(self, method: str, path: str, *, auth: Optional[str] = None, payload=None) -> dict:
@@ -82,10 +86,9 @@ class FortifySSCClient:
             body = json.dumps(payload).encode("utf-8")
         else:
             body = None
-        context = None if self.verify_tls else ssl._create_unverified_context()
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout, context=self.tls_context) as response:
                 result = json.loads(response.read().decode("utf-8"))
                 fortify_circuit.record_success()
                 return result

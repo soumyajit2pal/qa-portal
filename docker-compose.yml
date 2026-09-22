@@ -170,7 +170,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "8080:443"
+      - "8080:8443"
     volumes:
       # The same frontend image is promoted through every environment. The
       # selected host directory must contain qualityops.crt and qualityops.key.
@@ -182,6 +182,15 @@ services:
         condition: service_healthy
       document_portal:
         condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /var/cache/nginx:rw,noexec,nosuid,size=64m
+      - /var/run:rw,noexec,nosuid,size=8m
     restart: unless-stopped
 
 volumes:

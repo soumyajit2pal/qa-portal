@@ -38,7 +38,16 @@ def _plain_person_name(value):
     example, 'SM 1 Of Req 1'). Display only the person's name everywhere."""
     if not isinstance(value, str):
         return value
-    return re.sub(r"\s+of\s+req\s+\d+\s*$", "", value, flags=re.IGNORECASE).strip()
+    normalized = value.strip()
+    parts = normalized.rsplit(None, 3)
+    if (
+        len(parts) == 4
+        and parts[1].casefold() == "of"
+        and parts[2].casefold() == "req"
+        and parts[3].isdecimal()
+    ):
+        return parts[0].strip()
+    return normalized
 
 
 def _serialize_ist_datetime(value: datetime.datetime) -> str:

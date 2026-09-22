@@ -8,7 +8,13 @@ RUN npm ci --ignore-scripts
 ARG VITE_API_BASE_URL
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 
-COPY . .
+# Keep the post-build security audit in an explicit image layer. The frontend
+# build context uses an allowlist-style .dockerignore, so scripts/ must be
+# intentionally included rather than relying on a broad COPY side effect.
+COPY scripts ./scripts
+COPY tsconfig.json tsconfig.node.json vite.config.ts proxyHeaders.ts index.html ./
+COPY src ./src
+COPY public ./public
 RUN npm run build
 
 
@@ -18,4 +24,8 @@ COPY --from=build /app/dist /usr/share/nginx/html
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 443
+RUN touch /var/run/nginx.pid \
+    && chown -R nginx:nginx /usr/share/nginx/html /var/cache/nginx /var/log/nginx /var/run/nginx.pid
+
+EXPOSE 8443
+USER nginx

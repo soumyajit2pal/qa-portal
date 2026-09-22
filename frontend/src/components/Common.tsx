@@ -654,10 +654,13 @@ export function SignField({
 
   function applySignature() {
     if (!userName || !consented) return;
+    if (!globalThis.crypto?.randomUUID) {
+      throw new Error("A secure browser random-number generator is required for electronic signatures");
+    }
     const applied: ElectronicSignature = {
       signer: userName,
       signedAt: toISTISOString(),
-      signatureId: `ESIG-${globalThis.crypto?.randomUUID?.().toUpperCase() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`.toUpperCase()}`,
+      signatureId: `ESIG-${globalThis.crypto.randomUUID().toUpperCase()}`,
       statement: "I confirm my identity and intend this electronic signature to authorize the approval decision.",
       style: signatureStyle,
     };

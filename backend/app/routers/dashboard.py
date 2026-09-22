@@ -670,8 +670,12 @@ def recent_activity(
     query = query.order_by(models.ApprovalAction.created_at.desc(), models.ApprovalAction.id.desc())
     items: list[dict] = []
     offset = 0
-    batch_size = max(50, limit * 4)
-    while len(items) < limit:
+    batch_size = 80
+    # The request controls only the result count. Work is capped independently
+    # so an attacker cannot turn this endpoint into an unbounded database loop.
+    for _ in range(25):
+        if len(items) >= limit:
+            break
         rows = query.offset(offset).limit(batch_size).all()
         if not rows:
             break

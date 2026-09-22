@@ -21,6 +21,7 @@ import {
   pasteStructuredRichText,
 } from './RichTextEditor'
 import { decodeMergedRichTable } from '../richTableCodec'
+import { isMarkdownTableSeparator, parseMarkdownHeading, splitMarkdownTableRow } from '../markdownSyntax'
 import { isActivityReadOnly } from '../activityAccess'
 
 type ActivityFilter = 'all' | 'comments' | 'history'
@@ -57,30 +58,49 @@ function relativeTime(value: string): string {
 // editing, lives in RichTextEditor.tsx since JiraRichTextField needs it
 // too; this markdown -> React-nodes direction is only ever needed here) ----
 
-function inlineMarkdown(value: string, keyPrefix: string): React.ReactNode[] {
-  const pattern = /(\[u\][\s\S]+?\[\/u\]|\*\*[\s\S]+?\*\*|~~[\s\S]+?~~|`[^`]+`|\[[^\]]+\]\([^)]+\)|\*[^*\n]+\*)/g
+function inlineMarkdown(value: string, keyPrefix: string, depth = 0): React.ReactNode[] {
   const nodes: React.ReactNode[] = []
   let cursor = 0
-  let match: RegExpExecArray | null
   let index = 0
-  while ((match = pattern.exec(value))) {
-    if (match.index > cursor) nodes.push(value.slice(cursor, match.index))
-    const token = match[0]
+  while (cursor < value.length) {
+    let start = cursor
+    while (start < value.length && !'[*~`'.includes(value[start])) start += 1
+    if (start >= value.length) { nodes.push(value.slice(cursor)); break }
+    if (start > cursor) nodes.push(value.slice(cursor, start))
+    let open = value[start]
+    let close = open
+    let contentStart = start + 1
+    if (value.startsWith('[u]', start)) { open = '[u]'; close = '[/u]'; contentStart = start + 3 }
+    else if (value.startsWith('**', start)) { open = '**'; close = '**'; contentStart = start + 2 }
+    else if (value.startsWith('~~', start)) { open = '~~'; close = '~~'; contentStart = start + 2 }
+    else if (open === '[') {
+      const labelEnd = value.indexOf('](', contentStart)
+      const hrefEnd = labelEnd >= 0 ? value.indexOf(')', labelEnd + 2) : -1
+      if (labelEnd >= 0 && hrefEnd >= 0) {
+        const href = safeRichTextLink(value.slice(labelEnd + 2, hrefEnd))
+        const key = `${keyPrefix}-${index++}`
+        nodes.push(href ? <a key={key} href={href} target="_blank" rel="noreferrer">{value.slice(contentStart, labelEnd)}</a> : value.slice(start, hrefEnd + 1))
+        cursor = hrefEnd + 1
+        continue
+      }
+      nodes.push(value[start]); cursor = start + 1; continue
+    } else if (open === '*' && value[start + 1] === '*') {
+      open = '**'; close = '**'; contentStart = start + 2
+    }
+    const end = value.indexOf(close, contentStart)
+    if (end < 0 || end === contentStart || (open === '*' && value.slice(contentStart, end).includes('\n'))) {
+      nodes.push(value[start]); cursor = start + 1; continue
+    }
+    const content = value.slice(contentStart, end)
     const key = `${keyPrefix}-${index++}`
-    if (token.startsWith('[u]')) nodes.push(<u key={key}>{inlineMarkdown(token.slice(3, -4), key)}</u>)
-    else if (token.startsWith('**')) nodes.push(<strong key={key}>{inlineMarkdown(token.slice(2, -2), key)}</strong>)
-    else if (token.startsWith('~~')) nodes.push(<s key={key}>{inlineMarkdown(token.slice(2, -2), key)}</s>)
-    else if (token.startsWith('`')) nodes.push(<code key={key}>{token.slice(1, -1)}</code>)
-    else if (token.startsWith('[')) {
-      const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
-      const href = linkMatch ? safeRichTextLink(linkMatch[2]) : null
-      nodes.push(href
-        ? <a key={key} href={href} target="_blank" rel="noreferrer">{linkMatch![1]}</a>
-        : token)
-    } else nodes.push(<em key={key}>{inlineMarkdown(token.slice(1, -1), key)}</em>)
-    cursor = match.index + token.length
+    const nested = depth < 10 ? inlineMarkdown(content, key, depth + 1) : content
+    if (open === '[u]') nodes.push(<u key={key}>{nested}</u>)
+    else if (open === '**') nodes.push(<strong key={key}>{nested}</strong>)
+    else if (open === '~~') nodes.push(<s key={key}>{nested}</s>)
+    else if (open === '`') nodes.push(<code key={key}>{content}</code>)
+    else nodes.push(<em key={key}>{nested}</em>)
+    cursor = end + close.length
   }
-  if (cursor < value.length) nodes.push(value.slice(cursor))
   return nodes
 }
 
@@ -89,7 +109,7 @@ export function MarkdownComment({ value, attachmentUrls = {} }: { value: string;
   const isTableStart = (lineIndex: number) =>
     lineIndex + 1 < lines.length &&
     lines[lineIndex].includes('|') &&
-    /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[lineIndex + 1])
+    isMarkdownTableSeparator(lines[lineIndex + 1])
   const blocks: React.ReactNode[] = []
   let index = 0
   while (index < lines.length) {
@@ -120,15 +140,15 @@ export function MarkdownComment({ value, attachmentUrls = {} }: { value: string;
       index += 1
       continue
     }
-    const heading = line.match(/^(#{1,6})\s+(.+)$/)
+    const heading = parseMarkdownHeading(line)
     if (heading) {
-      const HeadingTag = `h${Math.min(6, heading[1].length)}` as keyof React.JSX.IntrinsicElements
-      blocks.push(<HeadingTag key={`heading-${index}`}>{inlineMarkdown(heading[2], `heading-${index}`)}</HeadingTag>)
+      const HeadingTag = `h${heading.level}` as keyof React.JSX.IntrinsicElements
+      blocks.push(<HeadingTag key={`heading-${index}`}>{inlineMarkdown(heading.text, `heading-${index}`)}</HeadingTag>)
       index += 1
       continue
     }
     if (isTableStart(index)) {
-      const cells = (entry: string) => entry.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, '|'))
+      const cells = splitMarkdownTableRow
       const header = cells(line)
       index += 2
       const rows: string[][] = []

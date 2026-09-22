@@ -10,6 +10,8 @@
 !proxyHeaders.ts
 !index.html
 !nginx.conf
+!scripts/
+!scripts/**
 !src/
 !src/**
 !public/
