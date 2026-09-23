@@ -1,4 +1,4 @@
-import React, { ReactNode, Suspense, lazy, useState } from 'react'
+import React, { ReactNode, Suspense, lazy, useEffect, useState } from 'react'
 import { Routes, Route, Navigate, Link, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
@@ -10,6 +10,7 @@ import EmailCompletionPrompt from './components/EmailCompletionPrompt'
 import PendingApprovalsNotice from './components/PendingApprovalsNotice'
 import { UserOut } from './types'
 import { hasWorkspaceRole, isViewOnly, uniqueWorkspaceAccess } from './constants'
+import { ADMIN_ACCESS_DENIED_EVENT, HttpError, api } from './api'
 
 // Cross-cutting pages -- not owned by any one domain module (the QA Request
 // gateway feeds every module, the Dashboard summarizes across all of
@@ -285,9 +286,48 @@ function QaGroupOnly({ children }: { children: ReactNode }) {
 
 function AdminOnly({ children }: { children: ReactNode }) {
   const { user } = useAuth()
-  return user?.roles.includes('ADMIN') && !isViewOnly(user)
-    ? <>{children}</>
-    : <Navigate to="/" replace />
+  const clientEligible = !!user?.roles.includes('ADMIN') && !isViewOnly(user)
+  const [state, setState] = useState<'checking' | 'allowed' | 'denied' | 'unavailable'>('checking')
+  const [attempt, setAttempt] = useState(0)
+
+  useEffect(() => {
+    let active = true
+    const denied = () => { if (active) setState('denied') }
+    window.addEventListener(ADMIN_ACCESS_DENIED_EVENT, denied)
+    if (!clientEligible) {
+      setState('denied')
+      return () => {
+        active = false
+        window.removeEventListener(ADMIN_ACCESS_DENIED_EVENT, denied)
+      }
+    }
+    setState('checking')
+    void api.verifyAdminAccess()
+      .then(() => { if (active) setState('allowed') })
+      .catch((error) => {
+        if (!active) return
+        setState(error instanceof HttpError && (error.status === 401 || error.status === 403)
+          ? 'denied'
+          : 'unavailable')
+      })
+    return () => {
+      active = false
+      window.removeEventListener(ADMIN_ACCESS_DENIED_EVENT, denied)
+    }
+  }, [clientEligible, user?.id, attempt])
+
+  if (state === 'denied') return <Navigate to="/" replace />
+  if (state === 'unavailable') {
+    return (
+      <section className="card empty-state" role="alert" aria-live="polite">
+        <h2>Administrator access could not be verified</h2>
+        <p className="msg">The server did not confirm this Administrator session. No administration tools were loaded.</p>
+        <button className="btn btn-primary" type="button" onClick={() => setAttempt((value) => value + 1)}>Retry access check</button>
+      </section>
+    )
+  }
+  if (state !== 'allowed') return <ModuleFallback />
+  return <>{children}</>
 }
 
 function DocumentPortalOnly({ children }: { children: ReactNode }) {

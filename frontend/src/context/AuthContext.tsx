@@ -1,5 +1,11 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
-import { api, setToken } from '../api'
+import {
+  ADMIN_ACCESS_DENIED_EVENT,
+  ADMIN_ACCESS_RECHECK_EVENT,
+  HttpError,
+  api,
+  setToken,
+} from '../api'
 import { UserOut } from '../types'
 import { uniqueWorkspaceAccess } from '../constants'
 import { isWorkspaceSelectionStorageChange } from '../workspaceTransition'
@@ -51,6 +57,27 @@ function syncWorkspaceSelection(me: UserOut) {
   localStorage.removeItem('qa_active_workspace_id')
 }
 
+function withoutUnverifiedAdminRole(me: UserOut): UserOut {
+  return me.roles.includes('ADMIN')
+    ? { ...me, roles: me.roles.filter((role) => role !== 'ADMIN') }
+    : me
+}
+
+async function verifyAdministrativePresentation(me: UserOut): Promise<UserOut> {
+  if (!me.roles.includes('ADMIN')) return me
+  try {
+    await api.verifyAdminAccess()
+    return me
+  } catch (error) {
+    // A 401 must continue through the normal session-expiry path rather than
+    // leaving a locally authenticated-looking profile behind. Every other
+    // failure stays fail-closed for ADMIN presentation while leaving ordinary
+    // portal functionality available.
+    if (error instanceof HttpError && error.status === 401) throw error
+    return withoutUnverifiedAdminRole(me)
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserOut | null>(null)
   const [loading, setLoading] = useState(true)
@@ -70,7 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } catch { /* Storage can be unavailable; continue with server validation. */ }
     try {
-      const me = await api.get<UserOut>('/api/auth/me')
+      const me = await verifyAdministrativePresentation(await api.get<UserOut>('/api/auth/me'))
       syncWorkspaceSelection(me)
       setUser(me)
     } catch (e) {
@@ -85,6 +112,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const expired = () => { setUser(null); setJustLoggedIn(false) }
+    const adminDenied = () => {
+      setUser((current) => current ? withoutUnverifiedAdminRole(current) : current)
+    }
+    const recheckAdmin = () => {
+      void api.verifyAdminAccess().catch((error) => {
+        if (!(error instanceof HttpError) || error.status === 401 || error.status === 403) {
+          adminDenied()
+        }
+      })
+    }
     const storageChanged = (event: StorageEvent) => {
       if (event.key === 'qa_session_logout' && event.newValue) expired()
       if (isWorkspaceSelectionStorageChange(event)) {
@@ -95,9 +132,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
     window.addEventListener('qa-session-expired', expired)
+    window.addEventListener(ADMIN_ACCESS_DENIED_EVENT, adminDenied)
+    window.addEventListener(ADMIN_ACCESS_RECHECK_EVENT, recheckAdmin)
     window.addEventListener('storage', storageChanged)
     return () => {
       window.removeEventListener('qa-session-expired', expired)
+      window.removeEventListener(ADMIN_ACCESS_DENIED_EVENT, adminDenied)
+      window.removeEventListener(ADMIN_ACCESS_RECHECK_EVENT, recheckAdmin)
       window.removeEventListener('storage', storageChanged)
     }
   }, [loadMe])
@@ -116,7 +157,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Only this cookie-authenticated server lookup may populate authorization
     // state, so changing the visible login response cannot elevate the UI.
     const expectedUsername = username.trim().toLowerCase()
-    const me = await api.confirmLoginIdentity<UserOut>(expectedUsername)
+    const me = await verifyAdministrativePresentation(
+      await api.confirmLoginIdentity<UserOut>(expectedUsername),
+    )
     syncWorkspaceSelection(me)
     setUser(me)
     setJustLoggedIn(true)
@@ -143,7 +186,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const refreshUser = async () => {
-    const me = await api.get<UserOut>('/api/auth/me')
+    const me = await verifyAdministrativePresentation(await api.get<UserOut>('/api/auth/me'))
     syncWorkspaceSelection(me)
     // Approval can change roles, workspace membership and onboarding gates
     // together. Enter a fresh application session after persisting the new

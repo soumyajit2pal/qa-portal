@@ -436,8 +436,8 @@ TLS_CERT_HOST_PATH=./certs/
 The directory and both required files must already exist before `compose up`. Nginx runs as
 non-root UID/GID 101, so grant that identity read-only access to the certificate and private key
 with a host ACL or an equivalent deployment-time group mapping; do not make the private key
-world-readable. The backend and document services run as UID/GID 10001, and their bind-mounted
-storage and log directories must be writable by that identity:
+world-readable. The backend and document services run as root because this deployment does not
+permit assigning the required ownership to mounted storage and log directories:
 
 ```text
 certs/

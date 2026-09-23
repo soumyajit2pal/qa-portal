@@ -64,6 +64,30 @@ def _unlock_user_login(db: Session, user: models.User, actor: models.User, reque
                        'An active account and valid credentials are still required.'}
 
 
+@router.get("/admin/bootstrap", status_code=status.HTTP_204_NO_CONTENT)
+def verify_admin_bootstrap(
+    current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    """Authorize delivery/mounting of the client-side Administration area.
+
+    ``/api/auth/me`` remains non-authoritative UI context.  The frontend calls
+    this endpoint before it exposes ADMIN navigation and again before it
+    mounts an ADMIN-only route.  A proxy-modified ``/me`` response therefore
+    cannot load the genuine Administration component with a REQUESTER
+    session.  Every administrative API retains its own independent role
+    dependency; this probe is presentation hardening, not a replacement for
+    endpoint authorization.
+    """
+    return Response(
+        status_code=status.HTTP_204_NO_CONTENT,
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Vary": "Cookie",
+        },
+    )
+
+
 @router.post("/admin/test-email", response_model=schemas.AdminTestEmailResult)
 def send_admin_test_email(payload: schemas.AdminTestEmailRequest, request: Request,
                           db: Session = Depends(get_db),

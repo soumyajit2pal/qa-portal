@@ -9,7 +9,7 @@ from ..database import get_db
 from ..deps import get_current_user, require_roles
 from ..constants import Role, REQUEST_TYPES
 from ..workspace_service import (
-    QA_WORKSPACE_ROLES,
+    WORKSPACE_BOUNDARY_ROLES,
     PARENT_WORKSPACE_ROLES,
     can_configure_workspace,
     can_create_child_workspace,
@@ -264,10 +264,14 @@ def replace_members(workspace_id: int, payload: schemas.QAWorkspaceMembersReplac
         if not user or (not user.is_active and not user.has_role(Role.ADMIN)):
             raise HTTPException(400, f"Active user {member.user_id} was not found")
         roles = member.roles or ["WORKSPACE_MEMBER"]
-        access_roles = {
-            role for role in roles
-            if role in {"WORKSPACE_MEMBER", "WORKSPACE_VIEWER", *PARENT_WORKSPACE_ROLES}
-        }
+        invalid_roles = sorted(set(roles) - WORKSPACE_BOUNDARY_ROLES)
+        if invalid_roles:
+            raise HTTPException(
+                400,
+                f"{', '.join(invalid_roles)} is not a workspace boundary role. "
+                "Operational permissions must be assigned through the System Administrator permission profile.",
+            )
+        access_roles = set(roles)
         if len(access_roles) > 1:
             raise HTTPException(400, "Select exactly one workspace access level for each user")
         access_role = next(iter(access_roles), "WORKSPACE_MEMBER")
@@ -282,16 +286,10 @@ def replace_members(workspace_id: int, payload: schemas.QAWorkspaceMembersReplac
                 403,
                 "Parent Workspace Viewer/Admin permissions are managed by a System Administrator",
             )
-        for role in roles:
-            if role not in QA_WORKSPACE_ROLES:
-                raise HTTPException(400, f"{role} is not a workspace role")
-            # Global role remains the coarse feature capability used by the
-            # existing navigation. Membership supplies the actual workspace
-            # boundary, so administrators do not need two separate updates.
-            if role not in {"WORKSPACE_MEMBER", "WORKSPACE_VIEWER", *PARENT_WORKSPACE_ROLES} and not any(assignment.role == role for assignment in user.role_assignments):
-                user.role_assignments.append(models.UserRole(role=role))
-        # The membership stores one boundary access level. Operational roles
-        # remain in the user's global permission profile.
+        # This endpoint owns workspace boundaries only. Global operational
+        # permissions are managed by the System Administrator user-access API;
+        # accepting them here would let a Parent Workspace Administrator turn
+        # an ordinary membership update into a global role grant.
         desired.add((member.user_id, "WORKSPACE_MEMBER" if user.has_role(Role.ADMIN) else access_role))
     if protected_parent_access and any(
         (user_id, role) not in desired for user_id, role in protected_parent_access.items()

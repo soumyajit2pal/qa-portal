@@ -2224,10 +2224,16 @@ class QAWorkspaceUpdate(BaseModel):
 
 class QAWorkspaceMemberInput(BaseModel):
     user_id: int
-    # Retained for older clients that submitted workspace-scoped QA roles.
-    # New clients send no role or WORKSPACE_MEMBER; capabilities are managed
-    # once through the user's Permission Profile.
-    roles: List[str] = []
+    # Workspace boundary only. Operational permissions such as QA_LEAD and
+    # SECURITY_ANALYST are global user roles and must be managed through the
+    # System Administrator permission profile, never delegated through a
+    # workspace-membership replacement.
+    roles: List[Literal[
+        "WORKSPACE_MEMBER",
+        "WORKSPACE_VIEWER",
+        "PARENT_WORKSPACE_VIEWER",
+        "PARENT_WORKSPACE_ADMIN",
+    ]] = Field(default_factory=list)
 
 
 class QAWorkspaceMembersReplace(BaseModel):

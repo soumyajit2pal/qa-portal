@@ -50,6 +50,9 @@ interface RequestOptions {
   // (see api.uploadForm's own optional param) opt into a longer budget
   // instead of raising the default for every request.
   timeoutMs?: number
+  // Authentication/authorization probes must always reach the origin. They
+  // must not reuse the normal short-lived GET cache, even within one tab.
+  cache?: boolean
 }
 
 const REQUEST_TIMEOUT_MS = 30_000
@@ -131,6 +134,51 @@ export class HttpError extends Error {
   }
 }
 
+export const ADMIN_BOOTSTRAP_PATH = '/api/auth/admin/bootstrap'
+export const ADMIN_ACCESS_DENIED_EVENT = 'qa-admin-access-denied'
+export const ADMIN_ACCESS_RECHECK_EVENT = 'qa-admin-access-recheck'
+
+/**
+ * Requests whose 403 response should trigger a fresh server ADMIN check.
+ * A 403 can be an operation-specific policy denial (for example, an Admin
+ * trying to remove their own role), so callers recheck the bootstrap instead
+ * of immediately trusting the failed operation as proof that ADMIN was lost.
+ */
+export function isAdminAuthorizationRequest(path: string, method: string = 'GET'): boolean {
+  const pathname = path.split('?', 1)[0]
+  const verb = method.toUpperCase()
+  if (pathname === ADMIN_BOOTSTRAP_PATH) return true
+  if (/^\/api\/auth\/users(?:\/|$)/.test(pathname)) return true
+  if (/^\/api\/auth\/admin(?:\/|$)/.test(pathname)) return true
+  // Coordinators legitimately GET this shared policy endpoint. Only changing
+  // the system-wide policy is an ADMIN operation; treating the GET as ADMIN
+  // would turn an ordinary coordinator-side 403 into an unrelated bootstrap.
+  if (pathname === '/api/auth/local-admin/assignable-roles' && verb === 'PUT') return true
+  if (pathname === '/api/departments/all') return true
+  if (verb !== 'GET' && /^\/api\/departments(?:\/|$)/.test(pathname)) return true
+  if (/^\/api\/checklist-config\/[^/]+\/all$/.test(pathname)) return true
+  if (verb !== 'GET' && /^\/api\/checklist-config(?:\/|$)/.test(pathname)) return true
+  if (verb !== 'GET' && /^\/api\/request-type-config(?:\/|$)/.test(pathname)) return true
+  if (pathname === '/api/audit/user-access-report') return true
+  if (verb === 'POST' && pathname === '/api/application-names') return true
+  if (/^\/api\/application-names\/\d+\/(?:department|name)$/.test(pathname) && verb === 'PATCH') return true
+  if (pathname === '/api/application-names/bulk-seed-template') return true
+  if (pathname === '/api/application-names/bulk-seed' && verb === 'POST') return true
+  if (pathname === '/api/workspaces' && verb === 'POST') return true
+  if (/^\/api\/workspaces\/\d+$/.test(pathname) && verb === 'PATCH') return true
+  if (/^\/api\/workspaces\/\d+\/(?:members|department-coordinators|coverage|defect-workflow)(?:\/|$)/.test(pathname) && verb !== 'GET') return true
+  if (/^\/api\/workspaces\/requests\/\d+\/route$/.test(pathname) && verb === 'PATCH') return true
+  return false
+}
+
+function notifyAdminAuthorizationFailure(path: string, method: string, status: number): void {
+  if (status !== 403 || !isAdminAuthorizationRequest(path, method)) return
+  const eventName = path.split('?', 1)[0] === ADMIN_BOOTSTRAP_PATH
+    ? ADMIN_ACCESS_DENIED_EVENT
+    : ADMIN_ACCESS_RECHECK_EVENT
+  window.dispatchEvent(new Event(eventName))
+}
+
 const STATUS_MESSAGES: Record<number, string> = {
   400: 'The request could not be processed. Review the entered information and try again.',
   401: 'Your session has expired or is no longer valid. Sign in again and retry the action.',
@@ -210,6 +258,7 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
     const res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload, signal: controller.signal, credentials: 'include' })
 
     if (!res.ok) {
+      notifyAdminAuthorizationFailure(path, method, res.status)
       if (res.status === 401 && !path.startsWith('/api/auth/login')) {
         window.dispatchEvent(new Event('qa-session-expired'))
       }
@@ -265,7 +314,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
   // rendered after workspace B became active.
   const activeWorkspace = selectedWorkspaceStorageId(localStorage)
   // Encryption challenges are single-use, including across concurrent actions.
-  const key = method === 'GET' && !['/api/auth/me', '/api/auth/login-key'].includes(path.split('?')[0])
+  const key = method === 'GET' && opts.cache !== false && !['/api/auth/me', '/api/auth/login-key'].includes(path.split('?')[0])
     ? `${activeWorkspace}:${path}:${opts.isBlob ? 'blob' : 'json'}`
     : ''
   // Briefly reuse successful JSON reads across components and route changes.
@@ -349,6 +398,8 @@ export const api = {
     request<T>(path, { trackActivity: false }),
   confirmLoginIdentity: <T = any>(username: string): Promise<T> =>
     request<T>('/api/auth/me', { expectedUsername: username }),
+  verifyAdminAccess: (): Promise<void> =>
+    request<void>(ADMIN_BOOTSTRAP_PATH, { trackActivity: false, cache: false }),
   // `timeoutMs` (optional, third arg) lets a caller whose POST triggers slow
   // server-side bulk work (e.g. adding a few thousand testcases to a Test
   // Cycle at once) raise the default 30s budget instead of racing it -- see
