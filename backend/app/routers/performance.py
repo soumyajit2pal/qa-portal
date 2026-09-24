@@ -379,6 +379,9 @@ def resubmit_performance(req_id: int, db: Session = Depends(get_db), current_use
     if obj.active_delegation:
         raise HTTPException(400, "The active delegation must be returned or recalled before resubmission")
     _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER"], "Resubmit")
+    doc_store.require_mandatory_checklist_evidence(
+        db, "PERFORMANCE_ITEM", obj.checklist_items,
+    )
     if obj.status in ("RETURNED_BY_SM", "SM_REJECTED"):
         reopening = obj.status == "SM_REJECTED"
         if obj.application_master_status == "REJECTED":

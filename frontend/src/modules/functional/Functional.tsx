@@ -915,6 +915,9 @@ export function FunctionalDetail({
   const pendingSelfDeclare = checklist
     .filter((c) => c.is_mandatory && !c.requester_checked)
     .map((c) => c.item);
+  const pendingMandatoryEvidence = checklist
+    .filter((c) => c.is_mandatory && (documentsByItem[c.id] || []).length === 0)
+    .map((c) => c.item);
   // Reported directly: the SM's own block message used to always say "your
   // decision above" even while the name was still sitting with the
   // Application Owner (i.e. not the SM's turn at all yet) -- misleading.
@@ -1385,11 +1388,16 @@ export function FunctionalDetail({
               {canResubmit && (
                 <button
                   className="btn btn-primary btn-sm"
-                  disabled={!!busyAction}
+                  disabled={!!busyAction || pendingMandatoryEvidence.length > 0}
                   onClick={() => act("resubmit")}
                 >
                   {resubmitLabel}
                 </button>
+              )}
+              {canResubmit && pendingMandatoryEvidence.length > 0 && (
+                <p className="muted small" style={{ color: "var(--danger, #c0392b)", width: "100%" }}>
+                  {pendingMandatoryEvidence.length} mandatory Readiness checklist item(s) have no attached evidence — see Edit Details.
+                </p>
               )}
 
               {canSMDecide && (

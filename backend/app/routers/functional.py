@@ -480,6 +480,9 @@ def resubmit_request(req_id: int, db: Session = Depends(get_db),
     _require(obj, [QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
                    QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD],
              "Resubmit")
+    doc_store.require_mandatory_checklist_evidence(
+        db, "FUNCTIONAL_ITEM", obj.checklist_items,
+    )
     if obj.status in (QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED):
         reopening = obj.status == QAStatus.SM_REJECTED
         if obj.application_master_status == "REJECTED":

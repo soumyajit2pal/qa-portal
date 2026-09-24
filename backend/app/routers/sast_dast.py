@@ -435,6 +435,8 @@ def _resubmit(db: Session, obj, current_user):
         raise HTTPException(400, "The active delegation must be returned or recalled before resubmission")
     _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"],
              "Resubmit")
+    module = "SAST_ITEM" if isinstance(obj, models.SASTRequest) else "DAST_ITEM"
+    doc_store.require_mandatory_checklist_evidence(db, module, obj.checklist_items)
     if obj.status in ("RETURNED_BY_SM", "SM_REJECTED"):
         reopening = obj.status == "SM_REJECTED"
         _require_checklist_ready(obj)

@@ -437,6 +437,9 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
   // pendingSelfDeclare already used for Submit/Resubmit in SAST.tsx/
   // DAST.tsx -- same name/shape here for consistency).
   const pendingSelfDeclare = checklist.filter((c) => c.is_mandatory && !c.requester_checked)
+  const pendingMandatoryEvidence = checklist.filter(
+    (c) => c.is_mandatory && (documentsByItem[c.id] || []).length === 0
+  )
   const canStartReadiness = isAssignedQALead && status === 'ENGINEER_ASSIGNED'
   const canCompleteReadiness = isAssignedQALead && status === 'READINESS'
   const canCompleteFeasibility = isAssignedQALead && status === 'FEASIBILITY'
@@ -605,7 +608,12 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
               onChanged={async (updated) => { onChanged(updated); await loadExtras() }}
             />
             {canSubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('submit')}>Submit for SM Approval</button>}
-            {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
+            {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy || pendingMandatoryEvidence.length > 0} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
+            {canResubmit && pendingMandatoryEvidence.length > 0 && (
+              <p className="muted small" style={{ color: 'var(--danger, #c0392b)', width: '100%' }}>
+                {pendingMandatoryEvidence.length} mandatory Pre-Testing Readiness checklist item(s) have no attached evidence — see Edit Details.
+              </p>
+            )}
             {canSMDecide && (
               <ApprovalDecisionButtons
                 userName={user?.full_name}

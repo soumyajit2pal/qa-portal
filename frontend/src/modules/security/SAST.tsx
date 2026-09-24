@@ -556,6 +556,9 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   // even allowed (see routers/sast_dast.py::_require_checklist_ready) --
   // distinct from Security Readiness's own independent verification.
   const pendingSelfDeclare = checklist.filter((c) => c.is_mandatory && !c.requester_checked)
+  const pendingMandatoryEvidence = checklist.filter(
+    (c) => c.is_mandatory && (documentsByItem[c.id] || []).length === 0
+  )
   const isInitialAnalystAssignment = status === 'PLANNING'
   // 2026-08 Reassignment CR, reported directly: "Everywhere the system
   // provides an Assign option ... it must also provide a Reassign option.
@@ -826,10 +829,15 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
               )}
               {canResubmit && (
                 <button className="btn btn-primary btn-sm"
-                        disabled={busy || (['RETURNED_BY_SM', 'SM_REJECTED'].includes(status) && pendingSelfDeclare.length > 0)}
+                        disabled={busy || pendingMandatoryEvidence.length > 0 || (['RETURNED_BY_SM', 'SM_REJECTED'].includes(status) && pendingSelfDeclare.length > 0)}
                         onClick={() => act('resubmit')}>
                   {resubmitLabel}
                 </button>
+              )}
+              {canResubmit && pendingMandatoryEvidence.length > 0 && (
+                <p className="muted small" style={{ color: 'var(--danger, #c0392b)', width: '100%' }}>
+                  {pendingMandatoryEvidence.length} mandatory Security Readiness checklist item(s) have no attached evidence — see Edit Details.
+                </p>
               )}
               {canResubmit && ['RETURNED_BY_SM', 'SM_REJECTED'].includes(status) && pendingSelfDeclare.length > 0 && (
                 <p className="muted small" style={{ color: 'var(--danger, #c0392b)', width: '100%' }}>

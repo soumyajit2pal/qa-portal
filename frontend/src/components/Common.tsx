@@ -1322,6 +1322,11 @@ interface TableProps<T> {
   // See TableServerPagination above. Omitted (the default): Table behaves
   // exactly as before, filtering/paginating `rows` entirely client-side.
   server?: TableServerPagination;
+  // Reports the rows actually rendered in <tbody>, after the Table's own
+  // column filters and client-side pagination. Bulk-selection owners use
+  // this instead of the raw `rows` prop so "Select all visible" cannot
+  // accidentally include rows hidden by a column filter.
+  onVisibleRowsChange?: (rows: T[]) => void;
 }
 
 const SERVER_PAGE_SIZE_OPTIONS = [5, 10, 25, 50, 100];
@@ -1336,6 +1341,7 @@ export function Table<T extends Record<string, any>>({
   resetKey,
   showColumnControls = true,
   server,
+  onVisibleRowsChange,
 }: TableProps<T>) {
   // Each column can hold several exact values. Different columns are still
   // combined with AND, while values selected inside one column use OR.
@@ -1584,6 +1590,10 @@ export function Table<T extends Record<string, any>>({
       server ? filteredRows : filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
     [server, rows, filteredRows, currentPage, pageSize]
   );
+
+  useEffect(() => {
+    onVisibleRowsChange?.(pagedRows);
+  }, [pagedRows, onVisibleRowsChange]);
 
   function clearFilters() {
     setFilters({});

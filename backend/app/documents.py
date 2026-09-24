@@ -73,6 +73,38 @@ def list_documents_for_items(db: Session, module: str, item_ids: List[int]) -> L
             .order_by(models.RequestDocument.uploaded_at).all())
 
 
+def missing_mandatory_checklist_evidence(db: Session, module: str, checklist_items) -> List[str]:
+    """Return mandatory checklist item names that have no usable evidence.
+
+    A database row by itself is not evidence: the underlying file must still
+    exist.  This is used at every returned-request resubmission boundary so a
+    requester cannot remove evidence while corrections are open and then
+    advance the request with a stale or empty mandatory checklist item.
+    """
+    required = [item for item in checklist_items if item.is_mandatory]
+    if not required:
+        return []
+
+    documents = list_documents_for_items(db, module, [item.id for item in required])
+    available_item_ids = {
+        document.request_id
+        for document in documents
+        if document.stored_path and os.path.isfile(full_path(document))
+    }
+    return [item.item for item in required if item.id not in available_item_ids]
+
+
+def require_mandatory_checklist_evidence(db: Session, module: str, checklist_items) -> None:
+    """Block workflow submission when mandatory checklist evidence is absent."""
+    missing = missing_mandatory_checklist_evidence(db, module, checklist_items)
+    if missing:
+        raise HTTPException(
+            400,
+            "Cannot resubmit -- attach supporting evidence for the following mandatory "
+            "readiness checklist item(s) first (Edit Details): " + "; ".join(missing),
+        )
+
+
 def _log_document_action(db: Session, entity_type: Optional[str], entity_id: Optional[int],
                           actor: Optional["models.User"], decision: str, comments: str) -> None:
     """Shared ApprovalAction logging for document upload/removal -- reported

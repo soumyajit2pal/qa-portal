@@ -2728,6 +2728,7 @@ export default function TestRepository() {
   const [repositoryStructureCollapsed, setRepositoryStructureCollapsed] = useState(false)
   const [deletingFolder, setDeletingFolder] = useState(false)
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set())
+  const [visibleCaseIds, setVisibleCaseIds] = useState<Set<number>>(new Set())
   const [showBulkUpdate, setShowBulkUpdate] = useState(false)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [showBulkApprove, setShowBulkApprove] = useState(false)
@@ -2740,6 +2741,7 @@ export default function TestRepository() {
   const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false)
   const [downloadingTemplate, setDownloadingTemplate] = useState(false)
   const [exportingRepository, setExportingRepository] = useState(false)
+  const [exportingFolderId, setExportingFolderId] = useState<number | null>(null)
 
   async function downloadTemplate() {
     setDownloadingTemplate(true)
@@ -2759,6 +2761,22 @@ export default function TestRepository() {
         `${selectedProject.project_key}_test_repository.xlsx`,
       )
     } catch (err) { setError(err) } finally { setExportingRepository(false) }
+  }
+
+  async function exportFolder(folder: TestFolderOut) {
+    if (!projectId || !selectedProject) return
+    setExportingFolderId(folder.id); setError(null)
+    try {
+      const queued = await api.post<{ id: string }>(
+        `/api/test-repository/projects/${projectId}/export-xlsx/jobs?folder_id=${folder.id}`,
+      )
+      await waitForJob(queued.id)
+      const safeFolderName = folder.name.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '') || `folder_${folder.id}`
+      await api.downloadFile(
+        `/api/jobs/${queued.id}/download`,
+        `${selectedProject.project_key}_${safeFolderName}_test_repository.xlsx`,
+      )
+    } catch (err) { setError(err) } finally { setExportingFolderId(null) }
   }
 
   useEffect(() => {
@@ -3039,6 +3057,21 @@ export default function TestRepository() {
           ? 'Test cases deleted before ever being approved. Restorable by any author, or permanently cleared by an authorized QA Lead.'
           : 'Complete repository coverage across every folder and sub-folder.'
 
+  const syncVisibleCases = useCallback((visibleCases: TestCaseListOut[]) => {
+    const nextVisibleIds = new Set(visibleCases.map((testCase) => testCase.id))
+    setVisibleCaseIds((previous) => {
+      if (previous.size === nextVisibleIds.size && [...previous].every((id) => nextVisibleIds.has(id))) return previous
+      return nextVisibleIds
+    })
+    // Column filters live inside the shared Table, so the repository's
+    // outer filter-reset effect cannot see them. Prune rows hidden by those
+    // filters to keep every bulk action scoped to what the user can see.
+    setSelectedCaseIds((previous) => {
+      if ([...previous].every((id) => nextVisibleIds.has(id))) return previous
+      return new Set([...previous].filter((id) => nextVisibleIds.has(id)))
+    })
+  }, [])
+
   // 2026-08 -- "Bulk Test Case Recommendation - Checkbox Validation
   // Requirements": a row's checkbox must only ever be selectable when the
   // logged-in user could actually act on it. Only the four review
@@ -3098,9 +3131,11 @@ export default function TestRepository() {
     }
     return { eligible: true }
   }
-  const eligibleOnPageIds = cases.filter((testCase) => checkboxEligibility(testCase).eligible).map((testCase) => testCase.id)
-  const allEligibleSelected = eligibleOnPageIds.length > 0 && eligibleOnPageIds.every((id) => selectedCaseIds.has(id))
-  const someEligibleSelected = eligibleOnPageIds.some((id) => selectedCaseIds.has(id))
+  const eligibleVisibleIds = cases
+    .filter((testCase) => visibleCaseIds.has(testCase.id) && checkboxEligibility(testCase).eligible)
+    .map((testCase) => testCase.id)
+  const allEligibleSelected = eligibleVisibleIds.length > 0 && eligibleVisibleIds.every((id) => selectedCaseIds.has(id))
+  const someEligibleSelected = eligibleVisibleIds.some((id) => selectedCaseIds.has(id))
 
   function toggleSelected(id: number) {
     if (!checkboxEligibility(cases.find((testCase) => testCase.id === id) as TestCaseListOut).eligible) return
@@ -3115,22 +3150,21 @@ export default function TestRepository() {
   function toggleAllVisible() {
     setSelectedCaseIds((prev) => {
       const next = new Set(prev)
-      if (allEligibleSelected) eligibleOnPageIds.forEach((id) => next.delete(id))
-      else eligibleOnPageIds.forEach((id) => next.add(id))
+      if (allEligibleSelected) eligibleVisibleIds.forEach((id) => next.delete(id))
+      else eligibleVisibleIds.forEach((id) => next.add(id))
       return next
     })
   }
 
   // "the system must recalculate selection eligibility and clear invalid
   // selections" when data is refreshed/filtered/paginated/updated -- prunes
-  // any id that's on the current page but no longer eligible (e.g. someone
-  // else just acted on it). Ids selected on a different page are left
-  // untouched, matching this list's existing "selection persists across
-  // pages" behavior.
+  // any visible id that is no longer eligible (e.g. someone else just acted
+  // on it). syncVisibleCases above separately removes rows hidden by Table's
+  // internal column filters.
   useEffect(() => {
     setSelectedCaseIds((prev) => {
       if (prev.size === 0) return prev
-      const eligibleIds = new Set(eligibleOnPageIds)
+      const eligibleIds = new Set(eligibleVisibleIds)
       let changed = false
       const next = new Set(prev)
       for (const testCase of cases) {
@@ -3329,7 +3363,14 @@ export default function TestRepository() {
                 <h3>{currentViewTitle}</h3>
                 <p>{currentViewDescription}</p>
               </div>
-              <span>{total} test case{total !== 1 ? 's' : ''}</span>
+              <div className="tm-current-view-actions">
+                {selectedFolderRecord && (
+                  <button className="btn btn-sm" onClick={() => exportFolder(selectedFolderRecord)} disabled={exportingFolderId !== null}>
+                    {exportingFolderId === selectedFolderRecord.id ? 'Exporting folder…' : 'Export folder'}
+                  </button>
+                )}
+                <span>{total} test case{total !== 1 ? 's' : ''}</span>
+              </div>
             </div>
             <div className="tm-repository-summary">
               <div><small>Test cases</small><strong>{summary?.scoped_total ?? 0}</strong></div>
@@ -3396,6 +3437,7 @@ export default function TestRepository() {
             <Table
               rowKey="id"
               onRowClick={(c) => openCase(c.id)}
+              onVisibleRowsChange={syncVisibleCases}
               server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: goToPage, onPageSizeChange: goToPageSize, loading: casesLoading }}
               columns={[
                 {
@@ -3408,7 +3450,7 @@ export default function TestRepository() {
                     <input
                       type="checkbox"
                       checked={allEligibleSelected}
-                      disabled={eligibleOnPageIds.length === 0}
+                      disabled={eligibleVisibleIds.length === 0}
                       ref={(el) => { if (el) el.indeterminate = someEligibleSelected && !allEligibleSelected }}
                       onChange={toggleAllVisible}
                       aria-label={allEligibleSelected ? 'Deselect all eligible test cases on this page' : 'Select all eligible test cases on this page'}
