@@ -1605,6 +1605,9 @@ class SuppressionCreate(BaseModel):
     sast_request_id: Optional[int] = None
     dast_request_id: Optional[int] = None
     risk_assessment: str
+    # Optional parallel approvals. The owning department is derived from the
+    # linked SAST/DAST request and is always included server-side.
+    additional_department_ids: List[int] = []
     # One scan commonly has multiple findings -- list every one being
     # suppressed here instead of raising a separate request per finding.
     items: List[SuppressionItemIn]
@@ -1619,6 +1622,27 @@ class SuppressionCreate(BaseModel):
 class SuppressionRelinkIn(BaseModel):
     sast_request_id: Optional[int] = None
     dast_request_id: Optional[int] = None
+
+
+class SuppressionApprovalDepartmentOptionOut(BaseModel):
+    id: int
+    name: str
+
+
+class SuppressionApprovalDepartmentOptionsOut(BaseModel):
+    owning_department: str
+    owning_department_eligible: bool
+    departments: List[SuppressionApprovalDepartmentOptionOut] = Field(default_factory=list)
+
+
+class SuppressionDepartmentApprovalOut(ORMModel):
+    id: int
+    department_id: int
+    department_name: Optional[str] = None
+    decision: str
+    approver_id: Optional[int] = None
+    approver_name: Optional[str] = None
+    decided_at: Optional[datetime.datetime] = None
 
 
 class SuppressionOut(ORMModel):
@@ -1639,13 +1663,22 @@ class SuppressionOut(ORMModel):
     linked_request: Optional[LinkedRequestRef] = None
     risk_assessment: Optional[str] = None
     items: List[SuppressionItemOut] = []
+    department_approvals: List[SuppressionDepartmentApprovalOut] = []
     status: str
     created_by_id: Optional[int] = None
     sm_decision: Optional[str] = None
+    sm_id: Optional[int] = None
     dept_head_decision: Optional[str] = None
+    dept_head_id: Optional[int] = None
     security_decision: Optional[str] = None
     needs_dept_head_reapproval: bool = False
     created_at: datetime.datetime
+
+
+class SuppressionDepartmentDecision(WorkflowDecision):
+    # Optional during rolling deployment so an older frontend can still act
+    # when exactly one department approval is pending.
+    department_id: Optional[int] = None
 
 
 # ---------------- Module 7: Approval log ----------------

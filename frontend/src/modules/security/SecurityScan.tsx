@@ -1,10 +1,10 @@
 import { useRequestNavigation } from '../../hooks/useRequestNavigation'
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 
 import { api } from '../../api'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { hasWorkflowRole as hasRole, SUPPRESSION_TERMINAL_STATUSES } from '../../constants'
+import { hasWorkflowRole as hasRole, SUPPRESSION_REQUESTER_CONTROLLED_STATUSES, SUPPRESSION_TERMINAL_STATUSES } from '../../constants'
 import { EmptyState, ErrorText, Field, Modal, Table, TableColumn } from '../../components/Common'
 import { SecurityScanResultOut, SecurityScanSummaryOut, SuppressionOut } from '../../types'
 
@@ -308,9 +308,10 @@ export function SecurityRemediationAssignment({ requesterName, activeCount, view
 // option to link and delink supression request from sast request and
 // supression both." -- the SAST/DAST-side counterpart to Suppression.tsx's
 // own Relink control (opened from the requester's suppression detail
-// view): picks one of the requester's own still-open suppression requests
+// view): picks one of the requester's own Draft/Returned suppression requests
 // and points it at *this* SAST/DAST request instead, via the same backend
-// relink_suppression endpoint / SUPPRESSION_TERMINAL_STATUSES eligibility.
+// relink_suppression endpoint. Only requester-controlled Draft/Returned
+// requests are candidates because relinking restarts approval from Draft.
 export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, onLinked }: {
   kind: 'SAST' | 'DAST'
   requestId: number
@@ -322,28 +323,31 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
   const navigate = useRequestNavigation()
   const [suppressions, setSuppressions] = useState<SuppressionOut[]>([])
   const [selectedId, setSelectedId] = useState<number | ''>('')
+  const [loadError, setLoadError] = useState<unknown>(null)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
-  useEffect(() => {
-    api.get<SuppressionOut[]>('/api/suppressions')
-      .then(setSuppressions)
-      .catch((err) => setError(err))
-      .finally(() => setLoaded(true))
+  const loadSuppressions = useCallback(async () => {
+    setLoaded(false)
+    setLoadError(null)
+    try { setSuppressions(await api.get<SuppressionOut[]>('/api/suppressions')) }
+    catch (err) { setLoadError(err) }
+    finally { setLoaded(true) }
   }, [])
+  useEffect(() => { void loadSuppressions() }, [loadSuppressions])
 
   function isAlreadyLinkedHere(s: SuppressionOut): boolean {
     return (kind === 'SAST' ? s.sast_request_id : s.dast_request_id) === requestId
   }
   // Same requester-or-admin scoping as everywhere else in the suppression
   // flow (Only the requester of the linked request -- or Admin -- can
-  // raise/relink a suppression), plus "still open" (SUPPRESSION_TERMINAL_
-  // STATUSES) since a Done/Rejected suppression is a finished decision, not
-  // something to re-point elsewhere.
+  // raise/relink a suppression). A reviewer-owned request is deliberately
+  // excluded: relinking changes its approval scope and must happen only
+  // while the requester owns the next action.
   const candidates = suppressions.filter((s) =>
     (s.created_by_id === user?.id || hasRole(user, 'ADMIN'))
-    && !SUPPRESSION_TERMINAL_STATUSES.includes(s.status)
+    && SUPPRESSION_REQUESTER_CONTROLLED_STATUSES.includes(s.status)
     && !isAlreadyLinkedHere(s),
   )
   // Existing requests linked to this scan are history, not relink
@@ -368,7 +372,8 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
     <Modal title={`Link an existing Suppression Request to ${requestLabel}`} onClose={() => { if (!busy) onClose() }} variant="dialog" preventBackdropClose>
       <p className="muted small">
         Suppression requests already created for this {kind} request are shown below, including completed
-        requests. You may also link one of your other open suppression requests to this request.
+        requests. You may also link one of your other Draft or Returned suppression requests to this request;
+        doing so restarts that request's approval workflow from Draft.
       </p>
       <div className="security-scan-linked-suppressions">
         <strong>Requests linked to {requestLabel}</strong>
@@ -391,8 +396,10 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
           ))}
         </select>
       </Field>
-      {loaded && candidates.length === 0 && <p className="muted small">No other eligible open suppression requests of yours were found.</p>}
+      {loaded && candidates.length === 0 && <p className="muted small">No other eligible Draft or Returned suppression requests of yours were found.</p>}
+      <ErrorText error={loadError} title="Suppression requests could not be loaded" />
       <ErrorText error={error} />
+      {loaded && Boolean(loadError) && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void loadSuppressions()}>Retry loading suppression requests</button>}
       <div className="modal-actions">
         <button className="btn btn-primary" disabled={busy || !selectedId} onClick={submit}>{busy ? 'Linking...' : 'Link'}</button>
         <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
@@ -421,7 +428,7 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
 // is ever the right one to show at a time.
 export function SecurityScanResults({
   kind, results, summary, canValidateFindings, canRescan, canAssignToRequester, canMarkFixed,
-  canInitiateSuppression, busy, hasOpenSuppression, openSuppressionIds, hasDoneSuppression, doneSuppressionIds,
+  canInitiateSuppression, busy, hasOpenSuppression, openSuppressionIds, requesterActionSuppressionIds, hasDoneSuppression, doneSuppressionIds,
   onValidateFindings, onRescan, onAssignToRequester, onMarkFixed, onInitiateSuppression, onLinkSuppression,
 }: {
   kind: 'SAST' | 'DAST'
@@ -462,6 +469,10 @@ export function SecurityScanResults({
   // _require_no_existing_pending_suppression.
   hasOpenSuppression?: boolean
   openSuppressionIds?: string[]
+  // Draft/Returned suppressions are open, but they are not pending reviewer
+  // approval: the requester must edit and submit/resubmit them. Keeping this
+  // subset separate makes the blocking message actionable and truthful.
+  requesterActionSuppressionIds?: string[]
   // Reported directly: "for same sast request, even though supression
   // request is present and mark completed, again asking for new supression
   // request and relink." Initiate/Link Suppression used to only check
@@ -485,6 +496,7 @@ export function SecurityScanResults({
   // re-point), so no separate boolean prop needed.
   onLinkSuppression?: () => void
 }) {
+  const navigate = useRequestNavigation()
   // The empty summary returned before a request's first scan is a valid API
   // response (`initial` and `current` are null). The scan-results and
   // scan-summary requests used to update independently, so the first result
@@ -581,8 +593,21 @@ export function SecurityScanResults({
           )}
           {(canInitiateSuppression || canMarkFixed) && hasOpenSuppression && (
             <p className="security-scan-suppression-blocked">
-              Suppression Approval Pending{openSuppressionIds && openSuppressionIds.length > 0 ? `: ${openSuppressionIds.join(', ')}` : ''} --
-              {canMarkFixed ? ' wait for it to be approved or rejected before reassigning.' : ' only one open suppression request per SAST/DAST request at a time.'}
+              {requesterActionSuppressionIds?.length ? <>
+                Suppression requires requester action:{' '}
+                {requesterActionSuppressionIds.map((suppressionId, index) => <React.Fragment key={suppressionId}>
+                  {index > 0 ? ', ' : ''}
+                  <button type="button" className="suppression-id-link" onClick={() => navigate(`/suppression?open=${encodeURIComponent(suppressionId)}`)}>{suppressionId}</button>
+                </React.Fragment>)}
+                {' '}— open the request, make the required changes, then submit or re-submit it.
+              </> : <>
+                Suppression Approval Pending{openSuppressionIds && openSuppressionIds.length > 0 ? ': ' : ''}
+                {openSuppressionIds?.map((suppressionId, index) => <React.Fragment key={suppressionId}>
+                  {index > 0 ? ', ' : ''}
+                  <button type="button" className="suppression-id-link" onClick={() => navigate(`/suppression?open=${encodeURIComponent(suppressionId)}`)}>{suppressionId}</button>
+                </React.Fragment>)}{' '}—
+                {canMarkFixed ? 'wait for it to be approved or rejected before reassigning.' : 'only one open suppression request per SAST/DAST request at a time.'}
+              </>}
             </p>
           )}
           {/* Reported directly: "for same sast request, even though

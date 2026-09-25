@@ -2074,6 +2074,10 @@ class SuppressionRequest(Base):
     # finding (each finding still gets its own Issue Group/severity/description/
     # justification, just grouped under a single approval workflow).
     items = relationship("SuppressionItem", back_populates="suppression_request", cascade="all,delete-orphan")
+    department_approvals = relationship(
+        "SuppressionDepartmentApproval", back_populates="suppression_request",
+        cascade="all,delete-orphan", order_by="SuppressionDepartmentApproval.id",
+    )
     sast_request = relationship("SASTRequest", back_populates="suppressions")
     dast_request = relationship("DASTRequest", back_populates="suppressions")
     qa_workspace = relationship("QAWorkspace", foreign_keys=[qa_workspace_id])
@@ -2086,6 +2090,37 @@ class SuppressionRequest(Base):
         the same way SAST/DAST/Functional/Performance already show their own
         linked QA Request."""
         return self.sast_request if self.sast_request_id else self.dast_request
+
+
+class SuppressionDepartmentApproval(Base):
+    """One required Department Head decision for a suppression request.
+
+    The request's owning department always has one row. A requester may add
+    other departments while drafting the request; those approvals run in
+    parallel and all must approve before Security Team verification begins.
+    """
+    __tablename__ = "qap_suppression_dept_approvals"
+    __table_args__ = (
+        UniqueConstraint("suppression_request_id", "department_id", name="uq_qap_sup_dept_approval"),
+    )
+    id = pk_column()
+    suppression_request_id = Column(Integer, ForeignKey("qap_suppression_requests.id"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("qap_departments.id"), nullable=False, index=True)
+    decision = Column(String(16), nullable=False, default="Pending")
+    approver_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+
+    suppression_request = relationship("SuppressionRequest", back_populates="department_approvals")
+    department = relationship("Department")
+    approver = relationship("User", foreign_keys=[approver_id])
+
+    @property
+    def department_name(self):
+        return self.department.name if self.department else None
+
+    @property
+    def approver_name(self):
+        return self.approver.full_name if self.approver else None
 
 
 class SuppressionItem(Base):

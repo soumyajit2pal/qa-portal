@@ -27,6 +27,10 @@ export interface ApprovalDirectoryContext {
   qa_workspace_id?: number | null
   origin_workspace_id?: number | null
   requester_id?: number | null
+  // Suppression requests expose their requester using created_by_id rather
+  // than requester_id. Supporting both keeps the shared approver directory
+  // from accidentally listing the maker as an eligible checker.
+  created_by_id?: number | null
 }
 
 /**
@@ -75,6 +79,7 @@ export function approvalDirectoryRequest({
   const workspaceId = context.qa_workspace_id ?? context.origin_workspace_id ?? fallbackWorkspaceId
   if (workspaceId) query.set('workspace_id', String(workspaceId))
   if (context.department) query.set('department', context.department)
-  if (stage.departmentScoped && context.requester_id) query.set('exclude_id', String(context.requester_id))
+  const requesterId = context.requester_id ?? context.created_by_id
+  if (stage.departmentScoped && requesterId) query.set('exclude_id', String(requesterId))
   return { ...stage, roles, path: `/api/auth/user-options?${query}` }
 }

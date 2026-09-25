@@ -4,7 +4,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, func, or_, select, union_all
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from .. import models, pagination, schemas
 from ..database import get_db
@@ -152,6 +152,32 @@ def _user_name(db: Session, user_id: Optional[int]) -> Optional[str]:
         return None
     row = db.get(models.User, user_id)
     return row.full_name if row else None
+
+
+def _user_names(db: Session, user_ids) -> dict[int, str]:
+    """Resolve requester display names in one query for a pending queue."""
+    ids = {user_id for user_id in user_ids if user_id}
+    if not ids:
+        return {}
+    return dict(db.query(models.User.id, models.User.full_name).filter(
+        models.User.id.in_(ids),
+    ).all())
+
+
+def _suppression_department_head_scope_condition(user: models.User):
+    """SQL predicate shared by the suppression detail and count queues."""
+    return or_(
+        models.SuppressionRequest.department_approvals.any(and_(
+            models.SuppressionDepartmentApproval.decision == "Pending",
+            models.SuppressionDepartmentApproval.department.has(
+                models.Department.name.in_(user.departments),
+            ),
+        )),
+        and_(
+            ~models.SuppressionRequest.department_approvals.any(),
+            models.SuppressionRequest.department.in_(user.departments),
+        ),
+    )
 
 
 def _application_master_items(db: Session, user: models.User) -> List[dict]:
@@ -418,40 +444,58 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
         if not is_admin:
             q = q.filter(_suppression_team_scope_condition(db, user),
                          models.SuppressionRequest.created_by_id != user.id)
-        for obj in q.order_by(models.SuppressionRequest.created_at).all():
+        rows = q.order_by(models.SuppressionRequest.created_at).all()
+        requester_names = _user_names(db, (obj.created_by_id for obj in rows))
+        for obj in rows:
             results.append(_item(
                 "Suppression -- SM Approval", "SUPPRESSION", obj.id, obj.suppression_id,
                 f"Suppression: {obj.application_name or '—'}", obj.status,
                 SUPPRESSION_STATUS_LABELS.get(obj.status, obj.status), obj.department,
-                _user_name(db, obj.created_by_id),
+                requester_names.get(obj.created_by_id),
                 obj.created_at, _detail_path("/suppression", obj.suppression_id, obj.id),
             ))
     if user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
         q = _query("DEPARTMENT_HEAD_APPROVAL_PENDING")
         if not is_admin:
-            q = q.filter(_suppression_team_scope_condition(db, user),
-                         models.SuppressionRequest.created_by_id != user.id)
+            q = q.filter(
+                _suppression_department_head_scope_condition(user),
+                models.SuppressionRequest.created_by_id != user.id,
+            )
         if not is_system_admin(user):
             q = q.filter(or_(models.SuppressionRequest.sm_id.is_(None),
                              models.SuppressionRequest.sm_id != user.id))
-        for obj in q.order_by(models.SuppressionRequest.created_at).all():
+        rows = q.options(
+            selectinload(models.SuppressionRequest.department_approvals).joinedload(
+                models.SuppressionDepartmentApproval.department,
+            ),
+        ).order_by(models.SuppressionRequest.created_at).all()
+        requester_names = _user_names(db, (obj.created_by_id for obj in rows))
+        for obj in rows:
+            pending_departments = [approval.department_name for approval in obj.department_approvals
+                                   if approval.decision == "Pending"
+                                   and (is_admin or user.has_department(approval.department_name))]
+            if not pending_departments and not obj.department_approvals \
+                    and (is_admin or user.has_department(obj.department)):
+                pending_departments = [obj.department]
             results.append(_item(
                 "Suppression -- Department Head Approval", "SUPPRESSION", obj.id, obj.suppression_id,
                 f"Suppression: {obj.application_name or '—'}", obj.status,
-                SUPPRESSION_STATUS_LABELS.get(obj.status, obj.status), obj.department,
-                _user_name(db, obj.created_by_id),
+                SUPPRESSION_STATUS_LABELS.get(obj.status, obj.status), ", ".join(pending_departments),
+                requester_names.get(obj.created_by_id),
                 obj.created_at, _detail_path("/suppression", obj.suppression_id, obj.id),
             ))
     if user.has_role(Role.SECURITY_ANALYST):
         q = _query("SECURITY_TEAM_VERIFICATION").filter(
             models.SuppressionRequest.created_by_id != user.id,
         )
-        for obj in q.order_by(models.SuppressionRequest.created_at).all():
+        rows = q.order_by(models.SuppressionRequest.created_at).all()
+        requester_names = _user_names(db, (obj.created_by_id for obj in rows))
+        for obj in rows:
             results.append(_item(
                 "Suppression -- Security Team Verification", "SUPPRESSION", obj.id, obj.suppression_id,
                 f"Suppression: {obj.application_name or '—'}", obj.status,
                 SUPPRESSION_STATUS_LABELS.get(obj.status, obj.status), obj.department,
-                _user_name(db, obj.created_by_id),
+                requester_names.get(obj.created_by_id),
                 obj.created_at, _detail_path("/suppression", obj.suppression_id, obj.id),
             ))
     return results
@@ -713,7 +757,7 @@ def _pending_count_statement(db: Session, user: models.User):
         conditions = [models.SuppressionRequest.status == "DEPARTMENT_HEAD_APPROVAL_PENDING"]
         if not is_admin:
             conditions.extend([
-                _suppression_team_scope_condition(db, user),
+                _suppression_department_head_scope_condition(user),
                 models.SuppressionRequest.created_by_id != user.id,
             ])
         conditions.append(or_(models.SuppressionRequest.sm_id.is_(None),

@@ -738,7 +738,7 @@ export const SUPPRESSION_STATUS_LABELS: Record<string, string> = {
   Draft: 'Draft',
   SM_APPROVAL_PENDING: 'SM Approval Pending',
   RETURNED_BY_SM: 'Returned by SM',
-  DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head Approval Pending',
+  DEPARTMENT_HEAD_APPROVAL_PENDING: 'Required Department Approvals Pending',
   RETURNED_BY_DEPARTMENT_HEAD: 'Returned by Department Head',
   SECURITY_TEAM_VERIFICATION: 'Security Team Verification',
   RETURNED_BY_SECURITY_TEAM: 'Returned by Security Team',
@@ -747,13 +747,21 @@ export const SUPPRESSION_STATUS_LABELS: Record<string, string> = {
 }
 
 export const SUPPRESSION_TERMINAL_STATUSES: string[] = ['Done', 'Rejected']
+// Request-owned stages where changing the linked scan or editing the
+// suppression is safe. A relink changes the request's approval context, so
+// it is deliberately excluded while any reviewer or Security Team owns the
+// next action. The backend applies the same gate and resets a relinked
+// returned request to Draft.
+export const SUPPRESSION_REQUESTER_CONTROLLED_STATUSES: string[] = [
+  'Draft', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM',
+]
 // "Pending With" -- who needs to act next, for the list table column of the
 // same name. Derived from each transition's require_roles() gate in
 // routers/suppression.py.
 export const SUPPRESSION_PENDING_WITH: Record<string, string> = {
   Draft: 'Requester',
   SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester',
-  DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head', RETURNED_BY_DEPARTMENT_HEAD: 'Requester',
+  DEPARTMENT_HEAD_APPROVAL_PENDING: 'Required Department Heads', RETURNED_BY_DEPARTMENT_HEAD: 'Requester',
   SECURITY_TEAM_VERIFICATION: 'Security Analyst', RETURNED_BY_SECURITY_TEAM: 'Requester',
   Done: '—', Rejected: '—',
 }

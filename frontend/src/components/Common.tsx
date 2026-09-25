@@ -1224,20 +1224,26 @@ export function ErrorText({ error, title = "Action could not be completed", guid
   // Surface diagnostic details only for service, network, or timeout failures.
   const systemFailure = httpError !== null &&
     (httpError.status >= 500 || httpError.status === 0 || httpError.status === 408);
+  const reasonParts = ["Reason"];
+  if (httpError?.cause) reasonParts.push(httpError.cause);
+  if (systemFailure && httpError.status) reasonParts.push(`HTTP ${httpError.status}`);
+  const correctiveAction = httpError?.guidance ||
+    (systemFailure ? correctiveGuidance(message) : guidance || correctiveGuidance(message));
   return (
     <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose>
       <div className="action-error-dialog" role="alert">
         <div className="action-error-dialog-icon">!</div>
         <div>
           <strong>The requested action was stopped</strong>
-          <span>{systemFailure && httpError.status ? `Reason · HTTP ${httpError.status}` : "Reason"}</span>
+          <span>{reasonParts.join(" · ")}</span>
           <p>{message}</p>
+          {httpError?.code && <small className="action-error-reference">Diagnostic code: {httpError.code}</small>}
           {systemFailure && httpError.reference && <small className="action-error-reference">Technical reference: {httpError.reference}</small>}
         </div>
       </div>
       <div className="action-error-guidance">
         <strong>What to do</strong>
-        <p>{systemFailure ? correctiveGuidance(message) : guidance || correctiveGuidance(message)}</p>
+        <p>{correctiveAction}</p>
       </div>
       <button type="button" className="btn btn-primary" onClick={() => setVisible(false)}>Close</button>
     </Modal>

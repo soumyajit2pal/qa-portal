@@ -923,6 +923,27 @@ export interface SuppressionItemOut {
   justification?: string | null
 }
 
+export interface SuppressionDepartmentApprovalOut {
+  id: number
+  department_id: number
+  department_name?: string | null
+  decision: string
+  approver_id?: number | null
+  approver_name?: string | null
+  decided_at?: string | null
+}
+
+export interface SuppressionApprovalDepartmentOption {
+  id: number
+  name: string
+}
+
+export interface SuppressionApprovalDepartmentOptionsOut {
+  owning_department: string
+  owning_department_eligible: boolean
+  departments: SuppressionApprovalDepartmentOption[]
+}
+
 export interface SuppressionOut {
   id: number
   suppression_id: string
@@ -938,10 +959,16 @@ export interface SuppressionOut {
   linked_request?: LinkedRequestRef | null
   risk_assessment?: string | null
   items: SuppressionItemOut[]
+  department_approvals: SuppressionDepartmentApprovalOut[]
   status: string
   created_by_id?: number | null
+  // The SM whose approval advanced this request to Department Head review.
+  // Department Head action controls and approver-directory results use this
+  // to enforce maker-checker separation for users who hold both roles.
+  sm_id?: number | null
   sm_decision?: string | null
   dept_head_decision?: string | null
+  dept_head_id?: number | null
   security_decision?: string | null
   needs_dept_head_reapproval: boolean
   created_at: string

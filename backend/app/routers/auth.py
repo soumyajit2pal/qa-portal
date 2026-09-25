@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from collections import defaultdict
 
@@ -10,7 +11,13 @@ from sqlalchemy.exc import IntegrityError
 from .. import models, schemas, pagination, email_notifications
 from ..database import get_db
 from ..audit_service import snapshot_changes, user_snapshot, write_audit
-from ..auth import verify_password, ldap_authenticate, ldap_authenticate_with_profile, LDAPAuthError
+from ..auth import (
+    LDAPAuthError,
+    authentication_rejected_detail,
+    ldap_authenticate,
+    ldap_authenticate_with_profile,
+    verify_password,
+)
 from ..session_security import (
     create_session, clear_session_cookies, resolve_session, revoke_presented_session,
     reject_cross_site_request, revoke_session, revoke_user_sessions, set_session_cookies,
@@ -22,15 +29,15 @@ from ..constants import (
     DOCUMENT_PORTAL_ROLES,
     OTHER_DEPARTMENT,
 )
-
-router = APIRouter(prefix="/api/auth", tags=["auth"])
-
 from ..login_rate_limit import (
     enforce as _enforce_login_rate_limit,
     record as _record_login_failure,
     clear as _clear_login_failures,
     unlock as _unlock_login_failures,
 )
+
+router = APIRouter(prefix="/api/auth", tags=["auth"])
+logger = logging.getLogger("qa_portal.auth")
 
 
 @router.post("/users/{user_id}/unlock-login")
@@ -128,6 +135,48 @@ def _canonical_login_username(username: str) -> str:
     return (username or "").strip().lower()
 
 
+def _raise_ldap_login_error(
+    db: Session,
+    request: Request,
+    username: str,
+    exc: LDAPAuthError,
+    user: Optional[models.User] = None,
+) -> None:
+    """Record the exact safe category and return its user-facing response.
+
+    Raw ldap3 diagnostics can include infrastructure names, DNs and local
+    certificate paths. ``audit_detail`` extracts only stable result metadata;
+    the request-id already bound to the logger correlates it with the browser's
+    technical reference.
+    """
+    diagnostic = exc.audit_detail()
+    logger.warning(
+        "LDAP login failure code=%s operation=%s error_type=%s result=%s "
+        "description=%s directory_subcode=%s retryable=%s",
+        diagnostic.get("ldap_error_code"),
+        diagnostic.get("operation"),
+        diagnostic.get("error_type"),
+        diagnostic.get("ldap_result_code", "-"),
+        diagnostic.get("ldap_result_description", "-"),
+        diagnostic.get("directory_subcode", "-"),
+        diagnostic.get("retryable"),
+    )
+    if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+        _record_login_failure(request, username)
+    write_audit(
+        db,
+        event_type="AUTHENTICATION",
+        action="LOGIN_FAILED" if exc.status_code == 401 else "LOGIN_ERROR",
+        outcome="FAILED",
+        actor=user,
+        actor_username=None if user else username,
+        request=request,
+        status_code=exc.status_code,
+        details={"reason": exc.cause, **diagnostic},
+    )
+    raise HTTPException(status_code=exc.status_code, detail=exc.public_detail()) from exc
+
+
 def _is_document_only_ldap_username(username: str) -> bool:
     """External identities do not use the bank `b…` username convention.
 
@@ -195,17 +244,16 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
             # Match the outage response used for known LDAP accounts. Treating
             # a directory outage as an ordinary bad password only for unknown
             # usernames creates an account-enumeration oracle.
-            write_audit(db, event_type="AUTHENTICATION", action="LOGIN_ERROR", outcome="FAILED",
-                        actor_username=username, request=request, status_code=503,
-                        details={"reason": "LDAP authentication unavailable"})
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                detail="LDAP authentication unavailable. Please try again later.") from exc
+            _raise_ldap_login_error(db, request, username, exc)
         if not profile:
             _record_login_failure(request, username)
             write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
                         actor_username=username, request=request, status_code=401,
                         details={"reason": "Invalid username or password"})
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=authentication_rejected_detail(),
+            )
 
         document_only_ldap_account = _is_document_only_ldap_username(username)
         user = models.User(
@@ -251,7 +299,10 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
         _record_login_failure(request, username)
         write_audit(db, event_type="AUTHENTICATION", action="LOGIN_BLOCKED", outcome="FAILED",
                     actor=user, request=request, status_code=401, details={"reason": "User is disabled"})
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=authentication_rejected_detail(),
+        )
 
     if not just_provisioned:
         # Credentials were already verified above for a just-provisioned account;
@@ -260,24 +311,26 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
             try:
                 authenticated = ldap_authenticate(username, form_data.password)
             except LDAPAuthError as exc:
-                write_audit(db, event_type="AUTHENTICATION", action="LOGIN_ERROR", outcome="FAILED",
-                            actor=user, request=request, status_code=503,
-                            details={"reason": "LDAP authentication unavailable"})
-                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                     detail="LDAP authentication unavailable. Please try again later.") from exc
+                _raise_ldap_login_error(db, request, username, exc, user)
             if not authenticated:
                 _record_login_failure(request, username)
                 write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
                             actor=user, request=request, status_code=401,
                             details={"reason": "Invalid username or password"})
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=authentication_rejected_detail(),
+                )
         else:
             if not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
                 _record_login_failure(request, username)
                 write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
                             actor=user, request=request, status_code=401,
                             details={"reason": "Invalid username or password"})
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=authentication_rejected_detail(),
+                )
 
     _clear_login_failures(request, username)
     session_secret, csrf_secret = create_session(db, user.id, request)
@@ -488,7 +541,7 @@ def user_options(purpose: str = "lookup", workspace_id: Optional[int] = None,
         raise HTTPException(403, "Workspace is outside the active scope")
     selected_scope = (workspace_id,) if workspace_id is not None else scope_ids
     q = db.query(models.User).filter(models.User.is_active == True)
-    if selected_scope:
+    if selected_scope and purpose != "approver":
         member_ids = select(models.QAWorkspaceMember.user_id).where(
             models.QAWorkspaceMember.workspace_id.in_(selected_scope),
             models.QAWorkspaceMember.is_active == True)
@@ -496,7 +549,7 @@ def user_options(purpose: str = "lookup", workspace_id: Optional[int] = None,
             models.QARequest.qa_workspace_id.in_(selected_scope), models.QARequest.requester_id.isnot(None))
         q = q.filter(or_(models.User.id == current_user.id, models.User.id.in_(member_ids),
                          models.User.id.in_(requester_ids)))
-    else:
+    elif not selected_scope:
         # No selected/authorized workspace must never mean the whole directory.
         q = q.filter(models.User.id == current_user.id)
     if purpose != "lookup":
@@ -510,13 +563,20 @@ def user_options(purpose: str = "lookup", workspace_id: Optional[int] = None,
         rows = [u for u in rows if (set(u.roles) & required or (purpose == "retest" and u.has_role(Role.ADMIN)))
                 and (purpose == "retest" or any(a.is_active and a.workspace_id in selected_scope for a in u.qa_workspace_access))]
     if purpose == "approver":
+        from ..workspace_service import inherited_workspace_access_mode, selectable_workspace_ids
+
         allowed = {Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
                    Role.SM, Role.APPLICATION_OWNER, Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM, Role.SECURITY_ANALYST}
         required = set((roles or "").split(","))
         if not required or not required <= allowed:
             raise HTTPException(400, "Invalid approval group")
         rows = [u for u in rows if set(u.roles) & required
-                and any(a.is_active and a.workspace_id in selected_scope for a in u.qa_workspace_access)
+                and Role.VIEW_ONLY not in u.roles and Role.SCALE_6_PLUS not in u.roles
+                and any(
+                    workspace in selectable_workspace_ids(db, u)
+                    and inherited_workspace_access_mode(db, u, workspace) != "PARENT_VIEWER"
+                    for workspace in selected_scope
+                )
                 and (not u.has_role(Role.ADMIN) or (department and department in u.departments))]
     if purpose == "defect_reassign":
         if defect_id is None:

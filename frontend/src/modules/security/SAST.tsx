@@ -14,7 +14,7 @@ import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import RequestDelegation from '../../components/RequestDelegation'
-import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasWorkflowRole as hasRole, hasDepartment, hasWorkspaceRole, isViewOnly, canManageReadinessEvidence } from '../../constants'
+import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_REQUESTER_CONTROLLED_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasWorkflowRole as hasRole, hasDepartment, hasWorkspaceRole, isViewOnly, canManageReadinessEvidence } from '../../constants'
 import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOption, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
@@ -662,6 +662,9 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   // Request/Mark Fixed (see SecurityScanResults' own use of this).
   const hasOpenSuppression = (req.suppressions || []).some((s) => !SUPPRESSION_TERMINAL_STATUSES.includes(s.status || ''))
   const openSuppressionIds = (req.suppressions || []).filter((s) => !SUPPRESSION_TERMINAL_STATUSES.includes(s.status || '')).map((s) => s.suppression_id)
+  const requesterActionSuppressionIds = (req.suppressions || [])
+    .filter((s) => SUPPRESSION_REQUESTER_CONTROLLED_STATUSES.includes(s.status || ''))
+    .map((s) => s.suppression_id)
   // Reported directly: "for same sast request, even though supression
   // request is present and mark completed, again asking for new supression
   // request and relink." A suppression reaching Done is no longer "open"
@@ -1069,6 +1072,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
             busy={busy}
             hasOpenSuppression={hasOpenSuppression}
             openSuppressionIds={openSuppressionIds}
+            requesterActionSuppressionIds={requesterActionSuppressionIds}
             hasDoneSuppression={hasDoneSuppression}
             doneSuppressionIds={doneSuppressionIds}
             onValidateFindings={validateFindings}

@@ -7,15 +7,43 @@ import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, RequestDocuments } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
-import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_TERMINAL_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, QA_REQUEST_CREATOR_ROLES, hasWorkflowRole as hasRole, hasDepartment, isViewOnly } from '../../constants'
-import { SASTListOut, DASTListOut, SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOption, ApprovalActionOut } from '../../types'
+import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_REQUESTER_CONTROLLED_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, QA_REQUEST_CREATOR_ROLES, hasWorkflowRole as hasRole, hasDepartment, isViewOnly } from '../../constants'
+import {
+  SASTListOut, DASTListOut, SASTOut, DASTOut, SuppressionOut,
+  CombinedSecurityRequest, UserOption, ApprovalActionOut,
+  SuppressionApprovalDepartmentOption, SuppressionApprovalDepartmentOptionsOut,
+} from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import InfoModal from '../../components/InfoModal'
 import { isKeyboardActivationKey } from '../../keyboard'
+import { formatDateTimeIST } from '../../time'
+import SuppressionDepartmentApprovalRouting from './SuppressionDepartmentApprovalRouting'
 
 function userName(users: UserOption[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
+}
+
+function suppressionPendingWith(suppression: SuppressionOut): string {
+  if (suppression.status !== 'DEPARTMENT_HEAD_APPROVAL_PENDING') {
+    return SUPPRESSION_PENDING_WITH[suppression.status] || '—'
+  }
+  const departments = (suppression.department_approvals || [])
+    .filter((approval) => approval.decision === 'Pending')
+    .map((approval) => approval.department_name?.trim())
+    .filter((name): name is string => Boolean(name))
+  if (!departments.length) return SUPPRESSION_PENDING_WITH[suppression.status] || '—'
+  return `${departments.length === 1 ? 'Department Head' : 'Department Heads'}: ${departments.join(', ')}`
+}
+
+function departmentApprovalSummary(suppression: SuppressionOut): string {
+  const approvals = suppression.department_approvals || []
+  if (!approvals.length) return suppression.dept_head_decision || 'Pending'
+  const approved = approvals.filter((approval) => approval.decision === 'Approved').length
+  if (approvals.every((approval) => approval.decision === 'Approved')) return 'Approved by all required departments'
+  if (approvals.some((approval) => approval.decision === 'Rejected')) return 'Rejected'
+  if (approvals.some((approval) => approval.decision === 'Returned')) return 'Returned to requester'
+  return `${approved} of ${approvals.length} required departments approved`
 }
 
 interface SuppressionItemForm {
@@ -29,20 +57,41 @@ const EMPTY_ITEM: SuppressionItemForm = { issue_id: '', severity: 'Medium', desc
 const EMPTY_FORM = {
   scan_type: 'SAST', sast_request_id: null as number | null, dast_request_id: null as number | null,
   application_name: '', department: '', application_owner: '',
-  risk_assessment: '', items: [{ ...EMPTY_ITEM }] as SuppressionItemForm[],
+  risk_assessment: '', additional_department_ids: [] as number[], items: [{ ...EMPTY_ITEM }] as SuppressionItemForm[],
 }
 type SuppressionForm = typeof EMPTY_FORM
+
+function pickerErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || 'Unable to load options.')
+}
+
+function PickerLoadNotice({ label, error, loading, onRetry }: {
+  label: string
+  error?: unknown
+  loading?: boolean
+  onRetry: () => void
+}) {
+  if (loading) return <p className="muted small" role="status">Loading {label}…</p>
+  if (!error) return null
+  return (
+    <div className="execution-cycle-required-warning" role="alert">
+      <span>Could not load {label}: {pickerErrorMessage(error)}</span>
+      <button type="button" className="btn btn-sm" onClick={onRetry}>Retry</button>
+    </div>
+  )
+}
 
 // Searchable "Request ID" autosuggest -- covers BOTH SAST and DAST requests
 // together (each tagged with its _kind) so the requester doesn't have to
 // pick a scan type before searching; selecting a match hands the full record
 // back to the caller, which derives scan type from it and auto-populates
 // Application Name / Department / Owner.
-function RequestIdSearch({ requests, selected, onSelect, onClear }: {
+function RequestIdSearch({ requests, selected, onSelect, onClear, loading = false }: {
   requests: CombinedSecurityRequest[]
   selected: CombinedSecurityRequest | null
   onSelect: (r: CombinedSecurityRequest) => void
   onClear: () => void
+  loading?: boolean
 }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -81,6 +130,7 @@ function RequestIdSearch({ requests, selected, onSelect, onClear }: {
       <ClearableSearchInput
         placeholder="Search SAST or DAST Request ID or application..."
         value={query}
+        aria-busy={loading}
         onFocus={() => setOpen(true)}
         onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
         onClear={() => { setQuery(''); setOpen(true) }}
@@ -89,7 +139,8 @@ function RequestIdSearch({ requests, selected, onSelect, onClear }: {
       {open && (
         <div className="searchable-select-panel">
           <div className="searchable-select-list" role="listbox" aria-label="Matching SAST and DAST requests">
-            {matches.length === 0 && <div className="searchable-select-empty">No SAST/DAST requests found.</div>}
+            {loading && <div className="searchable-select-empty" role="status">Loading SAST/DAST requests…</div>}
+            {!loading && matches.length === 0 && <div className="searchable-select-empty">No eligible SAST/DAST requests found.</div>}
             {matches.map((r) => (
               <div key={`${r._kind}-${r.id}`} className="searchable-select-option" role="option" aria-selected={false} tabIndex={0}
                    onClick={() => { onSelect(r); setQuery(''); setOpen(false) }}
@@ -123,6 +174,13 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
   const [selectedRef, setSelectedRef] = useState<CombinedSecurityRequest | null>(null)
   const [sastRequests, setSastRequests] = useState<SASTListOut[]>([])
   const [dastRequests, setDastRequests] = useState<DASTListOut[]>([])
+  const [departments, setDepartments] = useState<SuppressionApprovalDepartmentOption[]>([])
+  const [owningDepartmentEligible, setOwningDepartmentEligible] = useState<boolean | null>(null)
+  const [requestPickerLoading, setRequestPickerLoading] = useState(true)
+  const [requestPickerErrors, setRequestPickerErrors] = useState<{ sast?: unknown; dast?: unknown }>({})
+  const [departmentsLoading, setDepartmentsLoading] = useState(false)
+  const [departmentsError, setDepartmentsError] = useState<unknown>(null)
+  const [needsAdditionalApprovals, setNeedsAdditionalApprovals] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   // Keep the shared creation flow open after the POST succeeds and replace
@@ -130,22 +188,65 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
   // applies to all three entry points (Suppression register, SAST Findings,
   // and DAST Findings) without each parent having to reproduce the notice.
   const [created, setCreated] = useState<SuppressionOut | null>(null)
+  const departmentOptionsRequest = useRef(0)
   function set<K extends keyof SuppressionForm>(k: K, v: SuppressionForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
-  useEffect(() => {
+  const loadRequestPicker = useCallback(async () => {
     // Picker candidates only -- fetches the lightweight PAG-005 list shape,
     // large page_size since this is a client-side-filtered autosuggest, not
     // a paginated table (see inScope/hasReachedScanning/isNotYetCompleted
     // below). Only ever used for the manual "Change"/search picker now --
     // see the separate direct-fetch effect below for the initialRequest
     // (deep-linked) case.
-    Promise.all([
+    setRequestPickerLoading(true)
+    const [sast, dast] = await Promise.allSettled([
       api.getAll<SASTListOut>('/api/sast-requests'),
       api.getAll<DASTListOut>('/api/dast-requests'),
     ])
-      .then(([sast, dast]) => { setSastRequests(sast); setDastRequests(dast) })
-      .catch(() => { /* autosuggest is a convenience -- fields stay manually editable if this fails */ })
+    if (sast.status === 'fulfilled') setSastRequests(sast.value)
+    if (dast.status === 'fulfilled') setDastRequests(dast.value)
+    setRequestPickerErrors({
+      sast: sast.status === 'rejected' ? sast.reason : undefined,
+      dast: dast.status === 'rejected' ? dast.reason : undefined,
+    })
+    setRequestPickerLoading(false)
   }, [])
+  useEffect(() => { void loadRequestPicker() }, [loadRequestPicker])
+
+  const loadDepartments = useCallback(async () => {
+    const requestVersion = ++departmentOptionsRequest.current
+    if (!selectedRef) {
+      setDepartments([])
+      setOwningDepartmentEligible(null)
+      setDepartmentsError(null)
+      setDepartmentsLoading(false)
+      return
+    }
+    setDepartmentsLoading(true)
+    setDepartmentsError(null)
+    setOwningDepartmentEligible(null)
+    const parameter = selectedRef._kind === 'SAST' ? 'sast_request_id' : 'dast_request_id'
+    try {
+      const result = await api.get<SuppressionApprovalDepartmentOptionsOut>(
+        `/api/suppressions/approval-department-options?${parameter}=${selectedRef.id}`,
+      )
+      if (requestVersion !== departmentOptionsRequest.current) return
+      setDepartments(result.departments)
+      setOwningDepartmentEligible(result.owning_department_eligible)
+      const eligibleIds = new Set(result.departments.map((department) => department.id))
+      setForm((current) => ({
+        ...current,
+        additional_department_ids: current.additional_department_ids.filter((id) => eligibleIds.has(id)),
+      }))
+    } catch (err) {
+      if (requestVersion !== departmentOptionsRequest.current) return
+      setDepartments([])
+      setDepartmentsError(err)
+    } finally {
+      if (requestVersion === departmentOptionsRequest.current) setDepartmentsLoading(false)
+    }
+  }, [selectedRef])
+  useEffect(() => { void loadDepartments() }, [loadDepartments])
 
   // Reported directly: "requester created suppression request from here,
   // still it is not linked ... once request created from here, this should
@@ -216,9 +317,9 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
     ...sastRequests.filter(inScope).filter(hasReachedScanning).filter(isNotYetCompleted).map((r) => ({ ...r, _kind: 'SAST' as const })),
     ...dastRequests.filter(inScope).filter(hasReachedScanning).filter(isNotYetCompleted).map((r) => ({ ...r, _kind: 'DAST' as const })),
   ]
-
   function selectRequest(r: CombinedSecurityRequest) {
     setSelectedRef(r)
+    setNeedsAdditionalApprovals(false)
     // Both SAST and DAST list rows carry application_name (delegated from
     // the QA Request gateway) -- previously DAST used targets[0].application_url
     // instead, but targets isn't part of the lightweight PAG-005 list schema
@@ -233,12 +334,25 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
       application_owner: r.application_owner || '',
       sast_request_id: r._kind === 'SAST' ? r.id : null,
       dast_request_id: r._kind === 'DAST' ? r.id : null,
+      // Approval eligibility is workspace-specific. A different linked scan
+      // can route to a different workspace, so never carry old choices into
+      // the new context while its eligible subset is being loaded.
+      additional_department_ids: [],
     }))
   }
 
   function clearRequest() {
     setSelectedRef(null)
-    setForm((f) => ({ ...f, sast_request_id: null, dast_request_id: null, application_name: '', department: '', application_owner: '' }))
+    setNeedsAdditionalApprovals(false)
+    setForm((f) => ({
+      ...f,
+      sast_request_id: null,
+      dast_request_id: null,
+      application_name: '',
+      department: '',
+      application_owner: '',
+      additional_department_ids: [],
+    }))
   }
 
   function setItem<K extends keyof SuppressionItemForm>(idx: number, k: K, v: SuppressionItemForm[K]) {
@@ -254,6 +368,22 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
     // HTML5 required validation can't catch (RequestIdSearch isn't a plain
     // input/select).
     if (!selectedRef) { setError(new Error('Select a SAST/DAST Request ID above before submitting.')); return }
+    if (departmentsLoading) {
+      setError(new Error('Wait for the eligible Department Head approval routes to finish loading.'))
+      return
+    }
+    if (departmentsError || owningDepartmentEligible === null) {
+      setError(new Error('Eligible approval departments could not be verified. Retry loading them before submitting.'))
+      return
+    }
+    if (!owningDepartmentEligible) {
+      setError(new Error(`No eligible Department Head can approve for the owning department '${form.department}' in this workspace.`))
+      return
+    }
+    if (needsAdditionalApprovals && form.additional_department_ids.length === 0) {
+      setError(new Error('Select at least one additional department for approval.'))
+      return
+    }
     setBusy(true)
     setError(null)
     try { setCreated(await api.post<SuppressionOut>('/api/suppressions', form)) }
@@ -292,10 +422,12 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
           <div className="form-section">
             <div className="form-section-title">Linked SAST / DAST Request</div>
             <Field label="SAST / DAST Request ID *">
-              <RequestIdSearch requests={combinedRequests} selected={selectedRef} onSelect={selectRequest} onClear={clearRequest} />
+              <RequestIdSearch requests={combinedRequests} selected={selectedRef} onSelect={selectRequest} onClear={clearRequest} loading={requestPickerLoading} />
             </Field>
+            <PickerLoadNotice label="SAST requests" error={requestPickerErrors.sast} onRetry={() => void loadRequestPicker()} />
+            <PickerLoadNotice label="DAST requests" error={requestPickerErrors.dast} onRetry={() => void loadRequestPicker()} />
             <p className="muted small" style={{ margin: '6px 0 0' }}>
-              Only showing SAST/DAST requests you raised, or from your own department. Selecting one
+              Only showing eligible SAST/DAST requests you raised. Selecting one
               auto-fills the application details below.
             </p>
           </div>
@@ -351,6 +483,19 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
             <button type="button" className="btn btn-sm" onClick={addItem}>+ Add Another Finding</button>
           </div>
 
+          <SuppressionDepartmentApprovalRouting
+            departments={departments}
+            owningDepartment={form.department}
+            selectedDepartmentIds={form.additional_department_ids}
+            requiresAdditionalApprovals={needsAdditionalApprovals}
+            onRequirementChange={setNeedsAdditionalApprovals}
+            onChange={(departmentIds) => set('additional_department_ids', departmentIds)}
+            owningDepartmentEligible={owningDepartmentEligible}
+            loading={departmentsLoading}
+            error={departmentsError}
+            onRetry={() => void loadDepartments()}
+          />
+
           <div className="form-section">
             <div className="form-section-title">Risk Assessment</div>
             <Field label="Risk Assessment &amp; Acknowledgement (overall) *">
@@ -360,7 +505,12 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
 
           <ErrorText error={error} />
           <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
-            <button className="btn btn-primary" disabled={busy}>{busy ? 'Submitting...' : 'Submit Request'}</button>
+            <button
+              className="btn btn-primary"
+              disabled={busy || Boolean(selectedRef && (
+                departmentsLoading || departmentsError || owningDepartmentEligible !== true
+              ))}
+            >{busy ? 'Submitting...' : 'Submit Request'}</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
           </div>
         </form>
@@ -373,10 +523,10 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
 // request with that sast request, which should be linkable. and give
 // option to link and delink supression request from sast request and
 // supression both." -- lets the requester (or Admin) re-point an already-
-// raised suppression at a *different* SAST/DAST request any time it hasn't
-// reached a terminal outcome yet (mirrors backend's relink_suppression --
-// SUPPRESSION_TERMINAL_STATUSES gate, same eligibility filters as the New
-// Suppression Request picker above). "Delink" is deliberately not a
+// raised suppression at a *different* SAST/DAST request only while the
+// requester owns the next action (Draft or Returned). A relink changes the
+// approval context and therefore resets a returned request to Draft on the
+// backend. "Delink" is deliberately not a
 // separate action -- a suppression must always point at exactly one
 // SAST/DAST request, so delinking is just picking a different one here.
 function RelinkSuppressionModal({ sup, onClose, onRelinked }: {
@@ -388,17 +538,26 @@ function RelinkSuppressionModal({ sup, onClose, onRelinked }: {
   const [selectedRef, setSelectedRef] = useState<CombinedSecurityRequest | null>(null)
   const [sastRequests, setSastRequests] = useState<SASTListOut[]>([])
   const [dastRequests, setDastRequests] = useState<DASTListOut[]>([])
+  const [pickerLoading, setPickerLoading] = useState(true)
+  const [pickerErrors, setPickerErrors] = useState<{ sast?: unknown; dast?: unknown }>({})
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
-  useEffect(() => {
-    Promise.all([
+  const loadPicker = useCallback(async () => {
+    setPickerLoading(true)
+    const [sast, dast] = await Promise.allSettled([
       api.getAll<SASTListOut>('/api/sast-requests'),
       api.getAll<DASTListOut>('/api/dast-requests'),
     ])
-      .then(([sast, dast]) => { setSastRequests(sast); setDastRequests(dast) })
-      .catch(() => { /* picker is a convenience -- fails closed with an empty list */ })
+    if (sast.status === 'fulfilled') setSastRequests(sast.value)
+    if (dast.status === 'fulfilled') setDastRequests(dast.value)
+    setPickerErrors({
+      sast: sast.status === 'rejected' ? sast.reason : undefined,
+      dast: dast.status === 'rejected' ? dast.reason : undefined,
+    })
+    setPickerLoading(false)
   }, [])
+  useEffect(() => { void loadPicker() }, [loadPicker])
 
   // Same eligibility window as the New Suppression Request picker above
   // (requester's own requests, or Admin unrestricted; Scanning-or-later;
@@ -415,14 +574,22 @@ function RelinkSuppressionModal({ sup, onClose, onRelinked }: {
   function isNotYetCompleted(r: SASTListOut | DASTListOut): boolean {
     return !SAST_DAST_COMPLETED_STATUSES.includes(r.status)
   }
+  function isCurrentLink(r: CombinedSecurityRequest): boolean {
+    return r._kind === sup.scan_type
+      && (r._kind === 'SAST' ? sup.sast_request_id : sup.dast_request_id) === r.id
+  }
 
-  const combinedRequests: CombinedSecurityRequest[] = [
+  const combinedRequests: CombinedSecurityRequest[] = ([
     ...sastRequests.filter(inScope).filter(hasReachedScanning).filter(isNotYetCompleted).map((r) => ({ ...r, _kind: 'SAST' as const })),
     ...dastRequests.filter(inScope).filter(hasReachedScanning).filter(isNotYetCompleted).map((r) => ({ ...r, _kind: 'DAST' as const })),
-  ]
+  ] as CombinedSecurityRequest[]).filter((request) => !isCurrentLink(request))
 
   async function submit() {
     if (!selectedRef) { setError(new Error('Select a SAST/DAST Request ID to relink to.')); return }
+    if (isCurrentLink(selectedRef)) {
+      setError(new Error('This suppression is already linked to the selected SAST/DAST request. Choose a different request.'))
+      return
+    }
     setBusy(true)
     setError(null)
     try {
@@ -439,11 +606,14 @@ function RelinkSuppressionModal({ sup, onClose, onRelinked }: {
       <p className="muted small">
         Currently linked to {sup.scan_type} request {sup.linked_request?.request_id || '—'}. Pick a
         different SAST/DAST request below to relink this suppression to it — application details will
-        be re-derived from the new link.
+        be re-derived from the new link. Relinking clears prior approval progress and returns the
+        suppression to Draft so the updated request follows the complete approval workflow.
       </p>
       <Field label="SAST / DAST Request ID *">
-        <RequestIdSearch requests={combinedRequests} selected={selectedRef} onSelect={setSelectedRef} onClear={() => setSelectedRef(null)} />
+        <RequestIdSearch requests={combinedRequests} selected={selectedRef} onSelect={setSelectedRef} onClear={() => setSelectedRef(null)} loading={pickerLoading} />
       </Field>
+      <PickerLoadNotice label="SAST requests" error={pickerErrors.sast} onRetry={() => void loadPicker()} />
+      <PickerLoadNotice label="DAST requests" error={pickerErrors.dast} onRetry={() => void loadPicker()} />
       <ErrorText error={error} />
       <div className="modal-actions">
         <button className="btn btn-primary" disabled={busy || !selectedRef} onClick={submit}>{busy ? 'Relinking...' : 'Relink'}</button>
@@ -458,6 +628,10 @@ function EditSuppressionModal({ sup, onClose, onSaved }: {
   onClose: () => void
   onSaved: (s: SuppressionOut) => void
 }) {
+  const routingEditable = ['Draft', 'RETURNED_BY_SM'].includes(sup.status)
+  const initialAdditionalDepartmentIds = sup.department_approvals
+    .filter((approval) => approval.department_name !== sup.department)
+    .map((approval) => approval.department_id)
   const [form, setForm] = useState<SuppressionForm>(() => ({
     scan_type: sup.scan_type,
     sast_request_id: sup.sast_request_id ?? null,
@@ -466,6 +640,7 @@ function EditSuppressionModal({ sup, onClose, onSaved }: {
     department: sup.department || '',
     application_owner: sup.application_owner || '',
     risk_assessment: sup.risk_assessment || '',
+    additional_department_ids: initialAdditionalDepartmentIds,
     items: sup.items.map((item) => ({
       issue_id: item.issue_id || '',
       severity: item.severity || 'Medium',
@@ -473,8 +648,42 @@ function EditSuppressionModal({ sup, onClose, onSaved }: {
       justification: item.justification || '',
     })),
   }))
+  const [departments, setDepartments] = useState<SuppressionApprovalDepartmentOption[]>([])
+  const [owningDepartmentEligible, setOwningDepartmentEligible] = useState<boolean | null>(
+    routingEditable ? null : true,
+  )
+  const [departmentsLoading, setDepartmentsLoading] = useState(routingEditable)
+  const [departmentsError, setDepartmentsError] = useState<unknown>(null)
+  const [needsAdditionalApprovals, setNeedsAdditionalApprovals] = useState(
+    initialAdditionalDepartmentIds.length > 0,
+  )
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+
+  const loadDepartments = useCallback(async () => {
+    if (!routingEditable) return
+    setDepartmentsLoading(true)
+    setDepartmentsError(null)
+    setOwningDepartmentEligible(null)
+    try {
+      const result = await api.get<SuppressionApprovalDepartmentOptionsOut>(
+        `/api/suppressions/${sup.id}/approval-department-options`,
+      )
+      setDepartments(result.departments)
+      setOwningDepartmentEligible(result.owning_department_eligible)
+    }
+    catch (err) {
+      setDepartments([])
+      setDepartmentsError(err)
+    }
+    finally { setDepartmentsLoading(false) }
+  }, [routingEditable, sup.id])
+  useEffect(() => { void loadDepartments() }, [loadDepartments])
+
+  const eligibleDepartmentIds = new Set(departments.map((department) => department.id))
+  const unavailableSelectedDepartmentIds = owningDepartmentEligible === null
+    ? []
+    : form.additional_department_ids.filter((departmentId) => !eligibleDepartmentIds.has(departmentId))
 
   function setItem<K extends keyof SuppressionItemForm>(idx: number, key: K, value: SuppressionItemForm[K]) {
     setForm((current) => ({
@@ -485,6 +694,26 @@ function EditSuppressionModal({ sup, onClose, onSaved }: {
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
+    if (routingEditable && departmentsLoading) {
+      setError(new Error('Wait for the eligible Department Head approval routes to finish loading.'))
+      return
+    }
+    if (routingEditable && (departmentsError || owningDepartmentEligible === null)) {
+      setError(new Error('Eligible approval departments could not be verified. Retry loading them before saving.'))
+      return
+    }
+    if (routingEditable && !owningDepartmentEligible) {
+      setError(new Error(`No eligible Department Head can approve for the owning department '${form.department}' in this workspace.`))
+      return
+    }
+    if (routingEditable && unavailableSelectedDepartmentIds.length > 0) {
+      setError(new Error('Remove departments marked unavailable before saving the approval route.'))
+      return
+    }
+    if (routingEditable && needsAdditionalApprovals && form.additional_department_ids.length === 0) {
+      setError(new Error('Select at least one additional department for approval.'))
+      return
+    }
     setBusy(true)
     setError(null)
     try {
@@ -512,6 +741,24 @@ function EditSuppressionModal({ sup, onClose, onSaved }: {
               Use Relink from the Overview tab if the linked SAST/DAST request is incorrect.
             </p>
           </div>
+
+          <SuppressionDepartmentApprovalRouting
+            departments={departments}
+            owningDepartment={form.department}
+            selectedDepartmentIds={form.additional_department_ids}
+            requiresAdditionalApprovals={needsAdditionalApprovals}
+            onRequirementChange={setNeedsAdditionalApprovals}
+            onChange={(departmentIds) => setForm((current) => ({
+              ...current,
+              additional_department_ids: departmentIds,
+            }))}
+            owningDepartmentEligible={owningDepartmentEligible}
+            loading={departmentsLoading}
+            error={departmentsError}
+            onRetry={() => void loadDepartments()}
+            editable={routingEditable}
+            lockedApprovals={sup.department_approvals}
+          />
 
           <div className="form-section">
             <div className="form-section-title">Findings to Suppress</div>
@@ -548,7 +795,13 @@ function EditSuppressionModal({ sup, onClose, onSaved }: {
 
           <ErrorText error={error} />
           <div className="modal-actions">
-            <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save Changes'}</button>
+            <button
+              className="btn btn-primary"
+              disabled={busy || Boolean(routingEditable && (
+                departmentsLoading || departmentsError || owningDepartmentEligible !== true
+                || unavailableSelectedDepartmentIds.length > 0
+              ))}
+            >{busy ? 'Saving…' : 'Save Changes'}</button>
             <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
           </div>
         </form>
@@ -564,6 +817,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
   const [error, setError] = useState<unknown>(null)
   const [comments, setComments] = useState('')
   const [remarksDecision, setRemarksDecision] = useState<'return' | 'reject' | null>(null)
+  const [decisionDepartmentId, setDecisionDepartmentId] = useState<number | null>(null)
   // Whether the "require Department Head re-approval on return" popup (see
   // canSecurityDecide below) is open -- an always-visible checkbox next to
   // "Return to Requester" was easy to miss, so this is now asked as a pop-up
@@ -572,6 +826,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
   const [showRelink, setShowRelink] = useState(false)
   const [editing, setEditing] = useState(false)
   const [busy, setBusy] = useState(false)
+  const refreshInFlight = useRef(false)
 
   const loadExtras = useCallback(async () => {
     try {
@@ -579,6 +834,27 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
     } catch (err) { setError(err) }
   }, [sup.id])
   useEffect(() => { loadExtras() }, [loadExtras])
+
+  const refreshCurrent = useCallback(async () => {
+    if (refreshInFlight.current) return
+    refreshInFlight.current = true
+    try { onChanged(await api.get<SuppressionOut>(`/api/suppressions/${sup.id}`)) }
+    catch (err) { setError(err) }
+    finally { refreshInFlight.current = false }
+  }, [onChanged, sup.id])
+  useEffect(() => {
+    // Required Department Heads decide in parallel, often from different
+    // browsers. Refresh the open record whenever this tab regains focus so
+    // completed rows/actions do not remain stale for the next approver.
+    const onFocus = () => { void refreshCurrent() }
+    const onVisibility = () => { if (document.visibilityState === 'visible') void refreshCurrent() }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [refreshCurrent])
 
   async function act(step: string, extra?: Record<string, unknown>) {
     setError(null)
@@ -599,11 +875,11 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
   // (it's the QA/security side receiving the request).
   const sameDept = hasDepartment(user, sup.department)
 
-  // "give option to link and delink supression request from sast request
-  // and supression both" -- reachable any time this suppression hasn't
-  // reached a terminal outcome yet (mirrors backend's relink_suppression
-  // gate exactly: SUPPRESSION_TERMINAL_STATUSES, not just Draft).
-  const canRelink = isRequester && !SUPPRESSION_TERMINAL_STATUSES.includes(status)
+  // Relinking changes both the owning department and the people whose
+  // approval is required. Keep it exclusively in requester-controlled
+  // stages; the backend resets a relinked returned request to Draft so no
+  // approval from the previous link can be carried forward.
+  const canRelink = isRequester && SUPPRESSION_REQUESTER_CONTROLLED_STATUSES.includes(status)
   const canSubmit = isRequester && status === 'Draft'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM'].includes(status)
   // Reported directly: a person who raised this request but also separately
@@ -614,28 +890,32 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
   // created_by_id, the field this module raises requests under).
   const isSelfApproval = sup.created_by_id === user?.id && !hasRole(user, 'ADMIN')
   const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
-  const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
-  const canSecurityDecide = hasRole(user, 'SECURITY_ANALYST') && status === 'SECURITY_TEAM_VERIFICATION'
-  const editableStatuses = ['Draft', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM', 'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM']
-  const canEditDetails = !viewOnly && editableStatuses.includes(status) && (
-    hasRole(user, 'ADMIN')
-    || (sup.created_by_id === user?.id && ['Draft', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM'].includes(status))
-    || canSMDecide
-    || canDeptHeadDecide
+  const eligibleDepartmentApprovals = (sup.department_approvals || []).filter((approval) => (
+    approval.decision === 'Pending'
+    && (hasRole(user, 'ADMIN') || hasDepartment(user, approval.department_name))
+  ))
+  const selectedDepartmentApproval = eligibleDepartmentApprovals.find(
+    (approval) => approval.department_id === decisionDepartmentId,
+  ) || eligibleDepartmentApprovals[0]
+  const isPriorSMChecker = sup.sm_id === user?.id && !user?.roles?.includes('ADMIN')
+  const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM')
+    && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && eligibleDepartmentApprovals.length > 0 && !isSelfApproval && !isPriorSMChecker
+  const isPriorDepartmentChecker = !user?.roles?.includes('ADMIN') && (
+    sup.dept_head_id === user?.id
+    || (sup.department_approvals || []).some(approval => approval.approver_id === user?.id)
   )
-  // Document and Evidence Access Control Based on Workflow Stage: exactly 3
-  // upload stages, then a hard lock -- (1) the requester while it's Draft/
-  // Returned-by-*, (2) the SM only while SM_APPROVAL_PENDING, (3) the
-  // Department Head only while DEPARTMENT_HEAD_APPROVAL_PENDING. Every
-  // status after Department Head approval (including
-  // SECURITY_TEAM_VERIFICATION, previously a Security-Analyst upload
-  // window) is locked for everyone but Admin -- mirrors the backend's own
-  // (now-simplified) _can_upload_documents exactly.
-  const canManageDocuments = hasRole(user, 'ADMIN') || (
-    ['Draft', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM'].includes(status) ? isRequester :
-    status === 'SM_APPROVAL_PENDING' ? canSMDecide :
-    status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ? canDeptHeadDecide :
-    false
+  const canSecurityDecide = hasRole(user, 'SECURITY_ANALYST')
+    && status === 'SECURITY_TEAM_VERIFICATION' && !isPriorDepartmentChecker
+  // Reviewers decide the submitted version; they never edit it in place.
+  // If an SM or any required Department Head needs a correction, Return
+  // (whose dialog requires remarks) hands it back to the requester. Admin
+  // retains the existing requester override, but only in these same stages.
+  const canEditDetails = !viewOnly && isRequester && SUPPRESSION_REQUESTER_CONTROLLED_STATUSES.includes(status)
+  // Evidence changes belong to the requester. Reviewers must return the
+  // request with remarks instead of mutating the version they are deciding.
+  // Preserve the existing System Admin maintenance exception.
+  const canManageDocuments = user?.roles?.includes('ADMIN') || (
+    !viewOnly && sup.created_by_id === user?.id && SUPPRESSION_REQUESTER_CONTROLLED_STATUSES.includes(status)
   )
 
   return (
@@ -648,8 +928,8 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
       <ErrorText error={error} />
 
       {tab === 'overview' && (
-        <div>
-          <div className="grid grid-2">
+        <div className="suppression-approval-detail">
+          <div className="grid grid-2 suppression-overview-grid">
             <div><strong>Status:</strong> <WorkflowStatusBadge record={sup} status={status} label={SUPPRESSION_STATUS_LABELS[status] || status} /></div>
             <div><strong>Scan Type:</strong> {sup.scan_type}</div>
             <div>
@@ -664,66 +944,167 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
             <div><strong>Department:</strong> {sup.department || '—'}</div>
             <div><strong>Application Owner:</strong> {sup.application_owner || '—'}</div>
             <div><strong>SM Decision:</strong> {sup.sm_decision || 'Pending'}</div>
-            <div><strong>Dept Head Decision:</strong> {sup.dept_head_decision || 'Pending'}</div>
+            <div><strong>Overall Department Approval:</strong> {departmentApprovalSummary(sup)}</div>
             <div><strong>Security Team Decision:</strong> {sup.security_decision || 'Pending'}</div>
+            <div><strong>Raised At:</strong> {formatDateTimeIST(sup.created_at)}</div>
+            <div><strong>Pending With:</strong> {suppressionPendingWith(sup)}</div>
           </div>
+
+          <div className="section-title">Required Department Head Approvals</div>
+          <Table rowKey="id" columns={[
+            { key: 'department_name', header: 'Department', filterable: false, render: (approval) => approval.department_name || '—' },
+            { key: 'decision', header: 'Decision', filterable: false, render: (approval) => <Badge status={approval.decision} /> },
+            { key: 'approver_name', header: 'Decided By', filterable: false, render: (approval) => approval.approver_name || '—' },
+            { key: 'decided_at', header: 'Decided At', filterable: false, render: (approval) => approval.decided_at ? formatDateTimeIST(approval.decided_at) : '—' },
+          ]} rows={sup.department_approvals || []} pageSize={Math.max((sup.department_approvals || []).length, 1)} showColumnControls={false} />
 
           {status === 'RETURNED_BY_SECURITY_TEAM' && sup.needs_dept_head_reapproval && (
             <div className="execution-cycle-required-warning" role="status">
               <strong>Department Head re-approval required</strong>
               <span>
                 Security Team returned this request for correction. After the requester updates and
-                re-submits it, the request will go to the Department Head before returning to Security Team verification.
+                re-submits it, the request will go to all required Department Heads before returning to Security Team verification.
               </span>
             </div>
           )}
 
           <div className="section-title">Findings ({sup.items.length})</div>
-          <Table rowKey="id" columns={[
-            { key: 'issue_id', header: 'Issue Group', render: (i) => i.issue_id || '—' },
-            { key: 'severity', header: 'Severity' },
-            { key: 'description', header: 'Description', render: (i) => i.description || '—' },
-            { key: 'justification', header: 'Justification', render: (i) => i.justification || '—' },
-          ]} rows={sup.items} />
+          <div className="suppression-findings-review">
+            {sup.items.map((finding, index) => (
+              <article className="suppression-finding-review" key={finding.id}>
+                <header>
+                  <div>
+                    <small>Finding {index + 1}</small>
+                    <strong>{finding.issue_id || 'Issue group not provided'}</strong>
+                  </div>
+                  <span className="suppression-finding-severity">{finding.severity || '—'}</span>
+                </header>
+                <div className="suppression-finding-copy-grid">
+                  <section>
+                    <h3>Description</h3>
+                    <p>{finding.description || '—'}</p>
+                  </section>
+                  <section>
+                    <h3>Justification</h3>
+                    <p>{finding.justification || '—'}</p>
+                  </section>
+                </div>
+              </article>
+            ))}
+          </div>
 
-          <p style={{ marginTop: 14 }}><strong>Risk Assessment:</strong> {sup.risk_assessment || '—'}</p>
+          <section className="suppression-risk-assessment" aria-labelledby="suppression-risk-assessment-title">
+            <h3 id="suppression-risk-assessment-title">Risk Assessment &amp; Acknowledgement</h3>
+            <p>{sup.risk_assessment || '—'}</p>
+          </section>
 
-          <div className="section-title">Workflow Actions</div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/suppressions/${sup.id}/export`, `${sup.suppression_id}.pdf`)}>
-              Export PDF
-            </button>
-            {canEditDetails && <button className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
-            {canSubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('submit')}>Submit for SM Approval</button>}
-            {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('resubmit')}>Re-submit</button>}
+          <section className="suppression-workflow-section" aria-labelledby="suppression-workflow-title">
+            <div className="suppression-workflow-heading">
+              <div>
+                <span>Decision centre</span>
+                <div className="section-title" id="suppression-workflow-title">Workflow Actions</div>
+              </div>
+              <div className="suppression-workflow-utilities">
+                <button type="button" className="btn btn-sm" onClick={() => api.downloadFile(`/api/suppressions/${sup.id}/export`, `${sup.suppression_id}.pdf`)}>
+                  Export PDF
+                </button>
+                {canEditDetails && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
+              </div>
+            </div>
+
+            {(canSubmit || canResubmit) && (
+              <div className="suppression-requester-actions">
+                <div>
+                  <small>Requester action</small>
+                  <strong>{canSubmit ? 'Submit the completed request for approval' : 'Send the corrected request back into approval'}</strong>
+                  <span>Confirm that the request details and supporting evidence are complete before continuing.</span>
+                </div>
+                {canSubmit && <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('submit')}>Submit for SM Approval</button>}
+                {canResubmit && <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('resubmit')}>Re-submit</button>}
+              </div>
+            )}
+
             {canSMDecide && (
-              <ApprovalDecisionButtons
-                userName={user?.full_name}
-                comments={comments}
-                busy={busy}
-                approveLabel="Approve (assign to Dept Head)"
-                onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
-                onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
-              />
+              <div className="suppression-approval-surface">
+                <div className="suppression-workflow-context">
+                  <div>
+                    <small>Senior manager approval</small>
+                    <strong>{sup.department || 'Owning department'}</strong>
+                    <span>Approve to route this request to every required Department Head, or return it to the requester with remarks.</span>
+                  </div>
+                  <Badge status="Pending" />
+                </div>
+                <div className="suppression-workflow-content">
+                  <ApprovalDecisionButtons
+                    userName={user?.full_name}
+                    comments={comments}
+                    busy={busy}
+                    approveLabel="Approve"
+                    onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
+                    onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                    onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
+                  />
+                </div>
+              </div>
             )}
+
             {canDeptHeadDecide && (
-              <ApprovalDecisionButtons
-                userName={user?.full_name}
-                comments={comments}
-                busy={busy}
-                approveLabel="Approve (Department Head)"
-                onApprove={(signed) => act('dept-head-decision', { decision: 'Approved', comments: signed })}
-                onReturn={(actionNote) => act('dept-head-decision', { decision: 'Returned', comments: actionNote })}
-                onReject={(actionNote) => act('dept-head-decision', { decision: 'Rejected', comments: actionNote })}
-              />
+              <div className="suppression-approval-surface">
+                <div className="suppression-workflow-context">
+                  <div>
+                    <small>Reviewing on behalf of</small>
+                    <strong>{selectedDepartmentApproval?.department_name || 'Required department'}</strong>
+                    <span>Approve, return with remarks, or reject. Request data remains read-only for approving departments.</span>
+                  </div>
+                  <div className="suppression-workflow-context-control">
+                    {eligibleDepartmentApprovals.length > 1 && (
+                      <label className="suppression-department-decision-select">
+                        <span>Department approval</span>
+                        <select
+                          value={selectedDepartmentApproval?.department_id || ''}
+                          onChange={(event) => setDecisionDepartmentId(Number(event.target.value))}
+                        >
+                          {eligibleDepartmentApprovals.map((approval) => (
+                            <option key={approval.id} value={approval.department_id}>{approval.department_name}</option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    <Badge status="Pending" />
+                  </div>
+                </div>
+                <div className="suppression-workflow-content">
+                  <ApprovalDecisionButtons
+                    userName={user?.full_name}
+                    comments={comments}
+                    busy={busy}
+                    approveLabel="Approve"
+                    onApprove={(signed) => act('dept-head-decision', { department_id: selectedDepartmentApproval?.department_id, decision: 'Approved', comments: signed })}
+                    onReturn={(actionNote) => act('dept-head-decision', { department_id: selectedDepartmentApproval?.department_id, decision: 'Returned', comments: actionNote })}
+                    onReject={(actionNote) => act('dept-head-decision', { department_id: selectedDepartmentApproval?.department_id, decision: 'Rejected', comments: actionNote })}
+                  />
+                </div>
+              </div>
             )}
+
             {canSecurityDecide && (
-              <WorkflowDecisionPanel busy={busy} title="Security verification decision" options={[
-                { key: 'accept', label: 'Accept & mark done', description: 'Complete the suppression workflow', tone: 'approve', onClick: () => act('security-team-decision', { decision: 'Accepted', comments }) },
-                { key: 'return', label: 'Return to Requester', description: 'Send back for corrections and resubmission', tone: 'return', onClick: () => setRemarksDecision('return') },
-                { key: 'reject', label: 'Reject', description: 'Stop and close this approval path', tone: 'reject', onClick: () => setRemarksDecision('reject') },
-              ]} />
+              <div className="suppression-approval-surface">
+                <div className="suppression-workflow-context">
+                  <div>
+                    <small>Security verification</small>
+                    <strong>Final suppression decision</strong>
+                    <span>Review the approved request and choose the final security outcome.</span>
+                  </div>
+                  <Badge status="Pending" />
+                </div>
+                <div className="suppression-security-decision">
+                  <WorkflowDecisionPanel busy={busy} title="Security verification decision" options={[
+                    { key: 'accept', label: 'Accept & mark done', description: 'Complete the suppression workflow', tone: 'approve', onClick: () => act('security-team-decision', { decision: 'Accepted', comments }) },
+                    { key: 'return', label: 'Return to Requester', description: 'Send back for corrections and resubmission', tone: 'return', onClick: () => setRemarksDecision('return') },
+                    { key: 'reject', label: 'Reject', description: 'Stop and close this approval path', tone: 'reject', onClick: () => setRemarksDecision('reject') },
+                  ]} />
+                </div>
+              </div>
             )}
             {remarksDecision && (
               <Modal
@@ -779,7 +1160,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
                 }}
               />
             )}
-          </div>
+          </section>
         </div>
       )}
 
@@ -831,6 +1212,11 @@ export default function Suppression() {
     try { setRows(await api.get<SuppressionOut[]>('/api/suppressions')) } catch (err) { setError(err) }
   }, [])
   useEffect(() => { load() }, [load])
+  useEffect(() => {
+    const refreshOnFocus = () => { void load() }
+    window.addEventListener('focus', refreshOnFocus)
+    return () => window.removeEventListener('focus', refreshOnFocus)
+  }, [load])
   useEffect(() => {
     api.get<UserOption[]>('/api/auth/user-options').then(setUsers).catch(() => { /* names just stay empty */ })
   }, [])
@@ -888,7 +1274,7 @@ export default function Suppression() {
       <ErrorText error={error} />
       <PageHeader
         title="Suppression / False Positive Register" count={rows.length}
-        subtitle="Exception requests for SAST/DAST findings -- Requester raises it, then Draft -> SM -> Department Head -> Security Team verification -> Done."
+        subtitle="Exception requests for SAST/DAST findings -- Requester -> SM -> all required Department Heads -> Security Team verification -> Done."
         actions={canInitiateSuppression ? (
           <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Suppression Request</button>
         ) : undefined}
@@ -905,7 +1291,7 @@ export default function Suppression() {
           { key: 'status', header: 'Status', render: (r) => (
             <WorkflowStatusBadge record={r} status={r.status} label={SUPPRESSION_STATUS_LABELS[r.status] || r.status} />
           ), filterValue: (r) => `${r.status} ${SUPPRESSION_STATUS_LABELS[r.status] || ''}` },
-          { key: 'pending_with', header: 'Pending With', render: (r) => SUPPRESSION_PENDING_WITH[r.status] || '—', filterValue: (r) => SUPPRESSION_PENDING_WITH[r.status] || '' },
+          { key: 'pending_with', header: 'Pending With', render: suppressionPendingWith, filterValue: suppressionPendingWith },
         ]} rows={rows} />
       </Card>
       {showNew && (

@@ -70,6 +70,32 @@ def _to_out(db: Session, row: models.ApprovalAction) -> dict:
     }
 
 
+def _invited_suppression_ids(db: Session, current_user: models.User, entity_ids) -> set[int]:
+    """Suppression requests assigned to one of this Department Head's teams.
+
+    A multi-department suppression remains owned by the requester's primary
+    department, so the generic entity-department resolver cannot by itself
+    grant an invited Department Head access to its history or comments.
+    """
+    ids = {entity_id for entity_id in entity_ids if entity_id is not None}
+    if not ids or not current_user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
+        return set()
+    departments = current_user.departments
+    if not departments:
+        return set()
+    return {
+        request_id for (request_id,) in db.query(
+            models.SuppressionDepartmentApproval.suppression_request_id,
+        ).join(
+            models.Department,
+            models.SuppressionDepartmentApproval.department_id == models.Department.id,
+        ).filter(
+            models.SuppressionDepartmentApproval.suppression_request_id.in_(ids),
+            models.Department.name.in_(departments),
+        ).distinct().all()
+    }
+
+
 def _filtered_approval_rows(db: Session, current_user: models.User, entity_type: Optional[str],
                             entity_id: Optional[int] = None) -> List[models.ApprovalAction]:
     """Shared by `list_approvals` and `list_approval_history` (see each of
@@ -120,10 +146,16 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
             }
             if hidden_ids:
                 rows = [r for r in rows if not (r.entity_type == "QA_REQUEST" and r.entity_id in hidden_ids)]
+    invited_suppression_ids = _invited_suppression_ids(
+        db,
+        current_user,
+        (r.entity_id for r in rows if r.entity_type == "SUPPRESSION"),
+    )
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         from ..workflow_authority import record_department
         rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope
+                or (r.entity_type == "SUPPRESSION" and r.entity_id in invited_suppression_ids)
                 or (r.entity_type == 'DEFECT' and record_department(db, r, current_user)[1] in scope)]
     # Always run the entity visibility resolver. For ordinary business users
     # there may be no QA-workspace scope tuple, but project/folder visibility
@@ -291,6 +323,11 @@ def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, curren
             require_entity_workspace_visibility(db, current_user, normalized_type, entity_id)
     else:
         require_entity_workspace_visibility(db, current_user, normalized_type, entity_id)
+        if (
+            normalized_type == "SUPPRESSION"
+            and entity_id in _invited_suppression_ids(db, current_user, (entity_id,))
+        ):
+            return normalized_type
         requester_id = getattr(obj, "requester_id", None) or getattr(obj, "created_by_id", None)
         require_department_visibility(
             current_user, resolve_entity_department(db, normalized_type, entity_id),

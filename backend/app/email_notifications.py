@@ -17,7 +17,7 @@ from html import escape
 from urllib.parse import quote
 
 from sqlalchemy import event, or_
-from sqlalchemy.orm import Session as SASession, joinedload
+from sqlalchemy.orm import Session as SASession, joinedload, selectinload
 
 from . import models
 from .constants import Role
@@ -668,15 +668,33 @@ def _target_workspace_id(target) -> int | None:
 
 
 def _workspace_role_user_ids(db: SASession, workspace_id: int, roles: set[str]) -> set[int]:
-    rows = db.query(models.QAWorkspaceMember.user_id).join(models.User).join(
+    """Users with a requested role who can act in this workspace.
+
+    Eligibility is based on the same selectable-workspace resolver used by
+    request authorization, rather than only a direct membership row. This is
+    important for a Parent Workspace Admin: their parent grant deliberately
+    does not create duplicate memberships for every child workspace.
+    """
+    from .workspace_service import selectable_workspace_ids
+
+    users = db.query(models.User).join(
         models.UserRole, models.UserRole.user_id == models.User.id,
+    ).options(
+        selectinload(models.User.role_assignments),
+        selectinload(models.User.qa_workspace_memberships).joinedload(
+            models.QAWorkspaceMember.workspace,
+        ),
+        selectinload(models.User.department_coordinator_assignments).joinedload(
+            models.DepartmentCoordinatorAssignment.workspace,
+        ),
+        selectinload(models.User.department_coordinator_assignments).joinedload(
+            models.DepartmentCoordinatorAssignment.department,
+        ),
     ).filter(
-        models.QAWorkspaceMember.workspace_id == workspace_id,
-        models.QAWorkspaceMember.is_active == True,  # noqa: E712
         models.User.is_active == True,  # noqa: E712
         models.UserRole.role.in_(roles),
     ).distinct().all()
-    return {row[0] for row in rows}
+    return {user.id for user in users if workspace_id in selectable_workspace_ids(db, user)}
 
 
 def _user_ids(value) -> set[int]:
@@ -857,6 +875,17 @@ def _role_label(roles: set[str]) -> str:
     return "QA Portal user"
 
 
+def _workflow_departments(target) -> list[str]:
+    """Departments whose role-holders own the current workflow action."""
+    if (isinstance(target, models.SuppressionRequest)
+            and str(target.status).upper() == "DEPARTMENT_HEAD_APPROVAL_PENDING"):
+        pending = [row.department_name for row in target.department_approvals
+                   if row.decision == "Pending" and row.department_name]
+        return pending or ([target.department] if target.department else [])
+    department = _department(target)
+    return [department] if department else []
+
+
 def _is_workflow_transition(action: models.ApprovalAction) -> bool:
     """Ignore audit-only actions such as document uploads while an item waits.
 
@@ -907,9 +936,10 @@ def _notification_route(db, action, target):
     if getattr(target, "is_deleted", False):
         return None
     from .workspace_service import selectable_workspace_ids, inherited_workspace_access_mode
-    from .workflow_authority import admin_department_allowed
+    from .workflow_authority import admin_department_allowed, is_system_admin
     workspace = _target_workspace_id(target)
     department = _department(target)
+    workflow_departments = _workflow_departments(target)
     roles = _next_approver_roles(target)
     department_scoped = bool(roles & {Role.SM, Role.DEPARTMENT_HEAD_CM,
                                      Role.DEPARTMENT_HEAD_AGM, Role.APPLICATION_OWNER})
@@ -921,7 +951,10 @@ def _notification_route(db, action, target):
         if workspace and workspace not in selectable_workspace_ids(db, user):
             continue
         if route.action_required:
-            if Role.VIEW_ONLY in user.roles:
+            # Organisation-wide read-only profiles may inspect workflow data,
+            # but cannot perform its next action even when the same account
+            # also holds the nominal approver role.
+            if Role.VIEW_ONLY in user.roles or Role.SCALE_6_PLUS in user.roles:
                 continue
             if workspace and inherited_workspace_access_mode(db, user, workspace) == 'PARENT_VIEWER':
                 continue
@@ -933,6 +966,17 @@ def _notification_route(db, action, target):
             if isinstance(target, models.TestExecution) and Role.QA_ENGINEER not in user.roles:
                 continue
             if roles and not set(user.roles).intersection(roles):
+                continue
+            # The SM who approved the first stage cannot receive (or perform)
+            # the Department Head stage merely because that person also holds
+            # a Department Head role. Keep mail routing identical to the
+            # pending queue and decision endpoint maker-checker rule.
+            if (
+                isinstance(target, models.SuppressionRequest)
+                and str(target.status or "").upper() == "DEPARTMENT_HEAD_APPROVAL_PENDING"
+                and uid == target.sm_id
+                and not is_system_admin(user)
+            ):
                 continue
             action_department = department
             if isinstance(target, models.Defect) and uid == target.assignee_id:
@@ -946,9 +990,17 @@ def _notification_route(db, action, target):
                          'release_owner_id' if status in {'READY FOR RELEASE', 'PRODUCTION VERIFICATION'} else None)
                 if field and assignment_error(db, target, user, field, target.assigned_team):
                     continue
+            if workflow_departments and roles & {Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM}:
+                action_department = next(
+                    (item for item in workflow_departments if user.has_department(item)),
+                    workflow_departments[0],
+                )
             if not admin_department_allowed(user, action_department):
                 continue
-            if department_scoped and (not department or not user.has_department(department)):
+            if department_scoped and (
+                not workflow_departments
+                or not any(user.has_department(item) for item in workflow_departments)
+            ):
                 continue
             if department_scoped and uid in _requester_user_ids(target):
                 continue
@@ -1011,6 +1063,7 @@ def _unfiltered_notification_route(db: SASession, action: models.ApprovalAction,
     roles = _next_approver_roles(target)
     if roles:
         department = _department(target)
+        workflow_departments = _workflow_departments(target)
         # Resolve workspace membership first. The shared route filter then
         # applies department and workflow authority before anything is queued.
         workspace_id = _target_workspace_id(target)
@@ -1021,7 +1074,9 @@ def _unfiltered_notification_route(db: SASession, action: models.ApprovalAction,
         from .workflow_authority import admin_department_allowed
         recipients = {recipient_id for recipient_id in recipients
                       if (recipient := db.get(models.User, recipient_id)) is not None
-                      and admin_department_allowed(recipient, department)}
+                      and (not workflow_departments or any(
+                          admin_department_allowed(recipient, item) for item in workflow_departments
+                      ))}
         logger.info(
             "SMTP workflow route evaluated reference=%s status=%s owner=group roles=%s request_department=%s eligible_recipient_count=%s",
             reference, getattr(target, "status", None), ",".join(sorted(roles)), department or "<any>", len(recipients),

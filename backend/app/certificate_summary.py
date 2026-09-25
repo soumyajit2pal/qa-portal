@@ -2,7 +2,7 @@
 import json
 from collections import Counter
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from . import models
 
 TERMINAL = {'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'}
@@ -135,11 +135,23 @@ def capture(db, obj):
     require_linked_security_closed(db, source)
     cycles = db.query(models.TestCycle.id).join(models.TestCycleChildRequestLink).filter(
         models.TestCycleChildRequestLink.child_type == 'Functional', models.TestCycleChildRequestLink.child_id == source.id)
-    # A certificate is scoped to the declared tested environment/build.
-    if obj.environment_tested:
-        cycles = cycles.filter(models.TestCycle.environment == obj.environment_tested)
-    if obj.build_number:
-        cycles = cycles.filter(models.TestCycle.build == obj.build_number)
+    # A certificate is scoped to the declared tested environment/build. Both
+    # fields originate in human-entered forms on different records, so their
+    # display casing is not a meaningful part of the identity (for example,
+    # build ``NA`` on a cycle and ``na`` on its Functional request). Matching
+    # them byte-for-byte silently produced an empty evidence snapshot even
+    # though the correctly linked cycle contained results. Trim and compare
+    # case-insensitively while keeping genuinely different builds isolated.
+    environment_tested = (obj.environment_tested or '').strip().lower()
+    build_number = (obj.build_number or '').strip().lower()
+    if environment_tested:
+        cycles = cycles.filter(
+            func.lower(func.trim(models.TestCycle.environment)) == environment_tested,
+        )
+    if build_number:
+        cycles = cycles.filter(
+            func.lower(func.trim(models.TestCycle.build)) == build_number,
+        )
     execution_ids = db.query(models.TestExecution.id).filter(models.TestExecution.cycle_id.in_(cycles))
     executions = db.query(models.TestExecution).filter(models.TestExecution.id.in_(execution_ids)).order_by(models.TestExecution.id).all()
     defects = db.query(models.Defect).filter(

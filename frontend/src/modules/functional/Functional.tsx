@@ -1143,7 +1143,7 @@ export function FunctionalDetail({
 
           <DetailSection title="Status">
             <DetailField label="Status">
-              <WorkflowStatusBadge record={req} status={req.status} label={applicationNameAwareStatusLabel(req.status, req.application_master_status)} />
+              <WorkflowStatusBadge record={req} status={req.status} label={applicationNameAwareStatusLabel(req.status, req.application_master_status) || QA_STATUS_LABELS[req.status] || req.status} />
               {req.needs_dept_head_reapproval && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
                   Department Head re-approval required after changes
@@ -2015,7 +2015,7 @@ export default function Functional() {
             {
               key: "status",
               header: "Status",
-              render: (r) => <WorkflowStatusBadge record={r} status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} />,
+              render: (r) => <WorkflowStatusBadge record={r} status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status) || QA_STATUS_LABELS[r.status] || r.status} />,
             },
             {
               key: "pending_with",

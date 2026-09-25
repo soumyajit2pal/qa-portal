@@ -9,6 +9,8 @@ interface UserAssignSelectProps {
   disabled?: boolean
   style?: React.CSSProperties
   showRoles?: boolean
+  showUserId?: boolean
+  variant?: 'default' | 'coordinator'
   clearable?: boolean
   clearLabel?: string
 }

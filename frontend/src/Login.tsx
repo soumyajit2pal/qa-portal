@@ -11,7 +11,7 @@ export default function Login() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const { login } = useAuth()
   const navigate = useInternalNavigate()
@@ -25,8 +25,8 @@ export default function Login() {
     try {
       await login(username.trim().toLowerCase(), password)
       navigate(requested, { replace: true })
-    } catch (err: any) {
-      setError(err.message || 'Login failed')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err : new Error('Login failed'))
     } finally {
       setBusy(false)
     }

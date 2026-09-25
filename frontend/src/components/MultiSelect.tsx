@@ -14,6 +14,8 @@ interface MultiSelectProps {
   autoOpen?: boolean
   inline?: boolean
   style?: React.CSSProperties
+  showBulkActions?: boolean
+  variant?: 'default' | 'approval-routing'
 }
 
 // Shared checkbox multi-select. It uses the same fixed, viewport-aware panel
@@ -30,6 +32,8 @@ export default function MultiSelect({
   autoOpen = false,
   inline = false,
   style,
+  showBulkActions = true,
+  variant = 'default',
 }: MultiSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -57,7 +61,7 @@ export default function MultiSelect({
     if (!autoOpen || disabled) return
     const frame = window.requestAnimationFrame(() => {
       const rect = triggerRef.current?.getBoundingClientRect()
-      if (rect) setPanelPos(computePanelPos(rect, 260))
+      if (rect) setPanelPos(computePanelPos(rect, 260, variant === 'approval-routing' ? 190 : undefined))
       setOpen(true)
     })
     return () => window.cancelAnimationFrame(frame)
@@ -67,7 +71,7 @@ export default function MultiSelect({
     if (!open) return
     function reposition() {
       const rect = triggerRef.current?.getBoundingClientRect()
-      if (rect) setPanelPos(computePanelPos(rect, 260))
+      if (rect) setPanelPos(computePanelPos(rect, 260, variant === 'approval-routing' ? 190 : undefined))
     }
     window.addEventListener('scroll', reposition, true)
     window.addEventListener('resize', reposition)
@@ -81,7 +85,7 @@ export default function MultiSelect({
     if (disabled) return
     if (open) { setOpen(false); setQuery(''); return }
     const rect = triggerRef.current?.getBoundingClientRect()
-    if (rect) setPanelPos(computePanelPos(rect, 260))
+    if (rect) setPanelPos(computePanelPos(rect, 260, variant === 'approval-routing' ? 190 : undefined))
     setOpen(true)
   }
 
@@ -114,10 +118,10 @@ export default function MultiSelect({
           clearLabel={`Clear ${itemName} search`}
         />
       </div>
-      <div className="multi-select-actions">
+      {showBulkActions && <div className="multi-select-actions">
         <button type="button" disabled={value.length === options.length} onClick={() => onChange([...options])}>Select all</button>
         <button type="button" disabled={value.length === 0} onClick={() => onChange([])}>Clear</button>
-      </div>
+      </div>}
       <div className="searchable-select-list">
         {filteredOptions.map((option) => (
           <label key={option} className={`searchable-select-option multi-user-option ${value.includes(option) ? 'active' : ''}`}>
@@ -129,15 +133,16 @@ export default function MultiSelect({
           <div className="searchable-select-empty">{options.length === 0 ? 'No options available' : 'No matches'}</div>
         )}
       </div>
+      {variant === 'approval-routing' && <div className="approval-routing-picker-footer"><span>{filteredOptions.length} available</span><strong>{value.length} selected</strong></div>}
     </>
   )
 
   if (inline) {
-    return <div className="multi-select-panel multi-select-inline">{panelContents}</div>
+    return <div className={`multi-select-panel multi-select-inline ${variant === 'approval-routing' ? 'approval-routing-picker-panel' : ''}`}>{panelContents}</div>
   }
 
   return (
-    <div className="multi-user-select" ref={rootRef} style={style}>
+    <div className={`multi-user-select ${variant === 'approval-routing' ? 'approval-routing-picker' : ''}`} ref={rootRef} style={style}>
       <button
         ref={triggerRef}
         type="button"
@@ -151,7 +156,7 @@ export default function MultiSelect({
       </button>
       {open && (
         <div
-          className="searchable-select-panel searchable-select-panel-fixed multi-select-panel"
+          className={`searchable-select-panel searchable-select-panel-fixed multi-select-panel ${variant === 'approval-routing' ? 'approval-routing-picker-panel' : ''}`}
           style={{ top: panelPos.top, bottom: panelPos.bottom, left: panelPos.left, width: panelPos.width }}
         >
           {panelContents}

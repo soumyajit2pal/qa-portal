@@ -24,10 +24,10 @@ export interface PanelPos {
 // .searchable-select-search/.searchable-select-list in index.css).
 const PANEL_EST_HEIGHT = 280
 
-export function computePanelPos(rect: DOMRect, minWidth = 0): PanelPos {
+export function computePanelPos(rect: DOMRect, minWidth = 0, estimatedHeight = PANEL_EST_HEIGHT): PanelPos {
   const spaceBelow = window.innerHeight - rect.bottom
   const spaceAbove = rect.top
-  const openUp = spaceBelow < PANEL_EST_HEIGHT && spaceAbove > spaceBelow
+  const openUp = spaceBelow < estimatedHeight && spaceAbove > spaceBelow
   const width = Math.max(rect.width, minWidth)
   return openUp
     ? { top: 'auto', bottom: window.innerHeight - rect.top + 4, left: rect.left, width }

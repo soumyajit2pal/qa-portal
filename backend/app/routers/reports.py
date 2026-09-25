@@ -692,7 +692,15 @@ def suppression_register(date_from: str | None = None, date_to: str | None = Non
     # same pattern as test-case-execution/defect-summary used to.
     # SuppressionRequest.department is a real column, so a direct .filter()
     # is enough, same as list_suppressions in routers/suppression.py.
-    q = db.query(models.SuppressionRequest).options(selectinload(models.SuppressionRequest.items))
+    q = db.query(models.SuppressionRequest).options(
+        selectinload(models.SuppressionRequest.items),
+        selectinload(models.SuppressionRequest.department_approvals).joinedload(
+            models.SuppressionDepartmentApproval.department,
+        ),
+        selectinload(models.SuppressionRequest.department_approvals).joinedload(
+            models.SuppressionDepartmentApproval.approver,
+        ),
+    )
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         q = q.filter(models.SuppressionRequest.department.in_(scope))
@@ -702,6 +710,32 @@ def suppression_register(date_from: str | None = None, date_to: str | None = Non
     rows = _in_period(q, models.SuppressionRequest.created_at, date_from, date_to).all()
     out = []
     for s in rows:
+        approval_rows = list(s.department_approvals)
+        # Legacy records created before per-department approvals retain a
+        # useful single-department representation in exports.
+        if approval_rows:
+            approval_states = "; ".join(
+                f"{approval.department_name or 'Unknown department'}: {approval.decision}"
+                for approval in approval_rows
+            )
+            approval_approvers = "; ".join(
+                f"{approval.department_name or 'Unknown department'}: {approval.approver_name or '—'}"
+                for approval in approval_rows
+            )
+            pending_departments = ", ".join(
+                approval.department_name or "Unknown department"
+                for approval in approval_rows if approval.decision == "Pending"
+            )
+        else:
+            legacy_decision = s.dept_head_decision or (
+                "Pending" if s.status == "DEPARTMENT_HEAD_APPROVAL_PENDING" else "—"
+            )
+            approval_states = f"{s.department or 'Unknown department'}: {legacy_decision}"
+            approval_approvers = f"{s.department or 'Unknown department'}: —"
+            pending_departments = (
+                s.department or "Unknown department"
+                if legacy_decision == "Pending" else ""
+            )
         items = s.items or [None]
         for item in items:
             out.append({
@@ -710,6 +744,9 @@ def suppression_register(date_from: str | None = None, date_to: str | None = Non
                 "Issue Group": item.issue_id if item else None, "Severity": item.severity if item else None,
                 "Status": s.status,
                 "SM Decision": s.sm_decision, "Dept Head Decision": s.dept_head_decision,
+                "Department Approval States": approval_states,
+                "Department Approval Approvers": approval_approvers,
+                "Pending Approval Departments": pending_departments,
                 "Security Team Decision": s.security_decision,
             })
     return out

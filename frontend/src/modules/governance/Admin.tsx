@@ -1186,7 +1186,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
           <p className="muted small">Let a trusted person administer users from one department inside this workspace.</p>
           <p className="workspace-instruction"><strong>Access boundary:</strong> an assignment on a parent also applies in every active child. An assignment made directly on a child stays in that child.</p>
           <div className="qa-workspace-form-row workspace-coordinator-add">
-            <Field label="Coordinator *"><UserAssignSelect value={coordinatorUserId} onChange={selectCoordinator} users={coordinatorUsers} placeholder="Select user…" /></Field>
+            <Field label="Coordinator *"><UserAssignSelect value={coordinatorUserId} onChange={selectCoordinator} users={coordinatorUsers} placeholder="Search and select a coordinator…" showUserId variant="coordinator" /></Field>
             <Field label="Manages users in">
               {coordinatorDepartments.length > 1
                 ? <SearchableSelect value={coordinatorDepartmentId} onChange={setCoordinatorDepartmentId} options={coordinatorDepartmentOptions} placeholder="Select managed department…" />
@@ -1202,14 +1202,17 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
           </div>
           {coordinatorUserId && !coordinatorDepartment && <p className="muted small workspace-coordinator-scope-note">Assign an active department to this user before making them a local administrator.</p>}
           <div className="qa-workspace-chips workspace-coordinator-list">
-            {visibleCoordinators.map(({ assignment, inherited }) => <div key={`${inherited ? 'parent' : 'direct'}-${assignment.id}`}>
-              <span className="workspace-member-identity"><strong>{assignment.user_name || `User ${assignment.user_id}`}</strong><small>{assignment.department_name || 'Department'} · {inherited ? `Inherited from ${parentWorkspace?.name || 'parent'}` : 'This workspace'}</small></span>
-              <span className={`badge ${inherited ? '' : 'badge-blue'}`}>{inherited ? 'Inherited local admin' : 'Department Coordinator'}</span>
-              {users.find((user) => user.id === assignment.user_id) && <button type="button" className="workspace-manage-access" onClick={() => onManageUser(users.find((user) => user.id === assignment.user_id)!)}>Manage permissions</button>}
-              {inherited
-                ? <button type="button" className="btn btn-sm inherited-member-lock" disabled title="Remove or change this assignment on the parent workspace">Inherited</button>
-                : <button type="button" disabled={busy} aria-label={`Remove ${assignment.user_name || 'user'} as department coordinator`} onClick={() => void removeCoordinator(assignment.id)}>Remove</button>}
-            </div>)}
+            {visibleCoordinators.map(({ assignment, inherited }) => {
+              const assignedUser = users.find((user) => user.id === assignment.user_id)
+              return <div key={`${inherited ? 'parent' : 'direct'}-${assignment.id}`}>
+                <span className="workspace-member-identity"><strong>{assignment.user_name || `User ${assignment.user_id}`}</strong><small>{assignedUser?.username ? `User ID: ${assignedUser.username} · ` : ''}{assignment.department_name || 'Department'} · {inherited ? `Inherited from ${parentWorkspace?.name || 'parent'}` : 'This workspace'}</small></span>
+                <span className={`badge ${inherited ? '' : 'badge-blue'}`}>{inherited ? 'Inherited local admin' : 'Department Coordinator'}</span>
+                {assignedUser && <button type="button" className="workspace-manage-access" onClick={() => onManageUser(assignedUser)}>Manage permissions</button>}
+                {inherited
+                  ? <button type="button" className="btn btn-sm inherited-member-lock" disabled title="Remove or change this assignment on the parent workspace">Inherited</button>
+                  : <button type="button" disabled={busy} aria-label={`Remove ${assignment.user_name || 'user'} as department coordinator`} onClick={() => void removeCoordinator(assignment.id)}>Remove</button>}
+              </div>
+            })}
           </div>
           {!visibleCoordinators.length && <p className="muted small workspace-no-members">No local administrators assigned.</p>}
         </section>}

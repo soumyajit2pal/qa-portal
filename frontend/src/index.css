@@ -1311,6 +1311,30 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .searchable-select-option.user-assign-option.active > span,.searchable-select-option.user-assign-option.active > small strong { color: var(--navy-light); }
 .searchable-select-empty { padding: 10px 12px; font-size: 13px; color: var(--muted); }
 
+/* Local Administrator coordinator picker -- intentionally opt-in. The
+   compact panel stays below the field in the workspace layout instead of
+   covering the policy card above it, while keeping identity metadata easy
+   to scan. */
+.coordinator-user-picker .searchable-select-trigger { min-height:44px; padding:7px 11px; border-radius:9px; background:#fff; }
+.coordinator-user-picker .user-assign-selected { width:100%; }
+.coordinator-user-picker .user-assign-selected > span { display:flex; align-items:center; gap:8px; width:100%; color:#173f54; font-weight:800; }
+.coordinator-user-picker .user-assign-selected > span em,
+.coordinator-picker-option-identity > div > span { display:inline-flex; align-items:center; flex:none; padding:3px 7px; border-radius:999px; color:#285b70; background:#eaf3f6; font-size:9px; font-style:normal; font-weight:800; letter-spacing:.015em; }
+.coordinator-user-picker .user-assign-selected > small { color:#778b91; font-size:9px; }
+.coordinator-picker-panel { overflow:hidden; border:1px solid #b9d1db; border-radius:11px; box-shadow:0 16px 38px rgba(17,61,84,.18); background:#fff; }
+.coordinator-picker-panel .searchable-select-search { padding:9px 10px; border-bottom:1px solid #dce8ec; background:#f7fafb; }
+.coordinator-picker-panel .searchable-select-list { max-height:150px; padding:4px; }
+.coordinator-picker-panel .searchable-select-option.user-assign-option { display:block; padding:9px 10px; border-radius:7px; }
+.coordinator-picker-panel .searchable-select-option.user-assign-option + .searchable-select-option.user-assign-option { border-top:1px solid #edf2f4; }
+.coordinator-picker-panel .searchable-select-option.user-assign-option:hover { background:#f0f6f8; }
+.coordinator-picker-panel .searchable-select-option.user-assign-option.active { background:#e7f2f7; box-shadow:inset 3px 0 #1d6a86; }
+.coordinator-picker-option-identity { display:grid; gap:4px; min-width:0; }
+.coordinator-picker-option-identity > div { display:flex; align-items:center; justify-content:space-between; gap:10px; min-width:0; }
+.coordinator-picker-option-identity > div > strong { min-width:0; overflow:hidden; color:#183f4e; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+.coordinator-picker-option-identity > small { overflow:hidden; color:#74878d; font-size:9px; font-weight:600; text-overflow:ellipsis; white-space:nowrap; }
+.coordinator-picker-option-identity > small strong { color:#23627a; font-weight:800; }
+.coordinator-picker-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:7px 11px; border-top:1px solid #dce8ec; color:#7c8d92; background:#f7fafb; font-size:8px; font-weight:700; }
+
 /* MultiUserAssignSelect ("Assign Tester(s)") -- reuses .searchable-select-panel
    etc. above for the dropdown, but the trigger itself is a wrapping row of
    removable chips (one per selected tester) instead of a single-line label,
@@ -1481,6 +1505,77 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .workflow-note-field > small { color: #859397; font-size: 8.5px; }
 @media (max-width: 760px) { .workflow-decision-flow { padding: 12px; }.workflow-sign-step { grid-template-columns: auto minmax(0,1fr) auto; }.workflow-sign-step .esign-trigger { grid-column: 2 / 4; justify-self: start; }.workflow-decision-options { flex-direction: column; }.workflow-decision-card { width: 100%; min-height: 44px; } }
 @media (max-width: 520px) { .workflow-step-status { display: none; }.workflow-decision-heading { grid-template-columns: auto minmax(0,1fr); }.workflow-sign-step { grid-template-columns: auto minmax(0,1fr); }.workflow-sign-step .esign-trigger { grid-column: 1 / -1; width: 100%; }.workflow-sign-copy strong { white-space: normal; } }
+
+/* Suppression detail keeps the shared signature/decision behaviour while
+   presenting it as one approval centre. Scope every override so other
+   request modules continue to use the default shared workflow layout. */
+.suppression-approval-detail,.suppression-overview-grid > div { min-width: 0; }
+.suppression-overview-grid > div { overflow-wrap: anywhere; word-break: break-word; }
+.suppression-approval-detail .data-table td { vertical-align: top; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.suppression-findings-review { width: min(100%,1200px); margin: 0 auto; display: grid; gap: 12px; }
+.suppression-finding-review { overflow: visible; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
+.suppression-finding-review > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 15px; border-bottom: 1px solid var(--border); background: #f2f8f9; }
+.suppression-finding-review > header > div { min-width: 0; display: grid; gap: 3px; }
+.suppression-finding-review > header small { color: #26778a; font-size: 8.5px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+.suppression-finding-review > header strong { color: #243f49; font-size: 12px; overflow-wrap: anywhere; word-break: break-word; }
+.suppression-finding-severity { flex: 0 0 auto; padding: 4px 9px; border: 1px solid #d3dfe3; border-radius: 999px; color: #536b74; background: #fff; font-size: 9px; font-weight: 800; }
+.suppression-finding-copy-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.suppression-finding-copy-grid > section { min-width: 0; padding: 15px; }
+.suppression-finding-copy-grid > section + section { border-left: 1px solid var(--border); }
+.suppression-finding-copy-grid h3,.suppression-risk-assessment h3 { margin: 0 0 8px; color: #617780; font-size: 8.5px; font-weight: 850; letter-spacing: .09em; text-transform: uppercase; }
+.suppression-finding-copy-grid p,.suppression-risk-assessment p { max-width: none; max-height: none; overflow: visible; margin: 0; color: #29434b; font-size: 11px; line-height: 1.65; text-overflow: clip; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.suppression-risk-assessment { width: min(100%,1200px); margin: 16px auto 0; padding: 16px 17px; overflow: visible; border: 1px solid var(--border); border-radius: 12px; background: #f7fafb; }
+.suppression-workflow-section { width: min(100%,1200px); margin: 22px auto 0; }
+.suppression-workflow-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.suppression-workflow-heading > div:first-child { display: grid; gap: 4px; }
+.suppression-workflow-heading > div:first-child > span { color: #31798a; font-size: 8.5px; font-weight: 850; letter-spacing: .11em; text-transform: uppercase; }
+.suppression-workflow-heading .section-title { margin: 0; padding: 0; border: 0; color: #263f49; font-size: 15px; letter-spacing: 0; text-transform: none; }
+.suppression-workflow-utilities { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.suppression-requester-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 17px; border: 1px solid var(--border); border-radius: 12px; background: #f7fafb; }
+.suppression-requester-actions > div { min-width: 0; display: grid; gap: 3px; }
+.suppression-requester-actions small,.suppression-workflow-context small { color: #26778a; font-size: 8.5px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+.suppression-requester-actions strong,.suppression-workflow-context strong { color: #243f49; font-size: 12px; font-weight: 760; }
+.suppression-requester-actions span,.suppression-workflow-context > div:first-child > span { color: var(--muted); font-size: 9.5px; line-height: 1.45; }
+.suppression-requester-actions strong,.suppression-requester-actions span,.suppression-workflow-context strong,.suppression-workflow-context > div:first-child > span { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.suppression-approval-surface { width: 100%; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--card); }
+.suppression-requester-actions + .suppression-approval-surface,.suppression-approval-surface + .suppression-approval-surface { margin-top: 12px; }
+.suppression-workflow-context { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 15px 18px; border-bottom: 1px solid var(--border); background: #eef7f8; }
+.suppression-workflow-context > div:first-child { min-width: 0; display: grid; gap: 3px; }
+.suppression-workflow-context-control { display: flex; flex: 0 0 auto; align-items: flex-end; gap: 10px; }
+.suppression-department-decision-select { min-width: 220px; display: grid; gap: 5px; }
+.suppression-department-decision-select > span { color: #506b75; font-size: 8.5px; font-weight: 750; }
+.suppression-department-decision-select select { width: 100%; min-height: 34px; padding: 6px 28px 6px 9px; border: 1px solid #bcd4da; border-radius: 7px; color: #29434b; background: #fff; font: inherit; font-size: 10px; }
+.suppression-workflow-content { width: 100%; min-width: 0; }
+.suppression-workflow-content > .workflow-decision-flow { display: grid; grid-template-columns: minmax(300px,.82fr) minmax(420px,1.35fr); gap: 0; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 0; background: var(--card); }
+.suppression-workflow-content .workflow-sign-step,.suppression-workflow-content .workflow-decision-step { border: 0; border-radius: 0; box-shadow: none; }
+.suppression-workflow-content .workflow-sign-step { grid-template-columns: auto minmax(0,1fr) auto; align-content: start; padding: 20px; }
+.suppression-workflow-content .workflow-sign-step .workflow-step-number { grid-column: 1; grid-row: 1; }
+.suppression-workflow-content .workflow-sign-step .workflow-sign-copy { grid-column: 2 / -1; grid-row: 1; }
+.suppression-workflow-content .workflow-sign-copy strong { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.suppression-workflow-content .workflow-sign-copy code { max-width: none; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; word-break: break-all; }
+.suppression-workflow-content .workflow-sign-step .workflow-step-status { grid-column: 1 / 3; grid-row: 2; display: inline-flex; align-items: center; justify-self: start; }
+.suppression-workflow-content .workflow-sign-step .esign-trigger { grid-column: 3; grid-row: 2; }
+.suppression-workflow-content .workflow-decision-step { padding: 20px; border-left: 1px solid var(--border); }
+.suppression-workflow-content .workflow-blocked-message { grid-column: 1 / -1; margin: 0 20px 20px; }
+.suppression-security-decision { padding: 18px; }
+.suppression-security-decision .workflow-decision-standalone { margin: 0; }
+@media (max-width: 900px) {
+  .suppression-finding-copy-grid { grid-template-columns: 1fr; }
+  .suppression-finding-copy-grid > section + section { border-top: 1px solid var(--border); border-left: 0; }
+  .suppression-workflow-content > .workflow-decision-flow { grid-template-columns: 1fr; }
+  .suppression-workflow-content .workflow-decision-step { border-top: 1px solid var(--border); border-left: 0; }
+}
+@media (max-width: 640px) {
+  .suppression-finding-review > header { align-items: flex-start; }
+  .suppression-finding-copy-grid > section,.suppression-risk-assessment { padding: 13px; }
+  .suppression-workflow-heading,.suppression-workflow-context,.suppression-requester-actions { align-items: stretch; flex-direction: column; }
+  .suppression-workflow-utilities,.suppression-workflow-context-control { align-items: stretch; justify-content: flex-start; flex-direction: column; }
+  .suppression-workflow-utilities .btn,.suppression-requester-actions > .btn,.suppression-department-decision-select { width: 100%; }
+  .suppression-workflow-content .workflow-sign-step { grid-template-columns: auto minmax(0,1fr); }
+  .suppression-workflow-content .workflow-sign-step .workflow-sign-copy { grid-column: 2; }
+  .suppression-workflow-content .workflow-sign-step .workflow-step-status { grid-column: 1 / -1; grid-row: auto; }
+  .suppression-workflow-content .workflow-sign-step .esign-trigger { grid-column: 1 / -1; grid-row: auto; width: 100%; }
+}
 
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .tabs button {
@@ -1960,6 +2055,53 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .suppression-form .form-field select:disabled { background: var(--bg); color: var(--muted); cursor: not-allowed; }
 .suppression-form .card { border-radius: 10px; border: 1px solid var(--border); background: var(--bg); box-shadow: none; }
 .suppression-form .btn { font-size: 13.5px; padding: 9px 18px; border-radius: 8px; }
+
+/* Suppression cross-department approval routing. Keep this decision compact
+   inside the wide request modal: explicit No/Yes cards first, then a
+   constrained picker and removable confirmation chips. */
+.suppression-approval-routing { display:grid; grid-template-columns:minmax(250px,.8fr) minmax(420px,1.2fr); gap:20px; align-items:center; padding:15px; border:1px solid #d6e4e8; border-radius:11px; background:#f7fafb; }
+.suppression-routing-intro { display:grid; gap:5px; }
+.suppression-routing-intro > span { color:#187084; font-size:9px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }
+.suppression-routing-intro > strong { color:#203f4b; font-size:13px; line-height:1.35; }
+.suppression-routing-intro > p { margin:0; color:#71858b; font-size:10px; line-height:1.5; }
+.suppression-routing-choices { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
+.suppression-routing-choices > button { min-height:62px; padding:10px 11px; display:flex; align-items:flex-start; gap:9px; border:1px solid #cedcdf; border-radius:9px; background:#fff; color:#526a71; text-align:left; cursor:pointer; transition:border-color .15s var(--ease),background .15s var(--ease),box-shadow .15s var(--ease); }
+.suppression-routing-choices > button:hover { border-color:#69a3b2; background:#f8fcfd; }
+.suppression-routing-choices > button.active { border-color:#267d91; background:#edf7f9; box-shadow:0 0 0 2px rgba(38,125,145,.1); }
+.suppression-routing-choices > button > i { width:15px; height:15px; flex:0 0 15px; margin-top:2px; border:2px solid #9bb0b6; border-radius:50%; background:#fff; box-shadow:inset 0 0 0 3px #fff; }
+.suppression-routing-choices > button.active > i { border-color:#18778b; background:#18778b; }
+.suppression-routing-choices > button > span { display:grid; gap:3px; min-width:0; }
+.suppression-routing-choices strong { color:#274b57; font-size:10.5px; }
+.suppression-routing-choices small { color:#7b8d92; font-size:8.5px; line-height:1.35; }
+.suppression-routing-selector { width:min(100%,520px); margin-top:12px; padding:14px 15px; border:1px solid #c9dfe5; border-radius:10px; background:#f7fbfc; }
+.suppression-routing-selector .form-field { margin:0; }
+.suppression-routing-selector > p { margin:9px 0 0; color:#71868c; font-size:9px; }
+.suppression-routing-selector > p strong { color:#176f83; }
+.approval-routing-picker .multi-user-select-trigger { min-height:40px; align-items:center; border-color:#bfd4da; border-radius:8px; box-shadow:0 1px 2px rgba(23,84,99,.04); }
+.approval-routing-picker .multi-user-select-trigger:hover,.approval-routing-picker .multi-user-select-trigger:focus-visible { border-color:#277f92; outline:none; box-shadow:0 0 0 3px rgba(39,127,146,.1); }
+.approval-routing-picker-panel { overflow:hidden; border:1px solid #afd0d9; border-radius:10px; box-shadow:0 15px 36px rgba(22,69,82,.2); background:#fff; }
+.suppression-form .suppression-routing-selector .approval-routing-picker-panel .searchable-select-search { min-height:40px; padding:6px 8px; border-bottom:1px solid #e0eaed; background:#f7fafb; }
+.suppression-form .suppression-routing-selector .approval-routing-picker-panel .searchable-select-search input { width:100%; min-height:28px; height:28px; padding:4px 28px 4px 7px !important; border:0; border-radius:6px; font-size:10.5px; line-height:1.2; }
+.suppression-form .suppression-routing-selector .approval-routing-picker-panel .searchable-select-list { max-height:128px; padding:4px; }
+.suppression-form .suppression-routing-selector .approval-routing-picker-panel label.multi-user-option { display:flex; flex-direction:row; align-items:center; gap:8px; min-height:32px; margin:0; padding:6px 8px; border-radius:6px; color:#3f5c65; font-size:10px; font-weight:650; line-height:1.25; }
+.approval-routing-picker-panel .multi-user-option:hover { background:#f0f6f7; }
+.approval-routing-picker-panel .multi-user-option.active { color:#155f73; background:#e9f4f6; }
+.suppression-form .suppression-routing-selector .approval-routing-picker-panel label.multi-user-option > input[type="checkbox"] { flex:0 0 14px; width:14px; min-height:0; height:14px; margin:0; padding:0; border-radius:3px; }
+.approval-routing-picker-footer { display:flex; justify-content:space-between; gap:12px; padding:7px 10px; border-top:1px solid #e0eaed; color:#829398; background:#f7fafb; font-size:8px; }
+.approval-routing-picker-footer strong { color:#1b7185; }
+.suppression-routing-selected { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+.suppression-routing-selected > button { max-width:100%; padding:5px 6px 5px 9px; display:inline-flex; align-items:center; gap:7px; border:1px solid #b8d7df; border-radius:999px; color:#205f70; background:#eaf5f7; font-size:9px; font-weight:750; cursor:pointer; }
+.suppression-routing-selected > button:hover { border-color:#df9c9c; color:#a53131; background:#fff4f4; }
+.suppression-routing-selected > button > span { font-size:13px; line-height:.7; }
+.suppression-routing-selected > button.unavailable { border-color:#e0a7a7; color:#9a3030; background:#fff2f2; }
+.suppression-routing-selected > button.unavailable > small { padding:2px 5px; border-radius:999px; color:#9a3030; background:#fbdede; font-size:7px; font-weight:850; letter-spacing:.04em; text-transform:uppercase; }
+@media (max-width:900px) {
+  .suppression-approval-routing { grid-template-columns:1fr; gap:12px; }
+}
+@media (max-width:600px) {
+  .suppression-routing-choices { grid-template-columns:1fr; }
+  .suppression-routing-selector { padding:11px; }
+}
 
 .login-page {
   min-height: 100vh; position: relative; isolation: isolate; overflow: hidden; padding: 40px;
@@ -6836,7 +6978,7 @@ td { padding: 12px; }
 .esign-preview { min-height: 128px; padding: 18px 22px; display: flex; align-items: center; justify-content: center; flex-direction: column; position: relative; overflow: hidden; border: 1px solid #cddfe2; border-radius: 12px; color: #123f48; background: linear-gradient(135deg,#f8fcfc,#e9f4f5); }
 .esign-preview::after { width: 58%; height: 1px; position: absolute; bottom: 33px; content: ''; background: #8db7bd; }
 .esign-preview small { position: absolute; top: 11px; left: 13px; color: #789297; font-size: 7.5px; font-weight: 850; letter-spacing: .12em; }
-.esign-preview > strong { max-width: 100%; overflow: hidden; color: #0b6677; font-size: clamp(20px,3vw,28px); line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.esign-preview > strong { max-width: 100%; overflow: visible; color: #0b6677; font-size: clamp(20px,3vw,28px); line-height: 1.25; text-align: center; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 .esign-preview span { position: absolute; right: 13px; bottom: 11px; color: #789297; font-size: 7.5px; text-transform: uppercase; letter-spacing: .08em; }
 .signature-style-professional { font-family: inherit; font-style: normal; font-weight: 750; letter-spacing: .01em; }
 .signature-style-classic { font-family: Georgia,"Times New Roman",serif; font-style: italic; font-weight: 700; letter-spacing: .015em; }
@@ -6850,7 +6992,7 @@ td { padding: 12px; }
 .esign-style-options label:hover { border-color: #8fbac1; background: #f8fbfc; }
 .esign-style-options label.selected { border-color: #278096; background: #f0f9fb; box-shadow: 0 0 0 2px rgba(39,128,150,.1); }
 .esign-style-options input { width: 15px; height: 15px; margin: 0; accent-color: #0b6677; }
-.esign-style-sample { min-width: 0; overflow: hidden; color: #0b6677; font-size: 16px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.esign-style-sample { min-width: 0; overflow: visible; color: #0b6677; font-size: 16px; line-height: 1.35; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 .esign-style-sample.signature-style-handwritten { font-size: 20px; }
 .esign-style-options label > strong { grid-column: 2; color: #38575e; font-size: 9.5px; }
 .esign-style-options label > small { grid-column: 2; color: #7a9095; font-size: 8px; }
@@ -7617,6 +7759,9 @@ td { padding: 12px; }
   .table-footer { margin-top: 10px; padding: 10px; border: 1px solid var(--table-line); border-radius: 10px; }
   .table-pagination { width: 100%; justify-content: space-between; gap: 6px; margin-left: 0; white-space: normal; }
   .table-pagination button { padding: 5px 8px; }
+  .suppression-approval-detail .data-table tbody tr { overflow: visible; }
+  .suppression-approval-detail .data-table td { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+  .suppression-approval-detail .data-table td > * { max-width: none; }
 }
 
 /* Global application-header redesign ---------------------------------------

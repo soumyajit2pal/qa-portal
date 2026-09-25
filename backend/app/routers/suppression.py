@@ -13,15 +13,18 @@ from ..deps import (
     dashboard_department_scope, require_department_visibility, active_qa_workspace_scope_ids,
     require_entity_workspace_visibility,
     department_unit_visibility_condition, require_department_unit_visibility, require_department_unit_action_scope,
-    has_department_unit_action_scope,
 )
-from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, SUPPRESSION_TERMINAL_STATUSES
+from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES
 from ..pdf_export import StructuredTableValue, build_request_detail_pdf
 from .. import documents as doc_store
 from ..workflow_authority import is_system_admin
 
 router = APIRouter(prefix="/api/suppressions", tags=["suppression"])
 _PRIVATE_STATUSES = ("Draft",)
+_REQUESTER_EDIT_STATUSES = (
+    "Draft", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_TEAM",
+)
+_DEPARTMENT_ROUTING_EDIT_STATUSES = ("Draft", "RETURNED_BY_SM")
 
 # ---------------------------------------------------------------------------
 # Suppression request lifecycle (Application Owner step removed entirely):
@@ -59,6 +62,256 @@ def _request_department_unit_id(obj: "models.SuppressionRequest") -> int | None:
     return linked.qa_request.department_unit_id if linked and linked.qa_request else None
 
 
+def _pending_department_approval(obj: "models.SuppressionRequest", user: models.User):
+    if not user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
+        return None
+    rows = list(getattr(obj, "department_approvals", []))
+    if not rows:
+        # Upgrade repair path: a legacy row may not have been backfilled when
+        # its free-text department did not match the master table exactly.
+        # Keep its owning Department Head able to open it; the decision
+        # endpoint will create and validate the missing approval row.
+        return True if obj.status == "DEPARTMENT_HEAD_APPROVAL_PENDING" \
+            and user.has_department(obj.department) else None
+    # A Department Head invited from another department retains read access
+    # after acting so they can verify the outcome and audit trail. Action
+    # authorization remains Pending-only in _can_decide_department_approval.
+    return next((row for row in rows if user.has_department(row.department_name)), None)
+
+
+def _can_decide_department_approval(db: Session, obj: "models.SuppressionRequest",
+                                    user: models.User, department_id: int | None = None):
+    if not user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
+        return None
+    rows = [row for row in obj.department_approvals
+            if row.decision == "Pending" and (department_id is None or row.department_id == department_id)]
+    if not user.has_role(Role.ADMIN):
+        rows = [row for row in rows if user.has_department(row.department_name)]
+    row = rows[0] if rows else None
+    if row and row.department_name == obj.department and not user.has_role(Role.ADMIN):
+        require_department_unit_action_scope(
+            db, user, obj.department, _request_department_unit_id(obj),
+        )
+    return row
+
+
+def _non_admin_user_ids(*users: models.User | None) -> set[int]:
+    return {
+        user.id for user in users
+        if user is not None and not is_system_admin(user)
+    }
+
+
+def _approval_maker_checker_exclusions(
+    db: Session,
+    obj: "models.SuppressionRequest",
+    sm_actor: models.User | None = None,
+) -> set[int]:
+    """Users who cannot perform a Department Head decision on this request."""
+    requester = db.get(models.User, obj.created_by_id) if obj.created_by_id else None
+    # A previous SM who returned/rejected the request is not a checker in a
+    # future approval round. Only the actor who actually approved the request
+    # into the Department Head stage must be excluded.
+    sm_user = sm_actor or (
+        db.get(models.User, obj.sm_id)
+        if obj.sm_id and obj.sm_decision == "Approved" else None
+    )
+    return _non_admin_user_ids(requester, sm_user)
+
+
+def _additional_department_ids(_db: Session, obj: "models.SuppressionRequest") -> list[int]:
+    return [
+        row.department_id for row in obj.department_approvals
+        if row.department_name != obj.department
+    ]
+
+
+def _owning_department_approval(
+    obj: "models.SuppressionRequest",
+) -> "models.SuppressionDepartmentApproval | None":
+    """Return the requester department's approval row, when available.
+
+    ``dept_head_id`` is a legacy aggregate field. In a multi-department
+    approval round it can contain the Department Head who completed the last
+    outstanding approval, which is not necessarily the requester's Department
+    Head. Review/export surfaces that identify the owning Department Head must
+    therefore use the owning department's dedicated approval row.
+    """
+    owning_department = (obj.department or "").strip().casefold()
+    if not owning_department:
+        return None
+    return next(
+        (
+            approval for approval in getattr(obj, "department_approvals", [])
+            if (approval.department_name or "").strip().casefold() == owning_department
+        ),
+        None,
+    )
+
+
+def _department_ids_with_eligible_heads(
+    db: Session,
+    departments: list[models.Department],
+    qa_workspace_id: int | None,
+    *,
+    excluded_user_ids: set[int] | None = None,
+) -> set[int]:
+    """Return departments with an actionable Department Head in the workspace.
+
+    This is the single eligibility rule used both by the option endpoints and
+    by workflow validation. The option list is therefore only a convenience;
+    every write/transition still re-runs this rule authoritatively.
+    """
+    if not departments:
+        return set()
+    heads = db.query(models.User).join(models.UserRole).options(
+        selectinload(models.User.department_assignments),
+        selectinload(models.User.role_assignments),
+        selectinload(models.User.qa_workspace_memberships).selectinload(models.QAWorkspaceMember.workspace),
+        selectinload(models.User.department_coordinator_assignments).selectinload(
+            models.DepartmentCoordinatorAssignment.workspace,
+        ),
+        selectinload(models.User.department_coordinator_assignments).selectinload(
+            models.DepartmentCoordinatorAssignment.department,
+        ),
+    ).filter(
+        models.User.is_active == True,  # noqa: E712
+        models.UserRole.role.in_([Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM]),
+    ).all()
+    if qa_workspace_id:
+        from ..workspace_service import inherited_workspace_access_mode, selectable_workspace_ids
+        heads = [
+            head for head in heads
+            if qa_workspace_id in selectable_workspace_ids(db, head)
+            and inherited_workspace_access_mode(db, head, qa_workspace_id) != "PARENT_VIEWER"
+        ]
+    # A user can hold several roles at once. Organisation-wide VIEW_ONLY and
+    # SCALE_6_PLUS are hard read-only profiles even if the same account also
+    # has a Department Head role, so they must never count as an actionable
+    # checker merely because they can see the workspace.
+    heads = [
+        head for head in heads
+        if Role.VIEW_ONLY not in head.roles and Role.SCALE_6_PLUS not in head.roles
+    ]
+    excluded_user_ids = excluded_user_ids or set()
+    return {
+        department.id for department in departments
+        if any(
+            head.id not in excluded_user_ids and head.has_department(department.name)
+            for head in heads
+        )
+    }
+
+
+def _approval_department_options(
+    db: Session,
+    owning_department: str,
+    qa_workspace_id: int | None,
+    *,
+    excluded_user_ids: set[int] | None = None,
+) -> dict:
+    departments = db.query(models.Department).filter(
+        models.Department.is_active == True,  # noqa: E712
+    ).order_by(models.Department.name).all()
+    eligible_ids = _department_ids_with_eligible_heads(
+        db,
+        departments,
+        qa_workspace_id,
+        excluded_user_ids=excluded_user_ids,
+    )
+    owning = next((row for row in departments if row.name == owning_department), None)
+    return {
+        "owning_department": owning_department,
+        "owning_department_eligible": bool(owning and owning.id in eligible_ids),
+        "departments": [
+            {"id": row.id, "name": row.name}
+            for row in departments
+            if row.name != owning_department and row.id in eligible_ids
+        ],
+    }
+
+
+def _validate_and_sync_department_approvals(
+    db: Session,
+    obj: "models.SuppressionRequest",
+    additional_department_ids: list[int],
+    *,
+    excluded_user_ids: set[int] | None = None,
+    department_ids_requiring_eligible_heads: set[int] | None = None,
+) -> None:
+    requested_ids = list(dict.fromkeys(additional_department_ids or []))
+    departments = db.query(models.Department).filter(
+        models.Department.is_active == True,  # noqa: E712
+        or_(models.Department.id.in_(requested_ids), models.Department.name == obj.department),
+    ).all()
+    primary = next((row for row in departments if row.name == obj.department), None)
+    if not primary:
+        raise HTTPException(400, f"Owning department '{obj.department}' is not active")
+    by_id = {row.id: row for row in departments}
+    missing = [department_id for department_id in requested_ids if department_id not in by_id]
+    if missing:
+        raise HTTPException(400, "One or more selected additional departments are invalid or inactive")
+
+    desired_ids = {primary.id, *requested_ids}
+    excluded_user_ids = excluded_user_ids or set()
+    eligible_department_ids = _department_ids_with_eligible_heads(
+        db,
+        list(by_id.values()),
+        obj.qa_workspace_id,
+        excluded_user_ids=excluded_user_ids,
+    )
+    head_required_ids = (
+        desired_ids if department_ids_requiring_eligible_heads is None
+        else desired_ids & department_ids_requiring_eligible_heads
+    )
+    missing_heads = [
+        by_id[department_id].name for department_id in head_required_ids
+        if department_id not in eligible_department_ids
+    ]
+    if missing_heads:
+        raise HTTPException(
+            400,
+            "No eligible Department Head is assigned to: "
+            f"{', '.join(sorted(missing_heads))}. An eligible approver must be active, have actionable "
+            "access to this workspace, and satisfy maker-checker separation from the requester and approving SM.",
+        )
+
+    existing = {row.department_id: row for row in obj.department_approvals}
+    for department_id, row in list(existing.items()):
+        if department_id not in desired_ids:
+            db.delete(row)
+    for department_id in desired_ids:
+        if department_id not in existing:
+            obj.department_approvals.append(models.SuppressionDepartmentApproval(
+                department_id=department_id,
+                department=by_id[department_id],
+                decision="Pending",
+            ))
+
+
+def _reset_department_approvals(obj: "models.SuppressionRequest") -> None:
+    for row in getattr(obj, "department_approvals", []):
+        row.decision = "Pending"
+        row.approver_id = None
+        row.decided_at = None
+    obj.dept_head_decision = None
+    obj.dept_head_id = None
+    obj.dept_head_decided_at = None
+
+
+def _restart_as_draft(obj: "models.SuppressionRequest") -> None:
+    """Invalidate every workflow decision after a material relink."""
+    obj.status = "Draft"
+    obj.sm_decision = None
+    obj.sm_id = None
+    obj.sm_decided_at = None
+    _reset_department_approvals(obj)
+    obj.security_decision = None
+    obj.security_id = None
+    obj.security_decided_at = None
+    obj.needs_dept_head_reapproval = False
+
+
 def _unit_visibility_condition(db: Session, user: models.User):
     gateway_scope = department_unit_visibility_condition(
         db, user, models.QARequest.department, models.QARequest.department_unit_id,
@@ -74,21 +327,27 @@ def _unit_visibility_condition(db: Session, user: models.User):
 
 
 def _require_visible(db: Session, obj: "models.SuppressionRequest", user: models.User) -> None:
+    # Workspace isolation is always evaluated before the invited-department
+    # exception below. An approval row grants a Department Head visibility
+    # inside this request's workspace; it must never become a cross-workspace
+    # bypass for detail, history, export, or document endpoints.
+    require_entity_workspace_visibility(db, user, "SUPPRESSION", obj.id)
     # A Draft is private scratch work until its requester explicitly submits
     # it into the governed approval workflow. Department membership alone
     # must not expose it to an SM or any other colleague.
     if obj.status in _PRIVATE_STATUSES and obj.created_by_id != user.id and not user.has_role(Role.ADMIN):
         raise HTTPException(404, "Suppression request not found")
-    require_department_visibility(
-        user,
-        obj.department,
-        requester_id=obj.created_by_id,
-        entity_workspace_id=obj.qa_workspace_id,
-    )
-    require_department_unit_visibility(
-        db, user, obj.department, _request_department_unit_id(obj),
-        requester_id=obj.created_by_id,
-    )
+    if not _pending_department_approval(obj, user):
+        require_department_visibility(
+            user,
+            obj.department,
+            requester_id=obj.created_by_id,
+            entity_workspace_id=obj.qa_workspace_id,
+        )
+        require_department_unit_visibility(
+            db, user, obj.department, _request_department_unit_id(obj),
+            requester_id=obj.created_by_id,
+        )
 
 
 def _apply_private_status_visibility(query, user: models.User):
@@ -105,21 +364,12 @@ def _can_edit_details(obj: "models.SuppressionRequest", user: models.User,
                       db: Session | None = None) -> bool:
     """Match the request-module edit hand-off at each workflow stage."""
     if user.has_role(Role.ADMIN):
-        return True
-    if obj.status in ("Draft", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_TEAM"):
+        return obj.status in _REQUESTER_EDIT_STATUSES
+    if obj.status in _REQUESTER_EDIT_STATUSES:
         return obj.created_by_id == user.id
-    if obj.status == "SM_APPROVAL_PENDING":
-        return (user.has_role(Role.SM) and user.has_department(obj.department)
-                and (db is None or has_department_unit_action_scope(
-                    db, user, obj.department, _request_department_unit_id(obj),
-                ))
-                and obj.created_by_id != user.id)
-    if obj.status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return (user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM)
-                and user.has_department(obj.department)
-                and (db is None or has_department_unit_action_scope(
-                    db, user, obj.department, _request_department_unit_id(obj),
-                )) and obj.created_by_id != user.id)
+    # Reviewers never rewrite the request they are approving. If details need
+    # correction they must Return with remarks; the requester edits it while
+    # it is back in one of the requester-controlled statuses above.
     return False
 
 
@@ -300,12 +550,21 @@ def list_suppressions(db: Session = Depends(get_db), current_user: models.User =
     # join-driven row explosion), joinedload for the two many-to-one FKs.
     q = db.query(models.SuppressionRequest).options(
         selectinload(models.SuppressionRequest.items),
+        selectinload(models.SuppressionRequest.department_approvals).joinedload(models.SuppressionDepartmentApproval.department),
+        selectinload(models.SuppressionRequest.department_approvals).joinedload(models.SuppressionDepartmentApproval.approver),
         joinedload(models.SuppressionRequest.sast_request),
         joinedload(models.SuppressionRequest.dast_request),
     )
     scope = dashboard_department_scope(current_user)
     if scope is not None:
-        q = q.filter(_unit_visibility_condition(db, current_user))
+        visibility = _unit_visibility_condition(db, current_user)
+        if current_user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
+            visibility = or_(visibility, models.SuppressionRequest.department_approvals.any(
+                models.SuppressionDepartmentApproval.department.has(
+                    models.Department.name.in_(current_user.departments),
+                ),
+            ))
+        q = q.filter(visibility)
     workspace_ids = active_qa_workspace_scope_ids(current_user)
     if workspace_ids:
         q = q.filter(models.SuppressionRequest.qa_workspace_id.in_(workspace_ids))
@@ -323,6 +582,7 @@ def create_suppression(payload: schemas.SuppressionCreate, db: Session = Depends
     rather than requiring a separate request per finding."""
     data = payload.model_dump()
     items_data = data.pop("items")
+    additional_department_ids = data.pop("additional_department_ids", [])
     if not items_data:
         raise HTTPException(400, "At least one finding/issue is required")
     linked, kind = _require_linked_request(db, data, current_user)
@@ -333,10 +593,83 @@ def create_suppression(payload: schemas.SuppressionCreate, db: Session = Depends
     obj.items = [models.SuppressionItem(**item) for item in items_data]
     db.add(obj)
     db.flush()
+    _validate_and_sync_department_approvals(
+        db, obj, additional_department_ids,
+        excluded_user_ids=_approval_maker_checker_exclusions(db, obj),
+    )
     _log(db, obj.id, "Requester", current_user, "Drafted")
     db.commit()
     db.refresh(obj)
     return obj
+
+
+@router.get(
+    "/approval-department-options",
+    response_model=schemas.SuppressionApprovalDepartmentOptionsOut,
+)
+def create_approval_department_options(
+    sast_request_id: int | None = None,
+    dast_request_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Eligible approval departments for a not-yet-created suppression.
+
+    The linked request remains the authority for the workspace, owning
+    department, and requester. Callers cannot broaden the result by supplying
+    those values independently.
+    """
+    data = {
+        "sast_request_id": sast_request_id,
+        "dast_request_id": dast_request_id,
+    }
+    linked, kind = _require_linked_request(db, data, current_user)
+    _require_requester_of_linked(linked, current_user)
+    identity = {}
+    _apply_linked_request_identity(identity, linked, kind)
+    return _approval_department_options(
+        db,
+        identity["department"],
+        identity["qa_workspace_id"],
+        # POST /api/suppressions stores current_user.id as created_by_id. Use
+        # that prospective creator here too so the preview and authoritative
+        # create validation stay identical for the Administrator override case.
+        excluded_user_ids=_non_admin_user_ids(current_user),
+    )
+
+
+@router.get(
+    "/{sup_id}/approval-department-options",
+    response_model=schemas.SuppressionApprovalDepartmentOptionsOut,
+)
+def edit_approval_department_options(
+    sup_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Eligible approval departments while routing is requester-editable."""
+    obj = db.get(models.SuppressionRequest, sup_id)
+    if not obj:
+        raise HTTPException(404, "Suppression request not found")
+    _require_visible(db, obj, current_user)
+    if obj.status not in _REQUESTER_EDIT_STATUSES:
+        raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
+    if not _can_edit_details(obj, current_user, db):
+        raise HTTPException(403, "You do not have permission to edit this request in its current status")
+    if obj.status not in _DEPARTMENT_ROUTING_EDIT_STATUSES:
+        raise HTTPException(
+            400,
+            "Required approval departments cannot be changed after SM approval. "
+            "Relink the request to restart its workflow if its ownership changed.",
+        )
+    if not obj.department:
+        raise HTTPException(409, "Suppression request has no owning department")
+    return _approval_department_options(
+        db,
+        obj.department,
+        obj.qa_workspace_id,
+        excluded_user_ids=_approval_maker_checker_exclusions(db, obj),
+    )
 
 
 @router.get("/{sup_id}", response_model=schemas.SuppressionOut)
@@ -345,7 +678,6 @@ def get_suppression(sup_id: int, db: Session = Depends(get_db), current_user: mo
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
-    require_entity_workspace_visibility(db, current_user, "SUPPRESSION", obj.id)
     return obj
 
 
@@ -356,41 +688,32 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
-    editable_statuses = (
-        "Draft", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
-        "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD",
-        "RETURNED_BY_SECURITY_TEAM",
-    )
-    if obj.status not in editable_statuses:
+    if obj.status not in _REQUESTER_EDIT_STATUSES:
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
     if not _can_edit_details(obj, current_user, db):
         raise HTTPException(403, "You do not have permission to edit this request in its current status")
     data = payload.model_dump()
     items_data = data.pop("items", None)
+    additional_department_ids = data.pop("additional_department_ids", [])
     if not items_data:
         raise HTTPException(400, "At least one finding/issue is required")
     linked, kind = _require_linked_request(db, data, current_user)
-    # Re-checked here too, not just in create_suppression -- an edit can
-    # re-point sast_request_id/dast_request_id at a different request
-    # entirely, so the *new* link's requester must still be this same
-    # requester (obj.created_by_id, already verified above), otherwise a
-    # requester could quietly relink their own Draft suppression onto
-    # someone else's SAST/DAST request.
-    # A reviewer may correct the request while it is pending their decision,
-    # but cannot use that access to relink it. Relinking stays a separate
-    # requester/Admin action with its own endpoint and audit entry.
+    # Relinking is a separate requester/Admin action because it must
+    # invalidate every prior workflow decision and restart from Draft. Never
+    # let the general edit endpoint become a way around that reset.
     is_requester = obj.created_by_id == current_user.id
     is_admin = current_user.has_role(Role.ADMIN)
-    if not is_requester and not is_admin:
-        if data.get("sast_request_id") != obj.sast_request_id or data.get("dast_request_id") != obj.dast_request_id:
-            raise HTTPException(403, "Only the requester or an admin can relink this request")
-    else:
-        _require_requester_of_linked(linked, current_user)
-    # Same re-link case as above -- exclude_id=obj.id so this suppression
-    # (which is itself still pending) doesn't block its own edit; only a
-    # DIFFERENT already-pending suppression against the (possibly new)
-    # linked request should.
-    _require_no_existing_pending_suppression(db, linked, kind, exclude_id=obj.id)
+    link_changed = (
+        data.get("sast_request_id") != obj.sast_request_id
+        or data.get("dast_request_id") != obj.dast_request_id
+    )
+    if link_changed:
+        raise HTTPException(
+            400,
+            "Use the Relink action to change the linked SAST/DAST request; "
+            "relinking resets all approvals and restarts the request from Draft.",
+        )
+    _require_requester_of_linked(linked, current_user)
     _apply_linked_request_identity(data, linked, kind)
     for k, v in data.items():
         setattr(obj, k, v)
@@ -399,6 +722,28 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
             db.delete(item)
         db.flush()
         obj.items = [models.SuppressionItem(**item) for item in items_data]
+    if is_requester or is_admin:
+        current_additional_ids = set(_additional_department_ids(db, obj))
+        requested_additional_ids = set(additional_department_ids)
+        if obj.status not in _DEPARTMENT_ROUTING_EDIT_STATUSES \
+                and requested_additional_ids != current_additional_ids:
+            raise HTTPException(
+                400,
+                "Required approval departments cannot be changed after SM approval. "
+                "Relink the request to restart its workflow if its ownership changed.",
+            )
+        # When Security returns a request straight back to itself, its
+        # already-approved Department Head chain is intentionally retained.
+        # Details/evidence may be corrected, but no Department Head will act
+        # again, so a subsequently inactive head must not block that repair.
+        if not (
+            obj.status == "RETURNED_BY_SECURITY_TEAM"
+            and not obj.needs_dept_head_reapproval
+        ):
+            _validate_and_sync_department_approvals(
+                db, obj, additional_department_ids,
+                excluded_user_ids=_approval_maker_checker_exclusions(db, obj),
+            )
     _log(db, obj.id, "Request Details", current_user, "Updated")
     db.commit()
     db.refresh(obj)
@@ -410,27 +755,51 @@ def relink_suppression(sup_id: int, payload: schemas.SuppressionRelinkIn, db: Se
                         current_user: models.User = Depends(get_current_user)):
     """Reported directly: "give option to link and delink supression request
     from sast request and supression both." Unlike update_suppression above
-    (full-form edit, Draft only), relinking -- pointing this suppression at
-    a *different* SAST/DAST request -- is allowed any time the suppression
-    itself hasn't reached a terminal outcome yet (SUPPRESSION_TERMINAL_
-    STATUSES: Done or Rejected), not just while still Draft. A suppression
-    must always be linked to exactly one SAST/DAST request (no "unlinked"
-    state) -- "delink" means pointing it at a different one via this same
-    endpoint, not clearing the link entirely."""
+    (full-form edit), relinking points this suppression at a *different*
+    SAST/DAST request. It is allowed only while the record is with its
+    requester (Draft or Returned). Because that changes the request's
+    authoritative identity, a successful relink invalidates every prior
+    decision and restarts the request as Draft. A suppression must always be
+    linked to exactly one SAST/DAST request; "delink" means replacing the
+    link, not clearing it."""
     obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
     if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can relink this request")
-    if obj.status in SUPPRESSION_TERMINAL_STATUSES:
-        raise HTTPException(400, f"Cannot relink a suppression request that has already reached '{obj.status}'")
+    if obj.status not in _REQUESTER_EDIT_STATUSES:
+        raise HTTPException(
+            400,
+            f"Cannot relink a suppression request while it is in status '{obj.status}'. "
+            "A reviewer must return it to the requester first.",
+        )
     data = payload.model_dump()
     linked, kind = _require_linked_request(db, data, current_user)
+    same_target = (
+        kind == "SAST"
+        and obj.sast_request_id == data.get("sast_request_id")
+        and obj.dast_request_id is None
+    ) or (
+        kind == "DAST"
+        and obj.dast_request_id == data.get("dast_request_id")
+        and obj.sast_request_id is None
+    )
+    if same_target:
+        raise HTTPException(
+            400,
+            f"This suppression request is already linked to {kind} request {linked.request_id}. "
+            "Choose a different request to relink it.",
+        )
     _require_requester_of_linked(linked, current_user)
     _require_no_existing_pending_suppression(db, linked, kind, exclude_id=obj.id)
     obj.sast_request_id = data.get("sast_request_id")
     obj.dast_request_id = data.get("dast_request_id")
+    previous_department = obj.department
+    additional_department_ids = [
+        row.department_id for row in obj.department_approvals
+        if row.department_name != previous_department
+    ]
     identity = {}
     _apply_linked_request_identity(identity, linked, kind)
     obj.scan_type = identity["scan_type"]
@@ -438,7 +807,15 @@ def relink_suppression(sup_id: int, payload: schemas.SuppressionRelinkIn, db: Se
     obj.department = identity["department"]
     obj.application_owner = identity["application_owner"]
     obj.qa_workspace_id = identity["qa_workspace_id"]
-    _log(db, obj.id, "Requester", current_user, "Relinked", f"Relinked to {kind} request {linked.request_id}")
+    _restart_as_draft(obj)
+    _validate_and_sync_department_approvals(
+        db, obj, additional_department_ids,
+        excluded_user_ids=_approval_maker_checker_exclusions(db, obj),
+    )
+    _log(
+        db, obj.id, "Requester", current_user, "Relinked",
+        f"Relinked to {kind} request {linked.request_id}; all prior approvals were invalidated and the request returned to Draft",
+    )
     db.commit()
     db.refresh(obj)
     return obj
@@ -449,9 +826,14 @@ def submit_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
     obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    _require_visible(db, obj, current_user)
     if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this request")
     _require(obj, "Draft", "Submit")
+    _validate_and_sync_department_approvals(
+        db, obj, _additional_department_ids(db, obj),
+        excluded_user_ids=_approval_maker_checker_exclusions(db, obj),
+    )
     # Mirrors routers/functional.py::submit_request -- logs the requester's
     # own "Submitted" step before immediately moving on to SM Approval, same
     # fix as SAST/DAST/Performance so every request type's History
@@ -471,23 +853,43 @@ def resubmit_suppression(sup_id: int, db: Session = Depends(get_db), current_use
     obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    _require_visible(db, obj, current_user)
     if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
     _require(obj, ["RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_TEAM"], "Resubmit")
     if obj.status == "RETURNED_BY_SM":
+        obj.sm_decision = None
+        obj.sm_id = None
+        obj.sm_decided_at = None
         obj.status = "SM_APPROVAL_PENDING"
         _log(db, obj.id, "SM Approval", current_user, "Resubmitted", "Returned request re-submitted")
     elif obj.status == "RETURNED_BY_DEPARTMENT_HEAD":
+        _validate_and_sync_department_approvals(
+            db, obj, _additional_department_ids(db, obj),
+            excluded_user_ids=_approval_maker_checker_exclusions(db, obj),
+        )
+        _reset_department_approvals(obj)
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
         _log(db, obj.id, "Department Head Approval", current_user, "Resubmitted", "Returned request re-submitted")
     elif obj.status == "RETURNED_BY_SECURITY_TEAM" and obj.needs_dept_head_reapproval:
+        _validate_and_sync_department_approvals(
+            db, obj, _additional_department_ids(db, obj),
+            excluded_user_ids=_approval_maker_checker_exclusions(db, obj),
+        )
+        _reset_department_approvals(obj)
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
         obj.needs_dept_head_reapproval = False
+        obj.security_decision = None
+        obj.security_id = None
+        obj.security_decided_at = None
         _log(db, obj.id, "Department Head Approval", current_user, "Resubmitted",
              "Security Team return corrected and re-submitted (Department Head re-approval required)")
     else:
         obj.status = "SECURITY_TEAM_VERIFICATION"
         obj.needs_dept_head_reapproval = False
+        obj.security_decision = None
+        obj.security_id = None
+        obj.security_decided_at = None
         _log(db, obj.id, "Security Team Verification", current_user, "Resubmitted", "Returned request re-submitted")
     db.commit()
     db.refresh(obj)
@@ -513,6 +915,11 @@ def sm_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = De
     obj.sm_id = current_user.id
     obj.sm_decided_at = models.now()
     if payload.decision == "Approved":
+        _validate_and_sync_department_approvals(
+            db, obj, _additional_department_ids(db, obj),
+            excluded_user_ids=_approval_maker_checker_exclusions(db, obj, current_user),
+        )
+        _reset_department_approvals(obj)
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
     elif payload.decision == "Returned":
         obj.status = "RETURNED_BY_SM"
@@ -527,16 +934,12 @@ def sm_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = De
 
 
 @router.post("/{sup_id}/dept-head-decision", response_model=schemas.SuppressionOut)
-def dept_head_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
+def dept_head_decision(sup_id: int, payload: schemas.SuppressionDepartmentDecision, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
     obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
-    require_same_department(current_user, obj.department)
-    require_department_unit_action_scope(
-        db, current_user, obj.department, _request_department_unit_id(obj),
-    )
     require_not_requester(current_user, obj.created_by_id)
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
     # Maker-checker separation is per request, not merely per role. A person
@@ -548,18 +951,58 @@ def dept_head_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Sessi
             "Department Head approval must be completed by a different approver; "
             "your SM decision is already recorded on this request.",
         )
-    obj.dept_head_decision = payload.decision
-    obj.dept_head_id = current_user.id
-    obj.dept_head_decided_at = models.now()
+    # Revalidate the active configuration at decision time. This repairs a
+    # legacy record with no approval rows, rejects deactivated departments,
+    # and prevents an approval round from advancing after its last eligible
+    # head was deactivated or lost actionable workspace access. Departments
+    # already approved earlier in this round do not need a replacement head.
+    pending_department_ids = (
+        {row.department_id for row in obj.department_approvals if row.decision == "Pending"}
+        if obj.department_approvals else None
+    )
+    _validate_and_sync_department_approvals(
+        db, obj, _additional_department_ids(db, obj),
+        excluded_user_ids=_approval_maker_checker_exclusions(db, obj),
+        department_ids_requiring_eligible_heads=pending_department_ids,
+    )
+    approval = _can_decide_department_approval(db, obj, current_user, payload.department_id)
+    if not approval:
+        raise HTTPException(403, "You do not have a pending Department Head approval for this department")
+
+    if approval:
+        approval.decision = payload.decision
+        approval.approver_id = current_user.id
+        approval.decided_at = models.now()
     if payload.decision == "Approved":
-        obj.status = "SECURITY_TEAM_VERIFICATION"
+        if approval:
+            db.flush()
+        remaining = any(
+            row.id != approval.id and row.decision != "Approved" for row in obj.department_approvals
+        )
+        if not remaining:
+            obj.status = "SECURITY_TEAM_VERIFICATION"
+            obj.dept_head_decision = "Approved"
+            obj.dept_head_id = current_user.id
+            obj.dept_head_decided_at = models.now()
+        else:
+            obj.dept_head_decision = None
+            obj.dept_head_id = None
+            obj.dept_head_decided_at = None
     elif payload.decision == "Returned":
         obj.status = "RETURNED_BY_DEPARTMENT_HEAD"
+        obj.dept_head_decision = "Returned"
+        obj.dept_head_id = current_user.id
+        obj.dept_head_decided_at = models.now()
     elif payload.decision == "Rejected":
         obj.status = "Rejected"
+        obj.dept_head_decision = "Rejected"
+        obj.dept_head_id = current_user.id
+        obj.dept_head_decided_at = models.now()
     else:
         raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
-    _log(db, obj.id, "Department Head Approval", current_user, payload.decision, payload.comments)
+    approval_department = approval.department_name
+    _log(db, obj.id, f"Department Head Approval — {approval_department}", current_user,
+         payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)
     return obj
@@ -577,8 +1020,36 @@ def security_team_decision(sup_id: int, payload: schemas.WorkflowDecision, db: S
     obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    _require_visible(db, obj, current_user)
     require_not_requester(current_user, obj.created_by_id)
     _require(obj, "SECURITY_TEAM_VERIFICATION", "Security team decision")
+    department_approver_ids = {
+        approval.approver_id for approval in obj.department_approvals
+        if approval.approver_id is not None
+    }
+    if obj.dept_head_id is not None:
+        # Keep the aggregate actor as a compatibility backstop for legacy
+        # requests that predate the per-department approval rows.
+        department_approver_ids.add(obj.dept_head_id)
+    if not is_system_admin(current_user) and current_user.id in department_approver_ids:
+        raise HTTPException(
+            403,
+            "Security verification must be completed by a different verifier; "
+            "your Department Head approval is already recorded on this request.",
+        )
+    if obj.department_approvals:
+        approvals_complete = all(
+            approval.decision == "Approved" for approval in obj.department_approvals
+        )
+    else:
+        # Legacy records created before per-department approval rows were
+        # introduced remain valid only when their aggregate approval is clear.
+        approvals_complete = obj.dept_head_decision == "Approved"
+    if not approvals_complete:
+        raise HTTPException(
+            409,
+            "Department Head approvals are incomplete; Security verification cannot proceed.",
+        )
     decision = payload.decision
     if decision not in ("Accepted", "Approved", "Rejected", "Returned"):
         raise HTTPException(400, "decision must be one of: Accepted, Rejected, Returned")
@@ -631,6 +1102,16 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
         u = db.get(models.User, uid)
         return u.full_name if u else None
 
+    owning_department_approval = _owning_department_approval(obj)
+    if owning_department_approval is not None:
+        owning_department_head_decision = owning_department_approval.decision or "Pending"
+        owning_department_head_name = owning_department_approval.approver_name or "—"
+    else:
+        # Records created before per-department approvals were introduced only
+        # have the aggregate fields, so retain their existing export output.
+        owning_department_head_decision = obj.dept_head_decision or "Pending"
+        owning_department_head_name = uname(obj.dept_head_id) or "—"
+
     sections = [
         ("Status", [
             ("Status", obj.status),
@@ -645,7 +1126,15 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
         ]),
         ("Decisions", [
             ("SM Decision", f"{obj.sm_decision or 'Pending'} — {uname(obj.sm_id) or '—'}"),
-            ("Department Head Decision", f"{obj.dept_head_decision or 'Pending'} — {uname(obj.dept_head_id) or '—'}"),
+            ("Department Head Decision", f"{owning_department_head_decision} — {owning_department_head_name}"),
+            ("Required Department Approvals", StructuredTableValue(
+                headers=("Department", "Decision", "Decided By"),
+                rows=[
+                    (approval.department_name or "—", approval.decision, approval.approver_name or "—")
+                    for approval in obj.department_approvals
+                ],
+                width_ratios=(.45, .2, .35),
+            )),
             ("Security Team Decision", f"{obj.security_decision or 'Pending'} — {uname(obj.security_id) or '—'}"),
         ]),
         ("Risk Assessment", [
@@ -689,37 +1178,15 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
 
 
 def _can_upload_documents(db: Session, obj: "models.SuppressionRequest", user: models.User) -> bool:
-    """Reported directly (Document and Evidence Access Control Based on
-    Workflow Stage): access follows exactly 3 stages, then locks hard --
-    (1) the requester, while the request is genuinely in their own hands
-    (Draft or Returned-by-*) may upload any number of files; (2) the SM,
-    and only the SM, may upload while SM_APPROVAL_PENDING; (3) the
-    Department Head, and only the Department Head, may upload while
-    DEPARTMENT_HEAD_APPROVAL_PENDING. After Department Head approval, EVERY
-    status is locked -- including SECURITY_TEAM_VERIFICATION, previously a
-    Security-Analyst upload window -- no Security Analyst may upload here
-    until the request is returned to the requester (a RETURNED_BY_*
-    status), which re-opens stage (1). Admin always bypasses, same
-    convention as every other permission check in this file."""
+    """Only the requester mutates evidence while the request is in their hands.
+
+    Reviewers preserve maker/checker separation by returning the request with
+    comments when evidence needs changing. Admin retains the application's
+    standard recovery/oversight bypass.
+    """
     if user.has_role(Role.ADMIN):
         return True
-    status = obj.status
-    if status in ("Draft", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_TEAM"):
-        return obj.created_by_id == user.id
-    if status == "SM_APPROVAL_PENDING":
-        return (user.has_role(Role.SM) and user.has_department(obj.department)
-                and has_department_unit_action_scope(
-                    db, user, obj.department, _request_department_unit_id(obj),
-                ))
-    if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return (user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM)
-                and user.has_department(obj.department)
-                and has_department_unit_action_scope(
-                    db, user, obj.department, _request_department_unit_id(obj),
-                ))
-    # SECURITY_TEAM_VERIFICATION/Done/Rejected -- locked for everyone but
-    # Admin until the request is returned to the requester above.
-    return False
+    return obj.status in _REQUESTER_EDIT_STATUSES and obj.created_by_id == user.id
 
 
 # ---- Supporting documents (multiple files, uploaded any time after the
@@ -741,7 +1208,11 @@ def upload_suppression_documents(sup_id: int, files: List[UploadFile] = File(...
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
     if not _can_upload_documents(db, obj, current_user):
-        raise HTTPException(403, "Only the requester or this request's current stage owner (Security Team, or the SM/Department Head currently reviewing it) can upload documents")
+        raise HTTPException(
+            403,
+            "Only the requester can upload documents while the request is Draft or Returned. "
+            "Reviewers must return the request with comments for evidence changes.",
+        )
     return doc_store.save_documents(db, "SUPPRESSION", sup_id, obj.suppression_id, files, current_user.id,
                                      log_entity_type="SUPPRESSION", log_entity_id=obj.id, log_actor=current_user)
 

@@ -123,14 +123,31 @@ export async function mapWithConcurrency<T, R>(
   return results
 }
 
+export interface HttpErrorMetadata {
+  code?: string
+  cause?: string
+  guidance?: string
+  retryable?: boolean
+}
+
 export class HttpError extends Error {
+  readonly code?: string
+  readonly cause?: string
+  readonly guidance?: string
+  readonly retryable?: boolean
+
   constructor(
     message: string,
     readonly status: number,
     readonly reference?: string,
+    metadata: HttpErrorMetadata = {},
   ) {
     super(message)
     this.name = 'HttpError'
+    this.code = metadata.code
+    this.cause = metadata.cause
+    this.guidance = metadata.guidance
+    this.retryable = metadata.retryable
   }
 }
 
@@ -233,6 +250,20 @@ function formatBackendReason(detail: unknown): string {
   return String(detail || '')
 }
 
+function backendErrorMetadata(detail: unknown): HttpErrorMetadata {
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return {}
+  const entry = detail as Record<string, unknown>
+  const value = (key: string) => typeof entry[key] === 'string' && entry[key]
+    ? String(entry[key])
+    : undefined
+  return {
+    code: value('code'),
+    cause: value('cause'),
+    guidance: value('guidance'),
+    retryable: typeof entry.retryable === 'boolean' ? entry.retryable : undefined,
+  }
+}
+
 async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T> {
   const { method = 'GET', body, formEncoded = false, isBlob = false } = opts
   const headers: Record<string, string> = {}
@@ -284,7 +315,7 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
       } catch (e) { /* ignore */ }
       const backendReason = formatBackendReason(detail)
       const message = backendReason || statusMessage(res.status, res.statusText)
-      throw new HttpError(message, res.status, reference)
+      throw new HttpError(message, res.status, reference, backendErrorMetadata(detail))
     }
 
     // Await body consumption before releasing the deadline (including downloads).
@@ -550,7 +581,14 @@ export const api = {
       if (xhr.status === 401 && !path.startsWith('/api/auth/login')) {
         window.dispatchEvent(new Event('qa-session-expired'))
       }
-      reject(new HttpError(formatBackendReason(payload?.detail ?? payload) || statusMessage(xhr.status, xhr.statusText), xhr.status))
+      const detail = payload?.detail ?? payload
+      const reference = xhr.getResponseHeader('x-request-id') || xhr.getResponseHeader('x-audit-request-id') || undefined
+      reject(new HttpError(
+        formatBackendReason(detail) || statusMessage(xhr.status, xhr.statusText),
+        xhr.status,
+        reference,
+        backendErrorMetadata(detail),
+      ))
     }
     // This helper is only used when the caller renders granular upload
     // progress, so do not also show the global "loading data" indicator.

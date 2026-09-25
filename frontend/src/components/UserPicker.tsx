@@ -18,6 +18,8 @@ export interface UserPickerProps {
   disabled?: boolean
   style?: React.CSSProperties
   showRoles?: boolean
+  showUserId?: boolean
+  variant?: 'default' | 'coordinator'
   searchPlaceholder?: string
   clearable?: boolean
   clearLabel?: string
@@ -40,15 +42,17 @@ export function userRoleLabels(user: PickerUser): string[] {
     .map((role) => ROLE_LABELS[role] || role)
 }
 
-function UserDetails({ user, showRoles }: { user: PickerUser; showRoles: boolean }) {
+function UserDetails({ user, showRoles, showUserId }: { user: PickerUser; showRoles: boolean; showUserId: boolean }) {
   const roles = userRoleLabels(user)
   const departments = userDepartments(user)
+  const userId = showUserId && user.username ? `User ID: ${user.username}` : ''
   if (!showRoles || !user.roles) {
-    return departments.length > 0
-      ? <small>({departments.join(', ')})</small>
+    const details = [userId, departments.length > 0 ? `(${departments.join(', ')})` : ''].filter(Boolean)
+    return details.length > 0
+      ? <small>{details.join(' · ')}</small>
       : null
   }
-  return <small><strong>{roles.join(' · ') || 'No role assigned'}</strong>{departments.length > 0 && <> · {departments.join(', ')}</>}</small>
+  return <small>{userId && <>{userId} · </>}<strong>{roles.join(' · ') || 'No role assigned'}</strong>{departments.length > 0 && <> · {departments.join(', ')}</>}</small>
 }
 
 /**
@@ -58,7 +62,7 @@ function UserDetails({ user, showRoles }: { user: PickerUser; showRoles: boolean
  */
 export default function UserPicker({
   value, onChange, users, placeholder, multiple = false, disabled, style,
-  showRoles = true, searchPlaceholder, clearable = false, clearLabel = 'Unassigned',
+  showRoles = true, showUserId = false, variant = 'default', searchPlaceholder, clearable = false, clearLabel = 'Unassigned',
 }: UserPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -86,7 +90,7 @@ export default function UserPicker({
 
   function reposition() {
     const rect = triggerRef.current?.getBoundingClientRect()
-    if (rect) setPanelPos(computePanelPos(rect, multiple ? 260 : undefined))
+    if (rect) setPanelPos(computePanelPos(rect, multiple ? 260 : 0, variant === 'coordinator' ? 210 : undefined))
   }
 
   function toggleOpen() {
@@ -133,10 +137,10 @@ export default function UserPicker({
     }
   }, [open, multiple])
 
-  const panel = open && <div className="searchable-select-panel searchable-select-panel-fixed" style={{ top: panelPos.top, bottom: panelPos.bottom, left: panelPos.left, width: panelPos.width }}>
+  const panel = open && <div className={`searchable-select-panel searchable-select-panel-fixed ${variant === 'coordinator' ? 'coordinator-picker-panel' : ''}`} style={{ top: panelPos.top, bottom: panelPos.bottom, left: panelPos.left, width: panelPos.width }}>
     <div className="searchable-select-search">
       <IconSearch width={13} height={13} />
-      <ClearableSearchInput ref={inputRef} placeholder={searchPlaceholder || 'Search users...'} value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery('')} clearLabel="Clear user search" />
+      <ClearableSearchInput ref={inputRef} placeholder={searchPlaceholder || (variant === 'coordinator' ? 'Search name, user ID, role or department…' : 'Search users...')} value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery('')} clearLabel="Clear user search" />
     </div>
     <div className="searchable-select-list" role="listbox" aria-label={placeholder} aria-multiselectable={multiple || undefined}>
       {showClearOption && (
@@ -147,12 +151,23 @@ export default function UserPicker({
         const checked = selectedIds.has(String(user.id))
         return <div key={user.id} className={`searchable-select-option ${multiple ? 'multi-user-option' : 'user-assign-option'} ${checked ? 'active' : ''}`} role="option" aria-selected={checked} tabIndex={0} onClick={() => select(user)} onKeyDown={(event) => { if (isKeyboardActivationKey(event.key)) { event.preventDefault(); select(user) } }}>
           {multiple && <span className={`multi-user-checkbox ${checked ? 'checked' : ''}`}>{checked && '✓'}</span>}
-          {multiple
-            ? <div className="multi-user-identity"><span>{user.full_name}</span><UserDetails user={user} showRoles={showRoles} /></div>
-            : <><span>{user.full_name}</span><UserDetails user={user} showRoles={showRoles} /></>}
+          {variant === 'coordinator' && !multiple
+            ? <div className="coordinator-picker-option-identity">
+                <div><strong>{user.full_name}</strong>{user.username && <span>User ID&nbsp; {user.username}</span>}</div>
+                <small><strong>{userRoleLabels(user).join(' · ') || 'No role assigned'}</strong>{userDepartments(user).length > 0 && <> · {userDepartments(user).join(', ')}</>}</small>
+              </div>
+            : multiple
+            ? <div className="multi-user-identity"><span>{user.full_name}</span><UserDetails user={user} showRoles={showRoles} showUserId={showUserId} /></div>
+            : <><span>{user.full_name}</span><UserDetails user={user} showRoles={showRoles} showUserId={showUserId} /></>}
         </div>
       })}
     </div>
+    {variant === 'coordinator' && (
+      <div className="coordinator-picker-footer">
+        <span>{filtered.length} eligible user{filtered.length === 1 ? '' : 's'}</span>
+        <span>Choose one to continue</span>
+      </div>
+    )}
   </div>
 
   if (multiple) {
@@ -172,11 +187,14 @@ export default function UserPicker({
   }
 
   const selectedUser = selectedUsers[0]
-  return <div className="searchable-select" ref={rootRef} style={style}>
+  return <div className={`searchable-select ${variant === 'coordinator' ? 'coordinator-user-picker' : ''}`} ref={rootRef} style={style}>
     <button ref={(element) => { triggerRef.current = element }} type="button" className="searchable-select-trigger" disabled={disabled} aria-expanded={open} onClick={toggleOpen}>
       <span className={selectedUser ? 'user-assign-selected' : 'muted'}>
-        <span>{selectedUser ? selectedUser.full_name : placeholder}</span>
-        {selectedUser && showRoles && selectedUser.roles && <small>{userRoleLabels(selectedUser).join(' · ') || 'No role assigned'}</small>}
+        <span>{selectedUser ? selectedUser.full_name : placeholder}{selectedUser && variant === 'coordinator' && selectedUser.username && <em>User ID&nbsp; {selectedUser.username}</em>}</span>
+        {selectedUser && ((showUserId && variant !== 'coordinator' && selectedUser.username) || (showRoles && selectedUser.roles)) && <small>
+          {showUserId && variant !== 'coordinator' && selectedUser.username && <>User ID: {selectedUser.username}{showRoles && selectedUser.roles ? ' · ' : ''}</>}
+          {showRoles && selectedUser.roles && (userRoleLabels(selectedUser).join(' · ') || 'No role assigned')}
+        </small>}
       </span>
       <span className="caret">&#9662;</span>
     </button>
