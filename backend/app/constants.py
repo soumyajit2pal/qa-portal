@@ -126,12 +126,27 @@ ROLE_LABELS = {
     Role.DEPARTMENT_HEAD_AGM: "Assistant General Manager - Department",
     Role.SM: "SM",
     Role.ADMIN: "Administrator",
-    Role.SCALE_6_PLUS: "Scale 6+",
+    Role.SCALE_6_PLUS: "Enterprise Viewer",
     Role.VIEW_ONLY: "View Only",
     Role.DOCUMENT_PORTAL_VIEWER: "Document Portal Viewer",
     Role.DOCUMENT_PORTAL_CONTRIBUTOR: "Document Portal Contributor",
     Role.DOCUMENT_PORTAL_MANAGER: "Document Portal Manager",
 }
+
+
+def format_role_labels(roles, separator: str = ", ") -> str:
+    """Replace renamed role codes for display without changing stored values.
+
+    Other role codes deliberately retain their existing export/API spelling;
+    this keeps the Enterprise Viewer rename backward-compatible everywhere
+    except the one label the user sees.
+    """
+    values = roles.split(",") if isinstance(roles, str) else (roles or [])
+    normalized = [str(role).strip() for role in values if role is not None and str(role).strip()]
+    return separator.join(
+        ROLE_LABELS[Role.SCALE_6_PLUS] if role == Role.SCALE_6_PLUS else role
+        for role in normalized
+    )
 
 # ---- Departments (Admin section: user mapping = department + role(s)) ----
 # NOTE: departments are now DB-backed (see models.Department / routers/departments.py)

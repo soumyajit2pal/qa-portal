@@ -33,7 +33,10 @@ server {
         proxy_pass http://document_portal:8000/api/document-portal;
         proxy_set_header Host document_portal;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # This nginx instance is the supplied deployment's trusted edge.
+        # Replace browser-supplied forwarding values with the observed peer.
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Request-ID $request_id;
     }
@@ -47,7 +50,8 @@ server {
         proxy_pass http://document_portal:8000/api/document-portal/;
         proxy_set_header Host document_portal;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Request-ID $request_id;
     }
@@ -62,7 +66,8 @@ server {
         proxy_pass http://backend:8000;
         proxy_set_header Host backend;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
     }
 
@@ -76,7 +81,8 @@ server {
         proxy_pass http://backend:8000;
         proxy_set_header Host backend;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
     }
 
@@ -85,7 +91,8 @@ server {
 
         proxy_set_header Host backend;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
     }
 

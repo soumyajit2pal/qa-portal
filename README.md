@@ -189,7 +189,7 @@ pip install -r requirements.txt
 
 cp ../.env.dev.example ../.env.dev
 # Edit ../.env.dev: DATABASE_URL and SECRET_KEY are required placeholders.
-export APP_ENV=dev              # selects ../.env.dev via the root-profile fallback
+export APP_ENV_FILE=.env.dev    # resolved relative to the repository root
 
 alembic upgrade head             # creates or upgrades the schema
 DEMO_SEED_PASSWORD='<unique temporary password>' python -m app.seed
@@ -203,16 +203,19 @@ The API is now at `http://localhost:8000`, with interactive docs at
 
 ### Configuration profiles
 
-The backend supports Spring-style configuration profiles through `APP_ENV`.
-For direct Uvicorn, seed, and Alembic runs, configuration is loaded in this
-order (highest precedence first): process environment,
-`backend/.env.<APP_ENV>`, `backend/.env`, then typed application defaults. If
-the backend-specific profile does not exist, the matching repository-root
-`.env.<APP_ENV>` file is used, allowing the same complete UAT profile to run
-under Compose or direct Uvicorn. When `backend/.env` is absent, the
-unprofiled root `.env` may select `APP_ENV`; its other values are deliberately
-not loaded by direct host runs because they may contain container-only paths.
-Profile names may contain letters, numbers, underscores, and hyphens.
+`APP_ENV_FILE` is the explicit configuration-file selector for both Compose
+and direct Python runs. Configuration precedence is: process environment,
+the selected `APP_ENV_FILE`, then typed application defaults. Relative file
+paths resolve from the repository root. When Compose is used, it reads the
+host file, injects its values, and mounts the same file read-only at
+`/run/config/qualityops.env` in each Python container. `APP_ENV` still
+identifies the runtime profile and may contain letters, numbers, underscores,
+and hyphens.
+
+For backward compatibility only, when `APP_ENV_FILE` is unset the backend
+retains legacy implicit discovery of `backend/.env.<APP_ENV>`, repository-root
+`.env.<APP_ENV>`, and `backend/.env`. New deployments should always set
+`APP_ENV_FILE` so no implicit `.env` file can compete with the intended source.
 
 ```bash
 cd backend
@@ -220,8 +223,8 @@ cp ../.env.uat.example ../.env.uat
 # Populate required database, secret, hostname, certificate and key settings.
 # One-time direct-host key provisioning (the generator refuses to overwrite):
 python -m app.generate_login_key login-private.pem
-APP_ENV=uat uvicorn app.main:app --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
-APP_ENV=uat alembic upgrade head
+APP_ENV_FILE=.env.uat uvicorn app.main:app --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+APP_ENV_FILE=.env.uat alembic upgrade head
 ```
 
 UAT application traffic requires HTTPS. The Uvicorn command above is a private
@@ -232,6 +235,14 @@ frontend. Relative certificate directories resolve from the repository root,
 matching Compose. Vite builds do not require certificate files. Open `https://localhost:5173`
 using a certificate that includes localhost. Vite derives forwarded scheme from
 the actual TLS socket. See `UAT_HTTPS_Recovery.md` for direct and Compose cases.
+
+Audit records store the client address visible at the trusted HTTPS edge. A
+browser opened at `https://localhost:5173` is genuinely connected over loopback,
+so its Client IP is `127.0.0.1` (or `::1`). To verify a workstation/LAN address,
+open Vite through a certificate-covered hostname or LAN IP from that client,
+for example `https://<uat-host-ip>:5173`. In production, use the real portal DNS
+name. NAT and VPN gateways may make their egress address the network-visible
+client IP; the application must not accept a browser-supplied replacement.
 
 The active profile is included as `profile` in `/api/health` without exposing
 any configuration values or secrets.
@@ -335,7 +346,8 @@ cp .env.dev.example .env.dev
 mkdir -p secrets
 chmod 700 secrets
 (cd backend && python -m app.generate_login_key ../secrets/login-private.pem)
-docker compose --env-file .env.dev up --build
+docker compose -f docker-compose.yml -f docker-compose.static-ip.yml \
+  --env-file .env.dev up --build
 
 # UAT/deployed profile. The static overlay gives nginx the exact address
 # configured in FORWARDED_ALLOW_IPS.
@@ -351,7 +363,9 @@ docker compose -f docker-compose.yml -f docker-compose.static-ip.yml \
 
 Each root profile file is a complete Compose environment and includes both
 `APP_ENV=uat` and `APP_ENV_FILE=.env.uat` (using the matching profile name).
-Compose uses `APP_ENV_FILE` as each Python service's `env_file`; variables set
+Compose requires `APP_ENV_FILE`, uses it as each Python service's `env_file`,
+and mounts it read-only inside those containers at `/run/config/qualityops.env`.
+There is no hidden `.env` default at the service boundary. Variables set
 directly by the deployment environment continue to take precedence. Use
 `.env.dev.example`, `.env.uat.example`, and `.env.prod.example` as safe
 templates, and do not commit populated profile files containing secrets.
@@ -469,7 +483,11 @@ responsibilities; after replacing a mounted certificate, recreate or reload the 
 If an external load balancer terminates public TLS, it must either re-encrypt to this nginx TLS
 listener or the deployment must supply and review a different frontend configuration. The Python
 services must remain private, and their `FORWARDED_ALLOW_IPS` value must trust only the actual
-nginx/reverse-proxy peer.
+nginx/reverse-proxy peer. The supplied nginx configuration treats its direct TCP peer as the
+client and overwrites inbound forwarding headers. When a controlled load balancer sits in front,
+configure nginx's `real_ip` module with only that balancer's CIDRs so `$remote_addr` becomes the
+validated original client before it is forwarded. Without that explicit trust configuration, the
+audited Client IP will correctly be the load balancer address rather than an untrusted header.
 
 ### Verification status
 
@@ -486,10 +504,41 @@ Every user account has a `login_type` of either **Standard** or **LDAP**:
 - **Standard** accounts store a local bcrypt password hash and log in the usual
   username/password way.
 - **LDAP** accounts have no local password at all — every login attempt is verified live
-  against your directory server (`app/auth.py::ldap_authenticate`). Configure the connection
-  via `LDAP_*` variables in the selected deployment profile (two binding strategies are supported:
-  search-then-bind with a service account, or a direct DN template). Seeded demo users are all
-  Standard; there's no seeded LDAP account since it depends on a real directory to test against.
+  against your directory server (`app/auth.py::ldap_authenticate`). System Administrators manage
+  the effective connection under **Administration → System tools → LDAP configuration**. The
+  `LDAP_*` values supplied by `APP_ENV_FILE` are bootstrap/recovery defaults only: once the Admin
+  page is saved, its database record is authoritative and changes apply without an application restart.
+  Two binding strategies are supported: search-then-bind with a service account, or a direct DN
+  template. Seeded demo users are all Standard; there's no seeded LDAP account since it depends on
+  a real directory to test against.
+
+For real directory authentication, use certificate-verified LDAPS:
+
+```env
+LDAP_SERVER_URI=ldaps://directory.example:636
+LDAP_USE_SSL=true
+LDAP_CA_CERT_FILE=/run/secrets/qualityops/ldap-ca.pem
+LDAP_BASE_DN=dc=example,dc=com
+LDAP_USER_SEARCH_FILTER=(sAMAccountName={username})
+LDAP_BIND_DN=cn=qualityops-bind,ou=service-accounts,dc=example,dc=com
+LDAP_BIND_PASSWORD=secret-store-value
+```
+
+The Admin page provides a connection-and-user test that evaluates the unsaved form values. Test
+credentials are never stored. The service-account bind password is write-only in the UI and is
+stored with authenticated encryption derived from the deployment `SECRET_KEY`; keep that key
+stable. After an intentional key rotation, re-enter and save the LDAP bind password. Every save
+and test is recorded in the audit log without credentials. Keep at least one active Standard
+System Administrator account for recovery from directory or configuration failures.
+
+`LDAP_CA_CERT_FILE` is a PEM CA bundle used to verify the directory server's
+certificate and hostname. If it is empty, the backend uses the operating-system
+trust store. For Compose, place `ldap-ca.pem` in `LOGIN_ENCRYPTION_KEY_HOST_DIR`;
+the existing read-only mount exposes it at `/run/secrets/qualityops/ldap-ca.pem`.
+`LDAP_USE_SSL=true` with an `ldaps://` URI is strongly recommended and uses modern
+client defaults (TLS 1.2 or newer). Administrators may explicitly save a plaintext
+LDAP configuration, but the Admin page presents a prominent risk warning and requires
+confirmation because bind credentials and user passwords will lack transport encryption.
 
 **LDAP accounts are provisioned just-in-time, not pre-created.** An admin does *not* need to
 create an LDAP user up front. The first time someone logs in with a username the app doesn't
@@ -550,7 +599,8 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
   reverse-proxy networks. Login and action audit records will then store the
   original client from `X-Forwarded-For` instead of the proxy's address. The
   supplied nginx configuration already forwards `X-Real-IP` and
-  `X-Forwarded-For` and sets `X-Forwarded-Proto`; Uvicorn accepts that scheme only from
+  `X-Forwarded-For` from its observed TCP peer and sets `X-Forwarded-Proto`;
+  Uvicorn accepts that scheme only from
   `FORWARDED_ALLOW_IPS`, allowing the deployed backend's HTTPS guard to reject spoofed traffic.
 - Add MFA at the identity-provider layer for LDAP/AD-backed logins, per the non-functional
   requirements (5.1) — this app only performs the LDAP bind, not step-up/MFA.

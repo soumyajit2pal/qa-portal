@@ -6,7 +6,7 @@ import { Card, ErrorText, Modal, PageHeader, Table } from '../../components/Comm
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { useAuth } from '../../context/AuthContext'
-import { hasRole } from '../../constants'
+import { formatRoleLabels, hasRole } from '../../constants'
 
 const EVENT_TYPES = ['', 'AUTHENTICATION', 'ACCESS_MANAGEMENT', 'DATA_CHANGE', 'ACCESS']
 
@@ -104,7 +104,7 @@ export default function AuditLog() {
           { key: 'action', header: 'Action', render: (r) => label(r.action) },
           { key: 'outcome', header: 'Outcome', render: (r) => <span className={`badge ${r.outcome === 'FAILED' ? 'badge-red' : 'badge-green'}`}>{r.outcome}</span> },
           { key: 'path', header: 'Access / Target', render: (r) => <div><div>{[r.method, r.path].filter(Boolean).join(' ') || '—'}</div>{(r.target_name || r.target_id) && <div className="muted small">{r.target_type}: {r.target_name || r.target_id}</div>}</div>, filterValue: (r) => `${r.method || ''} ${r.path || ''} ${r.target_name || ''} ${r.target_id || ''}` },
-          { key: 'ip_address', header: 'Source IP', render: (r) => r.ip_address || '—' },
+          { key: 'ip_address', header: 'Client IP', render: (r) => r.ip_address || '—' },
         ]} rows={rows} />
       </Card>
 
@@ -113,10 +113,10 @@ export default function AuditLog() {
           <div className="audit-detail-grid">
             <div><span>Timestamp</span><strong>{formatDateTimeIST(selected.created_at)}</strong></div>
             <div><span>Actor</span><strong>{selected.actor_name || selected.actor_username || 'Unauthenticated'}</strong></div>
-            <div><span>Roles at the time</span><strong>{selected.actor_roles || '—'}</strong></div>
+            <div><span>Roles at the time</span><strong>{formatRoleLabels(selected.actor_roles) || '—'}</strong></div>
             <div><span>Event / action</span><strong>{label(selected.event_type)} · {label(selected.action)}</strong></div>
             <div><span>Outcome / HTTP status</span><strong>{selected.outcome} · {selected.status_code || '—'}</strong></div>
-            <div><span>Source</span><strong>{selected.ip_address || '—'}</strong></div>
+            <div><span>Client IP</span><strong>{selected.ip_address || '—'}</strong></div>
             <div><span>Request</span><strong>{[selected.method, selected.path].filter(Boolean).join(' ') || '—'}</strong></div>
             <div><span>Correlation ID</span><strong>{selected.request_id || '—'}</strong></div>
             <div><span>Target</span><strong>{[selected.target_type, selected.target_name || selected.target_id].filter(Boolean).join(' · ') || '—'}</strong></div>

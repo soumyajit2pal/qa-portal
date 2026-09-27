@@ -14,7 +14,7 @@ from ..deps import (
     require_entity_workspace_visibility,
     department_unit_visibility_condition, require_department_unit_visibility, require_department_unit_action_scope,
 )
-from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES
+from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, format_role_labels
 from ..pdf_export import StructuredTableValue, build_request_detail_pdf
 from .. import documents as doc_store
 from ..workflow_authority import is_system_admin
@@ -1161,7 +1161,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
     history = []
     for h in history_rows:
         history.append((h.step_name or "—", h.decision or "—", uname(h.actor_id) or "—",
-                         h.actor_role or "—", h.comments or "—",
+                         format_role_labels(h.actor_role) or "—", h.comments or "—",
                          h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
 
     buf = build_request_detail_pdf(

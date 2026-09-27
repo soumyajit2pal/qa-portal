@@ -6,7 +6,10 @@ services:
       dockerfile: Dockerfile
 
     env_file:
-      - ${APP_ENV_FILE:-.env}
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}
+
+    environment:
+      APP_ENV_FILE: /run/config/qualityops.env
 
     command: ["alembic", "upgrade", "head"]
 
@@ -20,6 +23,11 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
 
+    volumes:
+      # The same read-only file is shared by all Python services; lowercase z
+      # gives it a shared SELinux label rather than relabeling it per container.
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}:/run/config/qualityops.env:ro,z
+
     restart: "no"
 
   backend:
@@ -32,9 +40,10 @@ services:
       - "8000"
 
     env_file:
-      - ${APP_ENV_FILE:-.env}
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}
 
     environment:
+      APP_ENV_FILE: /run/config/qualityops.env
       UPLOAD_STORAGE_ROOT: /data/qualityops/uploads
       DOCUMENT_PORTAL_EMBEDDED: "false"
       DOCUMENT_PORTAL_STORAGE_HOST_PATH: /data/qualityops/document-storage/repository
@@ -53,6 +62,7 @@ services:
       - exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers "$${WEB_CONCURRENCY:-4}" --proxy-headers --forwarded-allow-ips "$${FORWARDED_ALLOW_IPS:?Set FORWARDED_ALLOW_IPS to the nginx container IP in the selected environment file}"
 
     volumes:
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}:/run/config/qualityops.env:ro,z
       - ${LOGIN_ENCRYPTION_KEY_HOST_DIR:-./secrets}:/run/secrets/qualityops:ro,Z
       - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/uploads:/data/qualityops/uploads:Z
       - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/logs:/app/logs:Z
@@ -102,9 +112,10 @@ services:
       - "8000"
 
     env_file:
-      - ${APP_ENV_FILE:-.env}
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}
 
     environment:
+      APP_ENV_FILE: /run/config/qualityops.env
       WEB_CONCURRENCY: ${DOCUMENT_PORTAL_WEB_CONCURRENCY:-2}
       DB_POOL_SIZE: ${DOCUMENT_PORTAL_DB_POOL_SIZE:-2}
       DB_MAX_OVERFLOW: ${DOCUMENT_PORTAL_DB_MAX_OVERFLOW:-1}
@@ -117,6 +128,7 @@ services:
       - mkdir -p "$$DOCUMENT_PORTAL_STORAGE_HOST_PATH" "$$TMPDIR" && exec uvicorn app.document_portal_main:app --host 0.0.0.0 --port 8000 --workers "$$WEB_CONCURRENCY" --proxy-headers --forwarded-allow-ips "$${FORWARDED_ALLOW_IPS:?Set FORWARDED_ALLOW_IPS to the nginx container IP in the selected environment file}"
 
     volumes:
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}:/run/config/qualityops.env:ro,z
       - ${DOCUMENT_PORTAL_STORAGE_HOST_PATH:-./storage/document-portal}:/data/qualityops/document-storage:z
       - qa_portal_document_logs:/app/logs
 

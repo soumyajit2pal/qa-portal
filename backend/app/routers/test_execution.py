@@ -19,7 +19,7 @@ from ..deps import (
     get_project_or_404 as _get_project_or_404,
     require_project_visibility,
 )
-from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES
+from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES, format_role_labels
 from ..workspace_service import (
     active_workspace_scope_ids, current_workspace_id, selectable_workspace_ids,
     workspace_context,
@@ -2037,7 +2037,7 @@ def export_test_cycle(
             "Activity", "Decision", "Actor", "Role Snapshot", "Comments", "Timestamp",
         ], [[
             action.step_name, action.decision, action.actor_name or "System",
-            action.actor_role, action.comments, action.created_at,
+            format_role_labels(action.actor_role), action.comments, action.created_at,
         ] for action in actions],
         subtitle="Assignments, execution actions, defect links, and membership changes.",
         wrap_headers={"Comments"}, date_headers={"Timestamp"}, status_headers={"Decision"},

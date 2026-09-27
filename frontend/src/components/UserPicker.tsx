@@ -23,6 +23,7 @@ export interface UserPickerProps {
   searchPlaceholder?: string
   clearable?: boolean
   clearLabel?: string
+  ariaLabel?: string
 }
 
 export interface PickerUser {
@@ -62,7 +63,7 @@ function UserDetails({ user, showRoles, showUserId }: { user: PickerUser; showRo
  */
 export default function UserPicker({
   value, onChange, users, placeholder, multiple = false, disabled, style,
-  showRoles = true, showUserId = false, variant = 'default', searchPlaceholder, clearable = false, clearLabel = 'Unassigned',
+  showRoles = true, showUserId = false, variant = 'default', searchPlaceholder, clearable = false, clearLabel = 'Unassigned', ariaLabel,
 }: UserPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -90,7 +91,7 @@ export default function UserPicker({
 
   function reposition() {
     const rect = triggerRef.current?.getBoundingClientRect()
-    if (rect) setPanelPos(computePanelPos(rect, multiple ? 260 : 0, variant === 'coordinator' ? 210 : undefined))
+    if (rect) setPanelPos(computePanelPos(rect, multiple ? 260 : 0, variant === 'coordinator' ? 410 : undefined))
   }
 
   function toggleOpen() {
@@ -142,19 +143,24 @@ export default function UserPicker({
       <IconSearch width={13} height={13} />
       <ClearableSearchInput ref={inputRef} placeholder={searchPlaceholder || (variant === 'coordinator' ? 'Search name, user ID, role or department…' : 'Search users...')} value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery('')} clearLabel="Clear user search" />
     </div>
-    <div className="searchable-select-list" role="listbox" aria-label={placeholder} aria-multiselectable={multiple || undefined}>
+    <div className="searchable-select-list" role="listbox" aria-label={`${ariaLabel || placeholder} options`} aria-multiselectable={multiple || undefined}>
       {showClearOption && (
         <div className={`searchable-select-option ${selectedIds.size === 0 ? 'active' : ''}`} role="option" aria-selected={selectedIds.size === 0} tabIndex={0} onClick={() => { onChange(''); close() }} onKeyDown={(event) => { if (isKeyboardActivationKey(event.key)) { event.preventDefault(); onChange(''); close() } }}>{clearLabel}</div>
       )}
       {filtered.length === 0 && !showClearOption && <div className="searchable-select-empty">{candidates.length ? 'No matching users' : 'No eligible users'}</div>}
       {filtered.map((user) => {
         const checked = selectedIds.has(String(user.id))
+        const roleLabels = userRoleLabels(user)
+        const departmentLabels = userDepartments(user)
         return <div key={user.id} className={`searchable-select-option ${multiple ? 'multi-user-option' : 'user-assign-option'} ${checked ? 'active' : ''}`} role="option" aria-selected={checked} tabIndex={0} onClick={() => select(user)} onKeyDown={(event) => { if (isKeyboardActivationKey(event.key)) { event.preventDefault(); select(user) } }}>
           {multiple && <span className={`multi-user-checkbox ${checked ? 'checked' : ''}`}>{checked && '✓'}</span>}
           {variant === 'coordinator' && !multiple
             ? <div className="coordinator-picker-option-identity">
-                <div><strong>{user.full_name}</strong>{user.username && <span>User ID&nbsp; {user.username}</span>}</div>
-                <small><strong>{userRoleLabels(user).join(' · ') || 'No role assigned'}</strong>{userDepartments(user).length > 0 && <> · {userDepartments(user).join(', ')}</>}</small>
+                <div className="coordinator-picker-option-heading"><strong>{user.full_name}</strong>{user.username && <span>User ID&nbsp; {user.username}</span>}</div>
+                <div className="coordinator-picker-option-meta">
+                  <span><em>Role</em><strong>{roleLabels.join(' · ') || 'No role assigned'}</strong></span>
+                  <span><em>Department</em><strong>{departmentLabels.join(', ') || 'No department assigned'}</strong></span>
+                </div>
               </div>
             : multiple
             ? <div className="multi-user-identity"><span>{user.full_name}</span><UserDetails user={user} showRoles={showRoles} showUserId={showUserId} /></div>
@@ -172,7 +178,7 @@ export default function UserPicker({
 
   if (multiple) {
     return <div className="multi-user-select" ref={rootRef} style={style}>
-      <div ref={(element) => { triggerRef.current = element }} className={`multi-user-select-trigger ${disabled ? 'disabled' : ''}`} onClick={toggleOpen} role="button" aria-expanded={open} aria-disabled={disabled} tabIndex={disabled ? -1 : 0} onKeyDown={(event) => {
+      <div ref={(element) => { triggerRef.current = element }} className={`multi-user-select-trigger ${disabled ? 'disabled' : ''}`} onClick={toggleOpen} role="button" aria-label={ariaLabel || placeholder} aria-expanded={open} aria-disabled={disabled} tabIndex={disabled ? -1 : 0} onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleOpen() }
         if (event.key === 'Escape') close()
       }}>
@@ -188,7 +194,7 @@ export default function UserPicker({
 
   const selectedUser = selectedUsers[0]
   return <div className={`searchable-select ${variant === 'coordinator' ? 'coordinator-user-picker' : ''}`} ref={rootRef} style={style}>
-    <button ref={(element) => { triggerRef.current = element }} type="button" className="searchable-select-trigger" disabled={disabled} aria-expanded={open} onClick={toggleOpen}>
+    <button ref={(element) => { triggerRef.current = element }} type="button" className="searchable-select-trigger" disabled={disabled} aria-label={ariaLabel || placeholder} aria-expanded={open} onClick={toggleOpen}>
       <span className={selectedUser ? 'user-assign-selected' : 'muted'}>
         <span>{selectedUser ? selectedUser.full_name : placeholder}{selectedUser && variant === 'coordinator' && selectedUser.username && <em>User ID&nbsp; {selectedUser.username}</em>}</span>
         {selectedUser && ((showUserId && variant !== 'coordinator' && selectedUser.username) || (showRoles && selectedUser.roles)) && <small>

@@ -3,11 +3,11 @@
 Configuration precedence, from highest to lowest, is:
 
 1. Variables already present in the process environment.
-2. ``backend/.env.<APP_ENV>`` (or the repository-root profile file when the
-   backend-specific file does not exist).
-3. ``backend/.env``. When it is absent, the repository-root ``.env`` may
-   select ``APP_ENV`` but its container-only values are not loaded into a
-   direct host process.
+2. The file named by ``APP_ENV_FILE``, when explicitly selected. Compose both
+   injects its values and mounts it read-only at a stable container path.
+3. Legacy implicit profile discovery (only when ``APP_ENV_FILE`` is unset):
+   ``backend/.env.<APP_ENV>`` / repository-root ``.env.<APP_ENV>``, then
+   ``backend/.env``.
 4. Typed defaults declared by :class:`Settings`.
 
 Docker Compose supplies the selected environment as real process variables,
@@ -46,11 +46,38 @@ def load_environment(
     backend_dir: Path = BACKEND_DIR,
     environ: MutableMapping[str, str] = os.environ,
 ) -> tuple[str, tuple[Path, ...]]:
-    """Load the base and active-profile dotenv files without overriding OS env.
+    """Load the selected dotenv file without overriding process variables.
 
     The optional parameters keep the loader straightforward to test. Returned
     paths are the files that actually existed and were considered.
     """
+    process_keys = set(environ)
+    explicit_file = (environ.get("APP_ENV_FILE") or "").strip()
+    if explicit_file:
+        if "\x00" in explicit_file:
+            raise RuntimeError("APP_ENV_FILE contains an invalid null byte.")
+        selected_path = Path(explicit_file).expanduser()
+        if not selected_path.is_absolute():
+            # Repository-root relative paths match Compose's `.env.uat` style.
+            # Tests or standalone layouts that pass a directory other than a
+            # conventional `backend/` resolve relative to that directory.
+            project_dir = backend_dir.parent if backend_dir.name == "backend" else backend_dir
+            selected_path = project_dir / selected_path
+        if not selected_path.is_file():
+            raise RuntimeError("APP_ENV_FILE must identify a readable regular file.")
+        try:
+            selected_values = dotenv_values(selected_path)
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError("APP_ENV_FILE could not be read as a UTF-8 environment file.") from exc
+        profile = _validated_profile(
+            environ.get("APP_ENV") or selected_values.get("APP_ENV")
+        )
+        merged = {**selected_values, "APP_ENV": profile, "APP_ENV_FILE": explicit_file}
+        for key, value in merged.items():
+            if key not in process_keys and value is not None:
+                environ[key] = value
+        return profile, (selected_path,)
+
     base_file = backend_dir / ".env"
     base_values = dotenv_values(base_file) if base_file.is_file() else {}
     # Compose reads the repository-root .env itself and exports every value to
@@ -80,7 +107,6 @@ def load_environment(
     # Capture genuine process variables before loading either file. This lets
     # profile values override the base file while preserving deployment-level
     # environment overrides.
-    process_keys = set(environ)
     merged = {**base_values, **profile_values, "APP_ENV": profile}
     for key, value in merged.items():
         if key not in process_keys and value is not None:
@@ -99,6 +125,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
 
     app_env: str = DEFAULT_PROFILE
+    app_env_file: str = ""
     database_url: str | None = None
     secret_key: str = ""
     login_encryption_private_key_file: str | None = None

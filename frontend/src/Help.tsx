@@ -34,7 +34,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'roles', number: '02', title: 'Roles and access model',
     summary: 'What each role can do, department scope, assignment, and separation of duties.',
-    keywords: 'role access permission requester business analyst application owner sm department head qa engineer tester qa lead security analyst executive administrator scale 6 view only parent workspace viewer',
+    keywords: 'role access permission requester business analyst application owner sm department head qa engineer tester qa lead security analyst executive administrator enterprise viewer view only parent workspace viewer',
   },
   {
     id: 'multi-role', number: '03', title: 'Multiple roles on one account',
@@ -104,7 +104,7 @@ const ROLE_ROWS = [
   ['QA Lead', 'Verify readiness, assign QA/Security work, review test cases, manage testing, and approve QA Clearance.', 'Cross-department QA delivery role.'],
   ['Security Analyst (QA)', 'Configure and perform SAST/DAST scans, validate findings, rescan, and review suppression requests.', 'Security QA role within an assigned workspace.'],
   ['Chief Manager / AGM – QA', 'Approve QA Clearance and provide executive QA oversight.', 'QA governance role. Local administration is assigned separately.'],
-  ['Scale 6+', 'Browse governed data in every active workspace, including the combined All Data Report.', 'Confidential read-only system role; it cannot create, edit, execute or approve workflow records.'],
+  ['Enterprise Viewer', 'Browse governed data in every active workspace, including the combined All Data Report.', 'Confidential read-only system role; it cannot create, edit, execute or approve workflow records.'],
   ['View Only', 'Browse organisation-wide requests, testing records, dashboards, and reports without changing workflow data.', 'Cross-department read access; Document Portal requires a separate Document Portal role.'],
   ['Parent Workspace Viewer', 'View the parent and every active direct child without changing business or workspace data.', 'Assigned on one non-default top-level workspace.'],
   ['Parent Workspace Admin', 'View every active direct child and manage its direct members.', 'Workspace names, hierarchy, status, routing, and coordinator assignments remain under System Administrator control.'],

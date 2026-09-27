@@ -5,6 +5,7 @@ import { Card, Table, Badge, ErrorText, PageHeader } from '../../components/Comm
 import { ApprovalActionOut, UserOption } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
+import { formatRoleLabels } from '../../constants'
 
 // SAST and DAST log distinctly now ("SAST" / "DAST", not a shared
 // "SAST_DAST") -- see the long comment on routers/sast_dast.py::_log().
@@ -69,7 +70,7 @@ export default function Approvals() {
           { key: 'step_name', header: 'Step' },
           { key: 'decision', header: 'Decision', render: (r) => <Badge status={r.decision} /> },
           { key: 'actor_id', header: 'Actor', render: (r) => userName(users, r.actor_id) || '—', filterValue: (r) => userName(users, r.actor_id) || '' },
-          { key: 'actor_role', header: 'Actor Role' },
+          { key: 'actor_role', header: 'Actor Role', render: (r) => formatRoleLabels(r.actor_role) || '—' },
           { key: 'comments', header: 'Comments' },
           { key: 'created_at', header: 'When', render: (r) => formatDateTimeIST(r.created_at) },
         ]} rows={rows} />

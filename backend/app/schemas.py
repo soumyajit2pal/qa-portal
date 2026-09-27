@@ -299,6 +299,75 @@ class AdminTestEmailResult(BaseModel):
     message: str
 
 
+class LDAPSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    server_uri: str = Field(max_length=500)
+    use_ssl: bool = True
+    ca_cert_file: str = Field(default="", max_length=1000)
+    base_dn: str = Field(default="", max_length=1000)
+    user_search_filter: str = Field(default="(sAMAccountName={username})", max_length=1000)
+    bind_dn: str = Field(default="", max_length=1000)
+    bind_password: Optional[str] = Field(default=None, max_length=4096)
+    user_dn_template: str = Field(default="", max_length=1000)
+    attr_full_name: str = Field(default="displayName", max_length=100)
+    attr_email: str = Field(default="mail", max_length=100)
+    attr_department: str = Field(default="department", max_length=100)
+
+    @field_validator(
+        "server_uri", "ca_cert_file", "base_dn", "user_search_filter", "bind_dn",
+        "user_dn_template", "attr_full_name", "attr_email", "attr_department",
+    )
+    @classmethod
+    def strip_ldap_values(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_ldap_configuration(self):
+        if not self.enabled:
+            return self
+        if not self.server_uri:
+            raise ValueError("LDAP server URI is required when LDAP authentication is enabled")
+        search_bind = bool(self.bind_dn and self.base_dn)
+        direct_bind = bool(self.user_dn_template)
+        if not search_bind and not direct_bind:
+            raise ValueError("Configure a bind DN and base DN, or a direct user DN template")
+        if "{username}" not in (self.user_search_filter if search_bind else self.user_dn_template):
+            raise ValueError("The selected LDAP username pattern must contain {username}")
+        return self
+
+
+class LDAPSettingsOut(BaseModel):
+    enabled: bool
+    server_uri: str
+    use_ssl: bool
+    ca_cert_file: str
+    base_dn: str
+    user_search_filter: str
+    bind_dn: str
+    user_dn_template: str
+    attr_full_name: str
+    attr_email: str
+    attr_department: str
+    bind_password_configured: bool
+    bind_password_unavailable: bool = False
+    source: Literal["environment", "database"]
+    configured: bool
+    updated_at: Optional[datetime.datetime] = None
+    fallback_file: str = ""
+
+
+class LDAPSettingsTest(LDAPSettingsUpdate):
+    test_username: str = Field(min_length=1, max_length=255)
+    test_password: str = Field(min_length=1, max_length=4096)
+
+
+class LDAPSettingsTestResult(BaseModel):
+    ok: bool
+    message: str
+
+
 class AuditLogOut(ORMModel):
     id: int
     event_type: str

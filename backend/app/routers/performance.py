@@ -14,7 +14,7 @@ from ..deps import (
     department_unit_visibility_condition, require_department_unit_visibility,
     require_department_unit_action_scope, has_department_unit_action_scope,
 )
-from ..constants import Role, PERFORMANCE_EDITABLE_STATUSES, PERFORMANCE_TESTER_REASSIGNABLE_STATUSES, PERFORMANCE_STATUS_LABELS, PERFORMANCE_TERMINAL_STATUSES, is_readiness_evidence_editable, application_name_block_message
+from ..constants import Role, PERFORMANCE_EDITABLE_STATUSES, PERFORMANCE_TESTER_REASSIGNABLE_STATUSES, PERFORMANCE_STATUS_LABELS, PERFORMANCE_TERMINAL_STATUSES, format_role_labels, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
@@ -850,7 +850,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
     history = []
     for h in history_rows:
         history.append((h.step_name or "—", h.decision or "—", uname(h.actor_id) or "—",
-                         h.actor_role or "—", h.comments or "—",
+                         format_role_labels(h.actor_role) or "—", h.comments or "—",
                          h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
 
     buf = build_request_detail_pdf(

@@ -13,7 +13,7 @@ from ..deps import (
     resolve_entity_workspace_id, active_qa_workspace_scope_ids, viewable_project_ids,
 )
 from ..workspace_service import selectable_workspace_ids
-from ..constants import QAStatus, GatewayStatus, REQUEST_TYPES, Role
+from ..constants import QAStatus, GatewayStatus, REQUEST_TYPES, Role, format_role_labels
 from ..pdf_export import (
     DIGITAL_SIGNATURE_METHOD,
     QA_CLEARANCE_SIGNED_TYPE,
@@ -920,7 +920,7 @@ def audit_evidence(date_from: str | None = None, date_to: str | None = None, db:
         )
         out.append({
             "Entity Type": a.entity_type, "Entity ID": a.entity_id, "Step": a.step_name,
-            "Decision": a.decision, "Actor": names.get(a.actor_id), "Role": a.actor_role,
+            "Decision": a.decision, "Actor": names.get(a.actor_id), "Role": format_role_labels(a.actor_role),
             "Signature Type": signature_type,
             "Signature ID": signature.signature_id if signature else "",
             "Signature Method": DIGITAL_SIGNATURE_METHOD if signature else "",

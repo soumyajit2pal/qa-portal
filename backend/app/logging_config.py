@@ -17,14 +17,14 @@ import logging.handlers
 import os
 from pathlib import Path
 
-from .config import load_environment
+from .config import settings as _settings  # importing config loads APP_ENV_FILE once
 from .process_logging import ProcessSafeRotatingFileHandler
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-# main.py configures logging before database.py is imported, so logging must
-# load the backend profile itself or profile logging values would be ignored.
-load_environment()
+# main.py configures logging before database.py is imported. Importing the
+# shared settings module above has already loaded the selected environment;
+# do not run the loader twice, especially when APP_ENV_FILE is explicit.
 
 _configured_log_dir = Path(os.getenv("LOG_DIR", str(BACKEND_DIR / "logs")))
 LOG_DIR = str(_configured_log_dir if _configured_log_dir.is_absolute() else BACKEND_DIR / _configured_log_dir)

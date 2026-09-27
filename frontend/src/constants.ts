@@ -42,7 +42,7 @@ export const ROLE_LABELS: Record<string, string> = {
   // sends this role to a non-Admin viewer at all (see auth.py's
   // _redact_confidential_roles), so this label being present here doesn't by
   // itself expose anything to anyone who isn't already an Admin.
-  SCALE_6_PLUS: 'Scale 6+',
+  SCALE_6_PLUS: 'Enterprise Viewer',
   // System-Admin-only cross-department read profile. The backend enforces
   // this as an exclusive role and rejects all business-data mutations.
   VIEW_ONLY: 'View Only',
@@ -54,6 +54,18 @@ export const ROLE_LABELS: Record<string, string> = {
 export const ALL_ROLES = Object.keys(ROLE_LABELS).filter((role) => ![
   'WORKSPACE_MEMBER', 'WORKSPACE_VIEWER', 'PARENT_WORKSPACE_VIEWER', 'PARENT_WORKSPACE_ADMIN',
 ].includes(role))
+
+export function formatRoleLabels(
+  value?: string | string[] | null,
+  separator = ', ',
+): string {
+  const roles = Array.isArray(value) ? value : (value || '').split(',')
+  return roles
+    .map((role) => role.trim())
+    .filter(Boolean)
+    .map((role) => ROLE_LABELS[role] || role)
+    .join(separator)
+}
 
 // Requester and Developer intentionally carry identical workflow authority.
 // Business Analyst shares request initiation while remaining separately

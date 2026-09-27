@@ -15,7 +15,7 @@ from ..deps import (
     department_unit_visibility_condition, require_department_unit_visibility,
     require_department_unit_action_scope, has_department_unit_action_scope,
 )
-from ..constants import Role, QAStatus, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, QA_REQUEST_TERMINAL_STATUSES, QA_REQUEST_CREATOR_ROLES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
+from ..constants import Role, QAStatus, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, QA_REQUEST_TERMINAL_STATUSES, QA_REQUEST_CREATOR_ROLES, format_role_labels, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
@@ -1195,7 +1195,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
     for h in history_rows:
         actor = db.get(models.User, h.actor_id) if h.actor_id else None
         history.append((h.step_name or "—", h.decision or "—", actor.full_name if actor else "—",
-                         h.actor_role or "—", h.comments or "—",
+                         format_role_labels(h.actor_role) or "—", h.comments or "—",
                          h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
 
     buf = build_request_detail_pdf(

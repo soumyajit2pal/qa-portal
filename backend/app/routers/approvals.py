@@ -13,7 +13,7 @@ from ..deps import (
     require_department_visibility, viewable_project_ids,
 )
 from .. import documents as doc_store
-from ..constants import GatewayStatus, Role
+from ..constants import GatewayStatus, Role, format_role_labels
 
 router = APIRouter(prefix="/api/approvals", tags=["approval-workflow-engine"])
 
@@ -65,7 +65,8 @@ def _to_out(db: Session, row: models.ApprovalAction) -> dict:
     return {
         "id": row.id, "entity_type": row.entity_type, "entity_id": row.entity_id,
         "request_ref": _resolve_request_ref(db, row.entity_type, row.entity_id),
-        "step_name": row.step_name, "actor_id": row.actor_id, "actor_name": row.actor_name, "actor_role": row.actor_role,
+        "step_name": row.step_name, "actor_id": row.actor_id, "actor_name": row.actor_name,
+        "actor_role": format_role_labels(row.actor_role),
         "decision": row.decision, "comments": row.comments, "created_at": row.created_at,
     }
 
@@ -269,7 +270,7 @@ def list_approval_history(entity_type: Optional[str] = None, params: pagination.
             request_ref = _resolve_request_ref(db, row.entity_type, row.entity_id)
             searchable = (
                 row.entity_type, request_ref, f"#{row.entity_id}", row.step_name,
-                row.decision, row.actor_name, row.actor_role, row.comments,
+                row.decision, row.actor_name, format_role_labels(row.actor_role), row.comments,
                 row.previous_state, row.new_state,
             )
             if any(needle in str(value or "").casefold() for value in searchable):

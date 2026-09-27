@@ -6,25 +6,34 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader, type TableColumn } from '../../components/Common'
 import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole, isSelectableUser, uniqueWorkspaceAccess } from '../../constants'
-import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch, IconUsers } from '../../components/Icons'
+import { IconPlus, IconLock, IconShield, IconWarning, IconCheckCircle, IconSearch, IconUsers } from '../../components/Icons'
 import { UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult, QAWorkspaceOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import SearchableSelect from '../../components/SearchableSelect'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
+function adminInitials(value: string, fallback = '?') {
+  return (value.match(/[a-z0-9]+/gi) || [])
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+    .toUpperCase() || fallback
+}
+
 function CoordinatorRolePolicy() {
   const [roles, setRoles] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
   const [saved, setSaved] = useState(false)
   const options = ALL_ROLES.filter(role => !['ADMIN', 'SCALE_6_PLUS', 'VIEW_ONLY'].includes(role))
   useEffect(() => {
     let active = true
     api.get<string[]>('/api/auth/local-admin/assignable-roles')
       .then(value => { if (active) { setRoles(value); setLoading(false) } })
-      .catch(err => { if (active) setError(err) })
+      .catch(err => { if (active) { setError(err); setLoadFailed(true); setLoading(false) } })
     return () => { active = false }
   }, [])
   async function save() {
@@ -34,19 +43,26 @@ function CoordinatorRolePolicy() {
       setRoles(value); setSaved(true)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
-  return <section className="workflow-panel"><h4>Roles coordinators may assign</h4>
-    <p>This system-wide setting applies to all department coordinators. Their department and workspace access boundaries still apply. Administrator and confidential roles remain System Admin only.</p>
-    <p className="muted small">Removing a role here prevents future coordinator assignments; it does not remove roles already assigned to users. An empty selection disables role assignment by coordinators.</p>
+  return <section className="coordinator-policy-card">
+    <div className="coordinator-card-heading">
+      <span className="coordinator-card-icon" aria-hidden="true"><IconShield width={17} height={17} /></span>
+      <div><small>SYSTEM-WIDE POLICY</small><h5>Roles coordinators may assign</h5><p>Sets the working roles every department coordinator can grant. Workspace and department boundaries still apply.</p></div>
+    </div>
     <ErrorText error={error} />
-    {loading ? <p>Loading role policy…</p> : <><RoleChipSelect value={roles} roles={options} disabled={busy} onChange={value => { setRoles(value); setSaved(false) }} /><button type="button" className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save coordinator role policy'}</button></>}
-    {saved && <p role="status">Role policy saved. Coordinators will see the updated choices when they reopen their user management page.</p>}
+    {loading
+      ? <p className="muted small coordinator-policy-loading">Loading role policy…</p>
+      : loadFailed
+        ? <p className="muted small coordinator-policy-loading">Role policy is unavailable. Reload this page to try again.</p>
+        : <div className="coordinator-policy-control"><RoleChipSelect value={roles} roles={options} disabled={busy} onChange={value => { setRoles(value); setSaved(false) }} /><button type="button" className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save role policy'}</button></div>}
+    <p className="coordinator-policy-note"><IconLock width={12} height={12} /> Administrator and confidential roles remain System Admin only. Removing a role stops future assignments; existing user roles are unchanged.</p>
+    {saved && <p className="coordinator-policy-saved" role="status"><IconCheckCircle width={13} height={13} /> Role policy saved. Coordinators will see the new choices when they reopen user management.</p>}
   </section>
 }
 
-type AdminSection = 'users' | 'departments' | 'workspaces' | 'applications' | 'email'
+type AdminSection = 'users' | 'departments' | 'workspaces' | 'applications' | 'email' | 'ldap'
 type WorkspacePanel = 'members' | 'administrators' | 'settings'
 type WorkspaceMemberView = 'current' | 'add'
-const ADMIN_SECTIONS: AdminSection[] = ['users', 'departments', 'workspaces', 'applications', 'email']
+const ADMIN_SECTIONS: AdminSection[] = ['users', 'departments', 'workspaces', 'applications', 'email', 'ldap']
 
 // Shared by every page that needs a department picker -- departments are
 // DB-backed now (see backend app/models.py Department / routers/departments.py)
@@ -774,6 +790,179 @@ function TestEmailCard({ defaultRecipient }: { defaultRecipient?: string | null 
   )
 }
 
+type LDAPSettings = {
+  enabled: boolean
+  server_uri: string
+  use_ssl: boolean
+  ca_cert_file: string
+  base_dn: string
+  user_search_filter: string
+  bind_dn: string
+  user_dn_template: string
+  attr_full_name: string
+  attr_email: string
+  attr_department: string
+  bind_password?: string | null
+  bind_password_configured?: boolean
+  bind_password_unavailable?: boolean
+  source?: 'environment' | 'database'
+  configured?: boolean
+  updated_at?: string | null
+  fallback_file?: string
+}
+
+const EMPTY_LDAP_SETTINGS: LDAPSettings = {
+  enabled: false,
+  server_uri: '',
+  use_ssl: true,
+  ca_cert_file: '',
+  base_dn: '',
+  user_search_filter: '(sAMAccountName={username})',
+  bind_dn: '',
+  user_dn_template: '',
+  attr_full_name: 'displayName',
+  attr_email: 'mail',
+  attr_department: 'department',
+  bind_password: '',
+}
+
+function ldapTransportUsesTls(serverUri: string, useSsl: boolean) {
+  const normalizedUri = serverUri.trim().toLowerCase()
+  if (normalizedUri.startsWith('ldap://')) return false
+  if (normalizedUri.startsWith('ldaps://')) return true
+  return useSsl
+}
+
+function LDAPSettingsCard() {
+  const [form, setForm] = useState<LDAPSettings>(EMPTY_LDAP_SETTINGS)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [message, setMessage] = useState('')
+  const [savedWarning, setSavedWarning] = useState('')
+  const [confirmInsecureSave, setConfirmInsecureSave] = useState(false)
+  const [testUsername, setTestUsername] = useState('')
+  const [testPassword, setTestPassword] = useState('')
+
+  useEffect(() => {
+    let active = true
+    api.get<LDAPSettings>('/api/auth/admin/ldap-settings')
+      .then(settings => { if (active) setForm({ ...settings, bind_password: '' }) })
+      .catch(err => { if (active) setError(err) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [])
+
+  function set<K extends keyof LDAPSettings>(key: K, value: LDAPSettings[K]) {
+    setForm(current => ({ ...current, [key]: value }))
+    setMessage('')
+    setSavedWarning('')
+  }
+
+  function payload() {
+    return {
+      enabled: form.enabled,
+      server_uri: form.server_uri.trim(),
+      use_ssl: form.use_ssl,
+      ca_cert_file: form.ca_cert_file.trim(),
+      base_dn: form.base_dn.trim(),
+      user_search_filter: form.user_search_filter.trim(),
+      bind_dn: form.bind_dn.trim(),
+      bind_password: form.bind_password || null,
+      user_dn_template: form.user_dn_template.trim(),
+      attr_full_name: form.attr_full_name.trim(),
+      attr_email: form.attr_email.trim(),
+      attr_department: form.attr_department.trim(),
+    }
+  }
+
+  async function persist() {
+    const savingWithoutTls = !ldapTransportUsesTls(form.server_uri, form.use_ssl)
+    setBusy(true); setError(null); setMessage('')
+    setSavedWarning('')
+    try {
+      const saved = await api.put<LDAPSettings>('/api/auth/admin/ldap-settings', payload())
+      setForm({ ...saved, bind_password: '' })
+      if (savingWithoutTls) setSavedWarning('LDAP configuration was saved with TLS disabled. Directory credentials and traffic are not protected by transport encryption.')
+      else setMessage('LDAP configuration saved and is now the active runtime configuration.')
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  function save(event: React.FormEvent) {
+    event.preventDefault()
+    if (!ldapTransportUsesTls(form.server_uri, form.use_ssl)) {
+      setConfirmInsecureSave(true)
+      return
+    }
+    void persist()
+  }
+
+  async function testConnection() {
+    setTesting(true); setError(null); setMessage('')
+    try {
+      const result = await api.post<{ ok: boolean; message: string }>('/api/auth/admin/ldap-settings/test', {
+        ...payload(), test_username: testUsername.trim(), test_password: testPassword,
+      })
+      setMessage(result.message)
+      setTestPassword('')
+    } catch (err) { setError(err) } finally { setTesting(false) }
+  }
+
+  if (loading) return <Card title="LDAP Configuration"><p>Loading LDAP configuration…</p></Card>
+  const searchBind = !!form.bind_dn.trim() || !!form.base_dn.trim()
+  const transportUsesTls = ldapTransportUsesTls(form.server_uri, form.use_ssl)
+  return <Card title="LDAP / Active Directory Configuration">
+    <p className="muted small">Once saved, these database-backed values are authoritative and apply immediately. Values supplied through <code>APP_ENV_FILE</code> are used only while no database configuration exists. Keep a Standard System Administrator account available for recovery.</p>
+    <div className="document-upload-summary" style={{ marginTop: 12 }}>
+      <strong>{form.source === 'database' ? 'Database configuration active' : 'APP_ENV_FILE bootstrap configuration'}</strong>
+      <span>{form.updated_at ? `Last updated ${new Date(form.updated_at).toLocaleString()}. Bootstrap/recovery source: ${form.fallback_file || 'APP_ENV_FILE is not set'}.` : `Source: ${form.fallback_file || 'APP_ENV_FILE is not set'}. Save this page to make the database configuration authoritative.`}</span>
+    </div>
+    {form.bind_password_unavailable && <div className="alert-banner" style={{ marginTop: 12 }}><div className="icon-wrap"><IconWarning width={16} height={16} /></div><div className="body"><div className="title">Bind password must be entered again</div><div className="sub">The deployment secret changed, so the previously encrypted password cannot be used. Enter a new bind password and save before LDAP sign-ins can succeed.</div></div></div>}
+    <form onSubmit={save} style={{ maxWidth: 820, marginTop: 16 }}>
+      <label className="access-user-dropdown-toggle" style={{ marginBottom: 16 }}>
+        <input type="checkbox" checked={form.enabled} onChange={event => set('enabled', event.target.checked)} />
+        <span><strong>Enable LDAP authentication</strong><small>Existing Standard accounts remain available.</small></span>
+      </label>
+      <div className="form-grid">
+        <Field label="LDAP server URI *"><input required={form.enabled} value={form.server_uri} onChange={event => set('server_uri', event.target.value)} placeholder="ldap://directory.example:389 or ldaps://directory.example:636" /></Field>
+        <Field label="TLS / SSL"><select value={String(form.use_ssl)} onChange={event => set('use_ssl', event.target.value === 'true')}><option value="true">True</option><option value="false">False</option></select></Field>
+        <Field label="CA certificate file"><input value={form.ca_cert_file} onChange={event => set('ca_cert_file', event.target.value)} placeholder="/run/secrets/qualityops/ldap-ca.pem" /></Field>
+        <Field label="Base DN"><input value={form.base_dn} onChange={event => set('base_dn', event.target.value)} placeholder="dc=example,dc=com" /></Field>
+        <Field label="User search filter"><input value={form.user_search_filter} onChange={event => set('user_search_filter', event.target.value)} placeholder="(sAMAccountName={username})" /></Field>
+        <Field label="Bind DN"><input value={form.bind_dn} onChange={event => set('bind_dn', event.target.value)} placeholder="cn=service-account,ou=users,dc=example,dc=com" autoComplete="off" /></Field>
+        <Field label={`Bind password${form.bind_password_configured ? ' (configured)' : ''}`}><input type="password" value={form.bind_password || ''} onChange={event => set('bind_password', event.target.value)} placeholder={form.bind_password_configured ? 'Leave blank to keep current password' : 'Required for search bind'} autoComplete="new-password" /></Field>
+        <Field label="Direct user DN template"><input value={form.user_dn_template} onChange={event => set('user_dn_template', event.target.value)} placeholder="uid={username},ou=people,dc=example,dc=com" /></Field>
+      </div>
+      {!transportUsesTls && <div className="alert-banner" role="alert" style={{ marginTop: 12 }}><div className="icon-wrap"><IconWarning width={16} height={16} /></div><div className="body"><div className="title">Warning: this LDAP connection is not encrypted</div><div className="sub">Plain LDAP is allowed, but bind credentials and user passwords may travel without transport encryption. Use an <code>ldaps://</code> URI whenever the directory supports it.</div></div></div>}
+      <p className="muted small">Use either service-account search (Bind DN + Base DN) or a Direct user DN template. The selected username pattern must contain <code>{'{username}'}</code>.</p>
+      <h4 style={{ marginTop: 20 }}>Directory profile attributes</h4>
+      <div className="form-grid">
+        <Field label="Full name attribute"><input value={form.attr_full_name} onChange={event => set('attr_full_name', event.target.value)} /></Field>
+        <Field label="Email attribute"><input value={form.attr_email} onChange={event => set('attr_email', event.target.value)} /></Field>
+        <Field label="Department attribute"><input value={form.attr_department} onChange={event => set('attr_department', event.target.value)} /></Field>
+      </div>
+      <h4 style={{ marginTop: 20 }}>Test before saving</h4>
+      <p className="muted small">Tests the values currently shown above, including unsaved changes. Test credentials are used once and are never stored.</p>
+      <div className="form-grid">
+        <Field label="Test username"><input value={testUsername} onChange={event => setTestUsername(event.target.value)} autoComplete="off" /></Field>
+        <Field label="Test user password"><input type="password" value={testPassword} onChange={event => setTestPassword(event.target.value)} autoComplete="new-password" /></Field>
+      </div>
+      <ErrorText error={error} title="LDAP configuration error" />
+      {message && <div className="document-upload-summary" role="status"><strong>✓ {message}</strong></div>}
+      {savedWarning && <div className="alert-banner" role="alert"><div className="icon-wrap"><IconWarning width={16} height={16} /></div><div className="body"><div className="title">Saved with TLS disabled</div><div className="sub">{savedWarning}</div></div></div>}
+      <div className="modal-actions" style={{ justifyContent: 'flex-start', marginTop: 16 }}>
+        <button type="button" className="btn" disabled={testing || busy || !form.enabled || !testUsername.trim() || !testPassword || (searchBind && (!form.bind_password_configured || form.bind_password_unavailable) && !form.bind_password)} onClick={testConnection}>{testing ? 'Testing…' : 'Test connection and user'}</button>
+        <button type="submit" className="btn btn-primary" disabled={busy || testing}>{busy ? 'Saving…' : 'Save LDAP configuration'}</button>
+      </div>
+    </form>
+    {confirmInsecureSave && <Modal title="Save LDAP configuration without TLS?" variant="dialog" compact preventBackdropClose onClose={() => { if (!busy) setConfirmInsecureSave(false) }}>
+      <div className="alert-banner" role="alert"><div className="icon-wrap"><IconWarning width={16} height={16} /></div><div className="body"><div className="title">Credentials may be exposed</div><div className="sub">Without TLS, LDAP bind credentials and user passwords can travel over the network without transport encryption. Use this only for an intentionally isolated connection after accepting the risk.</div></div></div>
+      <div className="modal-actions"><button type="button" className="btn" disabled={busy} onClick={() => setConfirmInsecureSave(false)}>Cancel</button><button type="button" className="btn btn-danger" disabled={busy} onClick={() => { setConfirmInsecureSave(false); void persist() }}>{busy ? 'Saving…' : 'Save without TLS'}</button></div>
+    </Modal>}
+  </Card>
+}
+
 function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user: UserOut) => void; departments: DepartmentOut[] }) {
   const [showCreateWorkspace, setShowCreateWorkspace] = useState(false)
   const [workspaces, setWorkspaces] = useState<QAWorkspaceOut[]>([])
@@ -788,6 +977,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
   const [candidateWorkspaceAccess, setCandidateWorkspaceAccess] = useState<Record<number, string>>({})
   const [coordinatorUserId, setCoordinatorUserId] = useState('')
   const [coordinatorDepartmentId, setCoordinatorDepartmentId] = useState('')
+  const [coordinatorDirectoryState, setCoordinatorDirectoryState] = useState<{ workspaceId: number; departmentId: number | null } | null>(null)
   const [memberSearch, setMemberSearch] = useState('')
   const [memberView, setMemberView] = useState<WorkspaceMemberView>('current')
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>('members')
@@ -834,14 +1024,21 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
     ? workspaces.find((workspace) => workspace.id === selected.parent_workspace_id) || null
     : null
   const directCoordinators = (selected?.department_coordinators || []).filter((row) => row.is_active)
-  const inheritedParentCoordinators = (parentWorkspace?.department_coordinators || [])
-    .filter((row) => row.is_active)
+  const activeParentCoordinators = (parentWorkspace?.department_coordinators || []).filter((row) => row.is_active)
+  const inheritedParentCoordinators = activeParentCoordinators
     .filter((row) => !directCoordinators.some((direct) => (
       direct.user_id === row.user_id && direct.department_id === row.department_id
     )))
   const visibleCoordinators = [
-    ...directCoordinators.map((assignment) => ({ assignment, inherited: false })),
-    ...inheritedParentCoordinators.map((assignment) => ({ assignment, inherited: true })),
+    ...directCoordinators.map((assignment) => ({
+      assignment,
+      inherited: false,
+      alsoInherited: activeParentCoordinators.some((parentAssignment) => (
+        parentAssignment.user_id === assignment.user_id
+        && parentAssignment.department_id === assignment.department_id
+      )),
+    })),
+    ...inheritedParentCoordinators.map((assignment) => ({ assignment, inherited: true, alsoInherited: false })),
   ]
   const inheritedParentMembers = (() => {
     const rows = new Map<number, string[]>()
@@ -901,6 +1098,38 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
   const coordinatorDepartmentOptions = coordinatorDepartments.map((department) => ({
     value: String(department.id), label: department.name,
   }))
+  type VisibleCoordinator = (typeof visibleCoordinators)[number]
+  const coordinatorDepartmentGroups = (() => {
+    const groups = new Map<number, {
+      departmentId: number
+      departmentName: string
+      isActive: boolean
+      coordinators: VisibleCoordinator[]
+    }>()
+    for (const row of visibleCoordinators) {
+      const department = departments.find((candidate) => candidate.id === row.assignment.department_id)
+      const current = groups.get(row.assignment.department_id)
+      if (current) current.coordinators.push(row)
+      else groups.set(row.assignment.department_id, {
+        departmentId: row.assignment.department_id,
+        departmentName: row.assignment.department_name || department?.name || `Department ${row.assignment.department_id}`,
+        isActive: department?.is_active !== false,
+        coordinators: [row],
+      })
+    }
+    return [...groups.values()]
+      .map((group) => ({
+        ...group,
+        coordinators: [...group.coordinators].sort((left, right) => (
+          Number(left.inherited) - Number(right.inherited)
+          || (left.assignment.user_name || '').localeCompare(right.assignment.user_name || '')
+        )),
+      }))
+      .sort((left, right) => left.departmentName.localeCompare(right.departmentName))
+  })()
+  const directCoordinatorCount = visibleCoordinators.filter((row) => !row.inherited).length
+  const inheritedCoordinatorCount = visibleCoordinators.length - directCoordinatorCount
+  const uniqueCoordinatorCount = new Set(visibleCoordinators.map((row) => row.assignment.user_id)).size
 
   function selectCoordinator(userId: string) {
     setCoordinatorUserId(userId)
@@ -1147,7 +1376,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
         </header>
         <nav className="workspace-detail-tabs" aria-label={`${selected.name} settings`}>
           <button type="button" className={workspacePanel === 'members' ? 'active' : ''} aria-current={workspacePanel === 'members' ? 'page' : undefined} onClick={() => setWorkspacePanel('members')}><strong>Members</strong><small>{members.length} people with access</small></button>
-          <button type="button" className={workspacePanel === 'administrators' ? 'active' : ''} aria-current={workspacePanel === 'administrators' ? 'page' : undefined} onClick={() => setWorkspacePanel('administrators')}><strong>Local admins</strong><small>{visibleCoordinators.length} department assignments</small></button>
+          <button type="button" className={workspacePanel === 'administrators' ? 'active' : ''} aria-current={workspacePanel === 'administrators' ? 'page' : undefined} onClick={() => setWorkspacePanel('administrators')}><strong>Local admins</strong><small>{coordinatorDepartmentGroups.length} {coordinatorDepartmentGroups.length === 1 ? 'department' : 'departments'} · {visibleCoordinators.length} {visibleCoordinators.length === 1 ? 'assignment' : 'assignments'}</small></button>
           <button type="button" className={workspacePanel === 'settings' ? 'active' : ''} aria-current={workspacePanel === 'settings' ? 'page' : undefined} onClick={() => setWorkspacePanel('settings')}><strong>Settings</strong><small>Name, storage, parent, and status</small></button>
         </nav>
         {workspacePanel === 'members' && <section className="workspace-members-section">
@@ -1181,40 +1410,82 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
             {!filteredMembers.length && <p className="muted small workspace-member-result-note">No workspace members match this search.</p>}
           </div>}
         </section>}
-        {workspacePanel === 'administrators' && <section><h4>Local administrators</h4>
-          <CoordinatorRolePolicy />
-          <p className="muted small">Let a trusted person administer users from one department inside this workspace.</p>
-          <p className="workspace-instruction"><strong>Access boundary:</strong> an assignment on a parent also applies in every active child. An assignment made directly on a child stays in that child.</p>
-          <div className="qa-workspace-form-row workspace-coordinator-add">
-            <Field label="Coordinator *"><UserAssignSelect value={coordinatorUserId} onChange={selectCoordinator} users={coordinatorUsers} placeholder="Search and select a coordinator…" showUserId variant="coordinator" /></Field>
-            <Field label="Manages users in">
-              {coordinatorDepartments.length > 1
-                ? <SearchableSelect value={coordinatorDepartmentId} onChange={setCoordinatorDepartmentId} options={coordinatorDepartmentOptions} placeholder="Select managed department…" />
-                : <input
-                    value={coordinatorUserId ? (coordinatorDepartment?.name || 'No active department assigned') : 'Select a coordinator first'}
-                    readOnly
-                    aria-readonly="true"
-                    title="Automatically taken from the coordinator’s department"
-                  />}
-              <small className="workspace-derived-field-note">{coordinatorDepartments.length > 1 ? 'Primary department selected by default. Choose another assigned department if needed.' : 'Automatically taken from the coordinator’s department.'}</small>
-            </Field>
-            <button type="button" className="btn btn-primary" disabled={busy || !coordinatorUserId || !coordinatorDepartment} onClick={() => void addCoordinator()}><IconPlus width={14} /> Assign</button>
+        {workspacePanel === 'administrators' && <section className="workspace-local-admins" aria-labelledby="workspace-local-admin-heading">
+          <div className="local-admin-overview">
+            <div className="local-admin-overview-copy"><small>LOCAL ADMINISTRATION</small><h4 id="workspace-local-admin-heading">Department ownership, at a glance</h4><p>Give trusted people a precise department boundary inside {selected.name}. The directory below stays organised by the team they manage.</p></div>
+            <div className="local-admin-metrics" aria-label="Local administrator coverage summary">
+              <span className="local-admin-metric"><strong>{coordinatorDepartmentGroups.length}</strong><small>Departments covered</small></span>
+              <span className="local-admin-metric"><strong>{directCoordinatorCount}</strong><small>Assigned here</small></span>
+              <span className="local-admin-metric"><strong>{inheritedCoordinatorCount}</strong><small>Inherited only</small></span>
+            </div>
           </div>
-          {coordinatorUserId && !coordinatorDepartment && <p className="muted small workspace-coordinator-scope-note">Assign an active department to this user before making them a local administrator.</p>}
-          <div className="qa-workspace-chips workspace-coordinator-list">
-            {visibleCoordinators.map(({ assignment, inherited }) => {
-              const assignedUser = users.find((user) => user.id === assignment.user_id)
-              return <div key={`${inherited ? 'parent' : 'direct'}-${assignment.id}`}>
-                <span className="workspace-member-identity"><strong>{assignment.user_name || `User ${assignment.user_id}`}</strong><small>{assignedUser?.username ? `User ID: ${assignedUser.username} · ` : ''}{assignment.department_name || 'Department'} · {inherited ? `Inherited from ${parentWorkspace?.name || 'parent'}` : 'This workspace'}</small></span>
-                <span className={`badge ${inherited ? '' : 'badge-blue'}`}>{inherited ? 'Inherited local admin' : 'Department Coordinator'}</span>
-                {assignedUser && <button type="button" className="workspace-manage-access" onClick={() => onManageUser(assignedUser)}>Manage permissions</button>}
-                {inherited
-                  ? <button type="button" className="btn btn-sm inherited-member-lock" disabled title="Remove or change this assignment on the parent workspace">Inherited</button>
-                  : <button type="button" disabled={busy} aria-label={`Remove ${assignment.user_name || 'user'} as department coordinator`} onClick={() => void removeCoordinator(assignment.id)}>Remove</button>}
+
+          <div className="coordinator-admin-tools">
+            <CoordinatorRolePolicy />
+            <section className="coordinator-assignment-card">
+              <div className="coordinator-card-heading">
+                <span className="coordinator-card-icon assignment" aria-hidden="true"><IconPlus width={17} height={17} /></span>
+                <div><small>WORKSPACE ASSIGNMENT</small><h5>Add a department coordinator</h5><p>Select a person, confirm one of their active departments, and assign the boundary.</p></div>
               </div>
-            })}
+              <p className="workspace-instruction"><strong>Scope rule:</strong> parent assignments flow to active child workspaces. Assignments made here on a child stay in this workspace.</p>
+              <div className="qa-workspace-form-row workspace-coordinator-add">
+                <Field label="Coordinator *"><UserAssignSelect ariaLabel="Coordinator" value={coordinatorUserId} onChange={selectCoordinator} users={coordinatorUsers} placeholder="Search name or user ID…" showUserId variant="coordinator" /><small className="workspace-derived-field-note">Search by name, user ID, role, or department.</small></Field>
+                <Field label="Department boundary *">
+                  {coordinatorDepartments.length > 1
+                    ? <SearchableSelect ariaLabel="Department boundary" value={coordinatorDepartmentId} onChange={setCoordinatorDepartmentId} options={coordinatorDepartmentOptions} placeholder="Select managed department…" />
+                    : <input
+                        value={coordinatorUserId ? (coordinatorDepartment?.name || 'No active department assigned') : 'Select a coordinator first'}
+                        readOnly
+                        aria-label="Department boundary"
+                        aria-readonly="true"
+                        title="Taken from the coordinator’s department profile"
+                      />}
+                  <small className="workspace-derived-field-note">{coordinatorDepartments.length > 1 ? 'Primary department selected by default. Choose another assigned department if needed.' : 'Taken from the coordinator’s department profile.'}</small>
+                </Field>
+                <button type="button" className="btn btn-primary" disabled={busy || !coordinatorUserId || !coordinatorDepartment} onClick={() => void addCoordinator()}><IconPlus width={14} /> Assign</button>
+              </div>
+              {coordinatorUserId && !coordinatorDepartment && <p className="workspace-coordinator-scope-note">This user needs an active department before they can become a local administrator.</p>}
+            </section>
           </div>
-          {!visibleCoordinators.length && <p className="muted small workspace-no-members">No local administrators assigned.</p>}
+
+          <section className="coordinator-directory" aria-labelledby="coordinator-directory-heading">
+            <div className="coordinator-directory-heading">
+              <div><small>DEPARTMENT COVERAGE</small><h5 id="coordinator-directory-heading">Coordinator directory</h5><p>{uniqueCoordinatorCount} {uniqueCoordinatorCount === 1 ? 'person' : 'people'} across {visibleCoordinators.length} {visibleCoordinators.length === 1 ? 'assignment' : 'assignments'}. Open a department to review its administrators.</p></div>
+              <span className="coordinator-directory-count"><IconUsers width={14} height={14} /> {coordinatorDepartmentGroups.length} {coordinatorDepartmentGroups.length === 1 ? 'department' : 'departments'}</span>
+            </div>
+            {coordinatorDepartmentGroups.length > 0 ? <div className="coordinator-department-grid">
+              {coordinatorDepartmentGroups.map((group, groupIndex) => {
+                const groupDirectCount = group.coordinators.filter((row) => !row.inherited).length
+                const groupInheritedCount = group.coordinators.length - groupDirectCount
+                const isGroupOpen = coordinatorDirectoryState?.workspaceId === selected.id
+                  ? coordinatorDirectoryState.departmentId === group.departmentId
+                  : groupIndex === 0
+                return <details className={`coordinator-department-card${group.isActive ? '' : ' inactive'}`} key={group.departmentId} open={isGroupOpen}>
+                  <summary className="coordinator-department-head" onClick={(event) => { event.preventDefault(); setCoordinatorDirectoryState({ workspaceId: selected.id, departmentId: isGroupOpen ? null : group.departmentId }) }}>
+                    <span className="coordinator-department-icon" aria-hidden="true">{adminInitials(group.departmentName, 'DP')}</span>
+                    <span className="coordinator-department-copy"><strong>{group.departmentName}</strong><small>{groupDirectCount ? `${groupDirectCount} direct` : 'No direct assignments'}{groupInheritedCount ? ` · ${groupInheritedCount} inherited` : ''}{!group.isActive ? ' · Inactive department' : ''}</small></span>
+                    <span className="coordinator-department-count">{group.coordinators.length} {group.coordinators.length === 1 ? 'assignment' : 'assignments'}</span>
+                  </summary>
+                  <div className="coordinator-department-roster">
+                    {group.coordinators.map(({ assignment, inherited, alsoInherited }) => {
+                      const assignedUser = users.find((user) => user.id === assignment.user_id)
+                      const displayName = assignment.user_name || assignedUser?.full_name || `User ${assignment.user_id}`
+                      return <div className="coordinator-person-row" key={`${inherited ? 'parent' : 'direct'}-${assignment.id}`}>
+                        <span className="coordinator-person-avatar" aria-hidden="true">{adminInitials(displayName, 'U')}</span>
+                        <span className="coordinator-person-copy"><strong>{displayName}</strong><small>{assignedUser?.username ? `User ID: ${assignedUser.username}` : `User ${assignment.user_id}`}</small><span className={`coordinator-origin${inherited ? ' inherited' : ''}`}>{inherited ? <><IconLock width={10} height={10} /> Inherited from {parentWorkspace?.name || 'parent workspace'}</> : alsoInherited ? <><IconCheckCircle width={10} height={10} /> Assigned here · also inherited from {parentWorkspace?.name || 'parent workspace'}</> : <><IconCheckCircle width={10} height={10} /> Assigned in this workspace</>}</span></span>
+                        <span className="coordinator-person-actions">
+                          {assignedUser && <button type="button" className="btn btn-sm workspace-manage-access" onClick={() => onManageUser(assignedUser)}>Permissions</button>}
+                          {inherited
+                            ? <button type="button" className="btn btn-sm inherited-member-lock" disabled title="Remove or change this assignment on the parent workspace"><IconLock width={12} height={12} /> Inherited</button>
+                            : <button type="button" className="btn btn-sm coordinator-remove-assignment" disabled={busy} aria-label={`Remove ${displayName} as coordinator for ${group.departmentName}`} title={alsoInherited ? `Removes this workspace assignment; access inherited from ${parentWorkspace?.name || 'the parent workspace'} will remain` : 'Removes the coordinator assignment only; workspace membership is unchanged'} onClick={() => void removeCoordinator(assignment.id)}>Remove assignment</button>}
+                        </span>
+                      </div>
+                    })}
+                  </div>
+                </details>
+              })}
+            </div> : <div className="coordinator-empty-state"><span aria-hidden="true"><IconUsers width={20} height={20} /></span><strong>No department coverage yet</strong><p>Use the assignment card above to give a trusted person a department boundary in this workspace.</p></div>}
+          </section>
         </section>}
         {workspacePanel === 'settings' && <section><WorkspaceDefectWorkflow key={selected.id} workspace={selected} /><h4>Workspace settings</h4>
           <p className="muted small">Review the workspace identity and its current place in the organisation.</p>
@@ -1321,6 +1592,7 @@ export default function Admin() {
     workspaces: { title: 'Workspaces', subtitle: 'Control membership, local administration, and where new requests are routed.' },
     applications: { title: 'Application directory', subtitle: 'Maintain approved application names and their owning departments.' },
     email: { title: 'Email diagnostics', subtitle: 'Send a test message to verify the configured email service.' },
+    ldap: { title: 'LDAP configuration', subtitle: 'Manage the directory connection used for LDAP authentication.' },
   }
   function setSection(next: AdminSection) {
     const nextParams = new URLSearchParams(searchParams)
@@ -1379,9 +1651,10 @@ export default function Admin() {
         </nav>
         <div className="admin-system-tools">
           <span><strong>System tools</strong><small>Occasional setup and checks</small></span>
-          <SearchableSelect ariaLabel="Choose a system administration tool" searchable={false} value={section === 'applications' || section === 'email' ? section : ''} onChange={(value) => value && setSection(value as AdminSection)} placeholder="Choose a tool…" options={[
+          <SearchableSelect ariaLabel="Choose a system administration tool" searchable={false} value={section === 'applications' || section === 'email' || section === 'ldap' ? section : ''} onChange={(value) => value && setSection(value as AdminSection)} placeholder="Choose a tool…" options={[
             { value: 'applications', label: 'Application directory' },
             { value: 'email', label: 'Email diagnostics' },
+            { value: 'ldap', label: 'LDAP configuration' },
           ]} />
         </div>
       </div>
@@ -1482,6 +1755,10 @@ export default function Admin() {
 
       {section === 'email' && <div className="access-workspace-panel access-departments-section">
         <TestEmailCard defaultRecipient={user?.email} />
+      </div>}
+
+      {section === 'ldap' && <div className="access-workspace-panel access-departments-section">
+        <LDAPSettingsCard />
       </div>}
 
       {showCreate && (

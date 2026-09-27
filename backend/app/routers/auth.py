@@ -14,10 +14,14 @@ from ..audit_service import snapshot_changes, user_snapshot, write_audit
 from ..auth import (
     LDAPAuthError,
     authentication_rejected_detail,
+    effective_ldap_config,
+    environment_ldap_config,
+    _ldap_bind_and_fetch,
     ldap_authenticate,
     ldap_authenticate_with_profile,
     verify_password,
 )
+from .. import ldap_settings
 from ..session_security import (
     create_session, clear_session_cookies, resolve_session, revoke_presented_session,
     reject_cross_site_request, revoke_session, revoke_user_sessions, set_session_cookies,
@@ -123,6 +127,110 @@ def send_admin_test_email(payload: schemas.AdminTestEmailRequest, request: Reque
         details={"recipient": recipient},
     )
     return {"ok": True, "message": f"Test email sent successfully to {recipient}."}
+
+
+@router.get("/admin/ldap-settings", response_model=schemas.LDAPSettingsOut)
+def get_admin_ldap_settings(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    try:
+        return ldap_settings.public_view(effective_ldap_config(db))
+    except RuntimeError as exc:
+        logger.exception("Saved LDAP configuration could not be loaded")
+        raise HTTPException(500, str(exc)) from exc
+
+
+@router.put("/admin/ldap-settings", response_model=schemas.LDAPSettingsOut)
+def update_admin_ldap_settings(
+    payload: schemas.LDAPSettingsUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    try:
+        before = effective_ldap_config(db)
+        values = payload.model_dump()
+        # An empty password means "retain the existing secret". A first-time
+        # search-bind configuration must provide one explicitly.
+        if (
+            payload.enabled and payload.bind_dn and payload.base_dn
+            and not payload.bind_password and not before.get("bind_password")
+        ):
+            raise HTTPException(400, "Bind password is required for search-then-bind configuration.")
+        saved = ldap_settings.save(db, values, before)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except RuntimeError as exc:
+        db.rollback()
+        logger.exception("LDAP configuration could not be saved")
+        raise HTTPException(500, str(exc)) from exc
+    write_audit(
+        db,
+        event_type="SYSTEM_CONFIGURATION",
+        action="LDAP_CONFIGURATION_UPDATED",
+        actor=current_user,
+        request=request,
+        status_code=200,
+        target_type="SYSTEM_SETTING",
+        target_name="LDAP configuration",
+        details={
+            "before": ldap_settings.safe_audit_snapshot(before),
+            "after": ldap_settings.safe_audit_snapshot(saved),
+        },
+    )
+    return ldap_settings.public_view(saved)
+
+
+@router.post("/admin/ldap-settings/test", response_model=schemas.LDAPSettingsTestResult)
+def test_admin_ldap_settings(
+    payload: schemas.LDAPSettingsTest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    if not payload.enabled:
+        raise HTTPException(400, "Enable LDAP before testing the connection.")
+    current = effective_ldap_config(db)
+    candidate = payload.model_dump(exclude={"test_username", "test_password"})
+    if not candidate.get("bind_password"):
+        candidate["bind_password"] = current.get("bind_password", "")
+    candidate.update(source="unsaved-test", configured=True)
+    if candidate.get("bind_dn") and candidate.get("base_dn") and not candidate.get("bind_password"):
+        raise HTTPException(400, "Enter the bind password before testing this configuration.")
+    try:
+        profile = _ldap_bind_and_fetch(
+            payload.test_username.strip().lower(), payload.test_password,
+            config_override=candidate,
+        )
+    except LDAPAuthError as exc:
+        diagnostic = exc.audit_detail()
+        write_audit(
+            db, event_type="SYSTEM_CONFIGURATION", action="LDAP_CONFIGURATION_TESTED",
+            outcome="FAILED", actor=current_user, request=request, status_code=502,
+            target_type="SYSTEM_SETTING", target_name="LDAP configuration",
+            details={"result": "connection_error", **diagnostic},
+        )
+        raise HTTPException(exc.status_code, exc.public_detail()) from exc
+    if profile is None:
+        write_audit(
+            db, event_type="SYSTEM_CONFIGURATION", action="LDAP_CONFIGURATION_TESTED",
+            outcome="FAILED", actor=current_user, request=request, status_code=400,
+            target_type="SYSTEM_SETTING", target_name="LDAP configuration",
+            details={"result": "test_credentials_rejected"},
+        )
+        raise HTTPException(400, "The directory rejected the test user's credentials.")
+    write_audit(
+        db, event_type="SYSTEM_CONFIGURATION", action="LDAP_CONFIGURATION_TESTED",
+        actor=current_user, request=request, status_code=200,
+        target_type="SYSTEM_SETTING", target_name="LDAP configuration",
+        details={"result": "success", "profile_attributes_returned": sorted(
+            key for key in ("full_name", "email", "department") if profile.get(key)
+        )},
+    )
+    return {"ok": True, "message": "LDAP connection and test-user authentication succeeded."}
 
 
 def _canonical_login_username(username: str) -> str:
@@ -239,7 +347,7 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
         # This deliberately never grants Requester (or any other) access from
         # an unaudited self-service selection.
         try:
-            profile = ldap_authenticate_with_profile(username, form_data.password)
+            profile = ldap_authenticate_with_profile(username, form_data.password, db=db)
         except LDAPAuthError as exc:
             # Match the outage response used for known LDAP accounts. Treating
             # a directory outage as an ordinary bad password only for unknown
@@ -309,7 +417,7 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
         # otherwise verify them the normal way for this account's login type.
         if user.login_type == LoginType.LDAP:
             try:
-                authenticated = ldap_authenticate(username, form_data.password)
+                authenticated = ldap_authenticate(username, form_data.password, db=db)
             except LDAPAuthError as exc:
                 _raise_ldap_login_error(db, request, username, exc, user)
             if not authenticated:

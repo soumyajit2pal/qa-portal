@@ -20,7 +20,7 @@ from sqlalchemy import event, or_
 from sqlalchemy.orm import Session as SASession, joinedload, selectinload
 
 from . import models
-from .constants import Role
+from .constants import Role, format_role_labels
 from .database import SessionLocal
 from .resilience import CircuitOpenError, smtp_circuit
 
@@ -326,7 +326,7 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
         "A newly provisioned LDAP account requires access review.\n\n"
         f"User: {user.full_name}\nUsername: {user.username}\n"
         f"Department: {department}\n"
-        f"Current role(s): {', '.join(user.roles) or 'No portal role assigned'}\n\n"
+        f"Current role(s): {format_role_labels(user.roles) or 'No portal role assigned'}\n\n"
         f"Review access: {url}\n"
     )
     html_body = _html_email(
@@ -336,7 +336,7 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
         panel_html=(
             f"<ul style=\"margin:8px 0 0;padding-left:20px\"><li>User: {escape(user.full_name)}</li>"
             f"<li>Username: {escape(user.username)}</li><li>Department: {escape(department)}</li>"
-            f"<li>Current role(s): {escape(', '.join(user.roles) or 'No portal role assigned')}</li></ul>"
+            f"<li>Current role(s): {escape(format_role_labels(user.roles) or 'No portal role assigned')}</li></ul>"
         ),
         action_label="Review in QA Portal", action_url=url,
         footer="This is an automated QA Portal access-management notification.",

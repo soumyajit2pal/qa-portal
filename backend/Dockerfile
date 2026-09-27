@@ -17,7 +17,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # supplies the explicit durable bind mount. Do not declare an image VOLUME
 # here: that would silently create writable anonymous volumes for the migrate
 # and Document Portal containers and leave orphaned data behind.
-RUN mkdir -p /data/qualityops/uploads/document-portal /app/logs
+RUN mkdir -p /data/qualityops/uploads/document-portal /app/logs /run/config \
+    && install -m 0444 /dev/null /run/config/qualityops.env
 
 EXPOSE 8000
 

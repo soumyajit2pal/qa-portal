@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState, useEffect } from 'react'
 import { api, mapWithConcurrency } from '../api'
 import { formatDateIST, formatDateTimeIST } from '../time'
 import { useAuth } from '../context/AuthContext'
-import { activeWorkspaceId, isViewOnly, ROLE_LABELS, uniqueWorkspaceAccess } from '../constants'
+import { activeWorkspaceId, formatRoleLabels, isViewOnly, uniqueWorkspaceAccess } from '../constants'
 import { ApprovalActionOut, RequestDocumentOut } from '../types'
 import { EmptyState, ErrorText } from './Common'
 import {
@@ -38,7 +38,7 @@ function initials(name?: string | null): string {
 }
 
 function actorLabel(item: ApprovalActionOut): string {
-  return item.actor_name || (item.actor_role || 'System').split(',').map((role) => ROLE_LABELS[role.trim()] || role.trim()).join(' · ')
+  return item.actor_name || formatRoleLabels(item.actor_role, ' · ') || 'System'
 }
 
 function relativeTime(value: string): string {

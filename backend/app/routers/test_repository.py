@@ -18,7 +18,7 @@ from ..deps import (
     require_project_visibility,
 )
 from ..constants import (
-    Role, TEST_CASE_PRIORITIES,
+    Role, TEST_CASE_PRIORITIES, format_role_labels,
 )
 from ..workspace_service import active_workspace_scope_ids, workspace_context
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
@@ -856,7 +856,7 @@ def export_test_repository(
         ], [[
             case_key_by_id.get(action.entity_id, f"Testcase #{action.entity_id}"),
             action.step_name, action.decision, action.actor_name or "System",
-            action.actor_role, action.comments, action.created_at,
+            format_role_labels(action.actor_role), action.comments, action.created_at,
         ] for action in actions],
         subtitle="Append-only submission, approval, return, and re-approval events.",
         wrap_headers={"Comments"}, date_headers={"Timestamp"}, status_headers={"Decision"},

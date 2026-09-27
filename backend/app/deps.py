@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 from .database import SessionLocal, get_db
 from . import models
 from .session_security import resolve_session
-from .constants import Role
+from .constants import Role, format_role_labels
 
 _SAFE_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 _VIEW_ONLY_SELF_SERVICE_PATHS = {"/api/auth/logout", "/api/auth/renew", "/api/auth/me/email"}
@@ -65,7 +65,7 @@ def _enforce_view_only_request(
             return
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Scale 6+ access is read-only across all workspaces.",
+            detail="Enterprise Viewer access is read-only across all workspaces.",
         )
     selected_workspace_id = getattr(user, "active_qa_workspace_id", None)
     selected_workspace = (
@@ -334,7 +334,7 @@ def require_roles(*roles, workflow=False):
         if not permitted:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"None of your roles ({', '.join(current_user.roles) or 'none assigned'}) "
+                detail=f"None of your roles ({format_role_labels(current_user.roles) or 'none assigned'}) "
                        f"are permitted to perform this action.",
             )
         return current_user
@@ -511,7 +511,7 @@ def dashboard_department_scope(current_user: models.User) -> Optional[list]:
     this function was updated from `.filter(Model.department == scope)` to
     `.filter(Model.department.in_(scope))` accordingly.
 
-    2026-08 "Admin and Scale 6+ Access-Control Requirement" -- reported
+    2026-08 "Admin and Enterprise Viewer Access-Control Requirement" -- reported
     directly, as a formal spec, that this was a "critical role-mapping and
     authorization defect": an ADMIN account with no other role was being
     scoped to its own single department here, same as a plain business

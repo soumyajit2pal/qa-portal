@@ -13,6 +13,7 @@ interface UserAssignSelectProps {
   variant?: 'default' | 'coordinator'
   clearable?: boolean
   clearLabel?: string
+  ariaLabel?: string
 }
 
 /** Single-value adapter for the shared UserPicker. */

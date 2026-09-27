@@ -1312,28 +1312,30 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .searchable-select-empty { padding: 10px 12px; font-size: 13px; color: var(--muted); }
 
 /* Local Administrator coordinator picker -- intentionally opt-in. The
-   compact panel stays below the field in the workspace layout instead of
-   covering the policy card above it, while keeping identity metadata easy
-   to scan. */
+   coordinator field spans the assignment card so this can behave like a
+   readable people directory without changing any other shared picker. */
 .coordinator-user-picker .searchable-select-trigger { min-height:44px; padding:7px 11px; border-radius:9px; background:#fff; }
 .coordinator-user-picker .user-assign-selected { width:100%; }
 .coordinator-user-picker .user-assign-selected > span { display:flex; align-items:center; gap:8px; width:100%; color:#173f54; font-weight:800; }
 .coordinator-user-picker .user-assign-selected > span em,
-.coordinator-picker-option-identity > div > span { display:inline-flex; align-items:center; flex:none; padding:3px 7px; border-radius:999px; color:#285b70; background:#eaf3f6; font-size:9px; font-style:normal; font-weight:800; letter-spacing:.015em; }
+.coordinator-picker-option-heading > span { display:inline-flex; align-items:center; flex:none; padding:3px 7px; border-radius:999px; color:#285b70; background:#eaf3f6; font-size:9px; font-style:normal; font-weight:800; letter-spacing:.015em; }
 .coordinator-user-picker .user-assign-selected > small { color:#778b91; font-size:9px; }
-.coordinator-picker-panel { overflow:hidden; border:1px solid #b9d1db; border-radius:11px; box-shadow:0 16px 38px rgba(17,61,84,.18); background:#fff; }
-.coordinator-picker-panel .searchable-select-search { padding:9px 10px; border-bottom:1px solid #dce8ec; background:#f7fafb; }
-.coordinator-picker-panel .searchable-select-list { max-height:150px; padding:4px; }
-.coordinator-picker-panel .searchable-select-option.user-assign-option { display:block; padding:9px 10px; border-radius:7px; }
+.coordinator-picker-panel { max-width:min(680px,calc(100vw - 24px)); overflow:hidden; border:1px solid #b9d1db; border-radius:11px; box-shadow:0 16px 38px rgba(17,61,84,.18); background:#fff; }
+.coordinator-picker-panel .searchable-select-search { padding:11px 12px; border-bottom:1px solid #dce8ec; background:#f7fafb; }
+.coordinator-picker-panel .searchable-select-list { max-height:min(300px,38vh); padding:6px; }
+.coordinator-picker-panel .searchable-select-option.user-assign-option { display:block; padding:11px 12px; border-radius:8px; }
 .coordinator-picker-panel .searchable-select-option.user-assign-option + .searchable-select-option.user-assign-option { border-top:1px solid #edf2f4; }
 .coordinator-picker-panel .searchable-select-option.user-assign-option:hover { background:#f0f6f8; }
 .coordinator-picker-panel .searchable-select-option.user-assign-option.active { background:#e7f2f7; box-shadow:inset 3px 0 #1d6a86; }
-.coordinator-picker-option-identity { display:grid; gap:4px; min-width:0; }
-.coordinator-picker-option-identity > div { display:flex; align-items:center; justify-content:space-between; gap:10px; min-width:0; }
-.coordinator-picker-option-identity > div > strong { min-width:0; overflow:hidden; color:#183f4e; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
-.coordinator-picker-option-identity > small { overflow:hidden; color:#74878d; font-size:9px; font-weight:600; text-overflow:ellipsis; white-space:nowrap; }
-.coordinator-picker-option-identity > small strong { color:#23627a; font-weight:800; }
-.coordinator-picker-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:7px 11px; border-top:1px solid #dce8ec; color:#7c8d92; background:#f7fafb; font-size:8px; font-weight:700; }
+.coordinator-picker-option-identity { display:grid; gap:9px; min-width:0; }
+.coordinator-picker-option-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:0; }
+.coordinator-picker-option-heading > strong { min-width:0; overflow:hidden; color:#183f4e; font-size:13px; text-overflow:ellipsis; white-space:nowrap; }
+.coordinator-picker-option-meta { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px 16px; }
+.coordinator-picker-option-meta > span { display:grid; gap:2px; min-width:0; }
+.coordinator-picker-option-meta em { color:#809197; font-size:9px; font-style:normal; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }
+.coordinator-picker-option-meta strong { color:#315d6b; font-size:10px; font-weight:700; line-height:1.4; overflow-wrap:anywhere; }
+.coordinator-picker-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 12px; border-top:1px solid #dce8ec; color:#6f8288; background:#f7fafb; font-size:9px; font-weight:750; }
+@media (max-width: 560px) { .coordinator-picker-option-heading { align-items:flex-start; flex-direction:column; gap:5px; }.coordinator-picker-option-meta { grid-template-columns:1fr; } }
 
 /* MultiUserAssignSelect ("Assign Tester(s)") -- reuses .searchable-select-panel
    etc. above for the dropdown, but the trigger itself is a wrapping row of
@@ -7603,7 +7605,91 @@ td { padding: 12px; }
   .coordinator-review-list > div { grid-template-columns:1fr; grid-template-areas:"identity" "workspace" "roles" "action"; align-items:start; }
   .coordinator-review-action { width:100%; }
 }
-.workspace-coordinator-add { display:grid; grid-template-columns:minmax(220px,1.25fr) minmax(190px,1fr) auto; align-items:end; }
+.workspace-local-admins { display:grid; gap:16px; }
+.local-admin-overview { display:flex; align-items:center; justify-content:space-between; gap:22px; padding:16px 18px; border:1px solid #d9dcf8; border-radius:12px; background:linear-gradient(112deg,#eef2ff 0%,#f7f8ff 42%,#fff 78%); }
+.local-admin-overview-copy { display:grid; gap:3px; max-width:650px; }
+.local-admin-overview-copy > small,.coordinator-card-heading small,.coordinator-directory-heading > div > small { color:#4f46e5; font-size:9px; font-weight:850; letter-spacing:.13em; text-transform:uppercase; }
+.local-admin-overview-copy h4 { margin:0; color:#18213a; font-size:16px; letter-spacing:-.01em; }
+.local-admin-overview-copy p { color:#667085; font-size:11px; line-height:1.5; }
+.local-admin-metrics { display:flex; flex:none; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+.local-admin-metric { display:grid; gap:1px; min-width:92px; padding:8px 11px; border:1px solid rgba(99,102,241,.18); border-radius:9px; background:rgba(255,255,255,.88); box-shadow:0 1px 2px rgba(31,41,55,.04); }
+.local-admin-metric strong { color:#3730a3; font-size:17px; line-height:1.1; }
+.local-admin-metric small { color:#70788c; font-size:9px; font-weight:700; line-height:1.35; }
+.coordinator-admin-tools { display:grid; grid-template-columns:minmax(310px,.82fr) minmax(480px,1.18fr); align-items:stretch; gap:12px; }
+.coordinator-policy-card,.coordinator-assignment-card { display:grid; align-content:start; gap:12px; min-width:0; padding:15px; border:1px solid var(--border); border-radius:11px; background:#fff; box-shadow:var(--shadow-xs); }
+.coordinator-policy-card { background:linear-gradient(145deg,#fbfbff,#f7f8ff); }
+.coordinator-assignment-card { border-color:#d9e6e9; background:linear-gradient(145deg,#fff,#fbfdfd); }
+.coordinator-card-heading { display:flex; align-items:flex-start; gap:10px; min-width:0; }
+.coordinator-card-heading > div { display:grid; gap:3px; min-width:0; }
+.coordinator-card-heading h5,.coordinator-directory-heading h5 { margin:0; color:#172033; font-size:13px; }
+.coordinator-card-heading p,.coordinator-directory-heading p { margin:0; color:#70798b; font-size:10px; line-height:1.45; }
+.coordinator-card-icon { display:grid; place-items:center; flex:0 0 34px; width:34px; height:34px; border-radius:9px; color:#4338ca; background:#e8eafe; }
+.coordinator-card-icon.assignment { color:#0b7180; background:#e4f3f5; }
+.coordinator-policy-control { display:grid; grid-template-columns:1fr; align-items:start; gap:8px; }
+.coordinator-policy-control .role-access-control { width:100%; min-width:0; max-width:none; }
+.coordinator-policy-control .btn { justify-self:start; white-space:nowrap; }
+.coordinator-policy-loading { min-height:43px; display:flex; align-items:center; }
+.coordinator-policy-note,.coordinator-policy-saved { display:flex; align-items:flex-start; gap:6px; margin:0; padding-top:9px; border-top:1px solid #e4e5f2; color:#727b8d; font-size:9.5px; line-height:1.45; }
+.coordinator-policy-note svg,.coordinator-policy-saved svg { flex:none; margin-top:1px; }
+.coordinator-policy-saved { padding:8px 9px; border:1px solid #bce4cb; border-radius:7px; color:#166534; background:#f0fdf4; font-weight:700; }
+.coordinator-assignment-card .workspace-instruction { margin:0; }
+.workspace-coordinator-add { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; gap:9px; margin-top:0; }
+.workspace-coordinator-add > .form-field:first-child { grid-column:1 / -1; }
+.workspace-coordinator-add > .btn { align-self:end; }
+.workspace-coordinator-scope-note { margin:0; padding:8px 10px; border:1px solid #f1d79d; border-radius:7px; color:#865b13; background:#fffaf0; font-size:10px; line-height:1.4; }
+.coordinator-directory { display:grid; gap:11px; min-width:0; }
+.coordinator-directory-heading { display:flex; align-items:end; justify-content:space-between; gap:16px; padding:2px 1px 0; }
+.coordinator-directory-heading > div { display:grid; gap:3px; min-width:0; }
+.coordinator-directory-count { display:inline-flex; align-items:center; flex:none; gap:6px; padding:6px 9px; border:1px solid #d9dcf8; border-radius:999px; color:#4338ca; background:#f7f7ff; font-size:10px; font-weight:800; white-space:nowrap; }
+.coordinator-department-grid { display:grid; grid-template-columns:1fr; align-items:start; gap:10px; }
+.coordinator-department-card { min-width:0; overflow:hidden; border:1px solid #dfe3ed; border-radius:12px; background:#fff; box-shadow:var(--shadow-xs); }
+.coordinator-department-card[open] { border-color:#cfd4ee; box-shadow:0 4px 12px rgba(45,55,100,.06); }
+.coordinator-department-card.inactive { border-color:#edcf92; }
+.coordinator-department-head { display:grid; grid-template-columns:auto minmax(0,1fr) auto auto; align-items:center; gap:10px; padding:12px 13px; list-style:none; cursor:pointer; background:linear-gradient(105deg,#f7f8ff,#fcfcff); }
+.coordinator-department-head::-webkit-details-marker { display:none; }
+.coordinator-department-head::after { content:'›'; display:grid; place-items:center; width:21px; height:21px; border-radius:6px; color:#6d7190; background:#fff; font-size:17px; line-height:1; transform:rotate(90deg); transition:transform .15s var(--ease); }
+.coordinator-department-card[open] .coordinator-department-head { border-bottom:1px solid #e8e9f2; }
+.coordinator-department-card[open] .coordinator-department-head::after { transform:rotate(-90deg); }
+.coordinator-department-head:focus-visible { outline:2px solid #6366f1; outline-offset:-2px; }
+.coordinator-department-icon { display:grid; place-items:center; width:35px; height:35px; border:1px solid #d9dcf8; border-radius:9px; color:#3730a3; background:#eceefe; font-size:10px; font-weight:850; letter-spacing:.04em; }
+.coordinator-department-card.inactive .coordinator-department-icon { border-color:#efd9aa; color:#8a5a0a; background:#fff8e8; }
+.coordinator-department-copy { display:grid; gap:2px; min-width:0; }
+.coordinator-department-copy strong { overflow:hidden; color:#222b40; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.coordinator-department-copy small { overflow:hidden; color:#747d8d; font-size:9.5px; text-overflow:ellipsis; white-space:nowrap; }
+.coordinator-department-count { padding:4px 7px; border:1px solid #dfe1f1; border-radius:999px; color:#52567a; background:#fff; font-size:9px; font-weight:800; white-space:nowrap; }
+.coordinator-department-roster { display:grid; }
+.coordinator-person-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; min-width:0; padding:11px 13px; }
+.coordinator-person-row + .coordinator-person-row { border-top:1px solid #eceef4; }
+.coordinator-person-avatar { display:grid; place-items:center; width:32px; height:32px; border-radius:50%; color:#1f6571; background:#e4f1f3; font-size:9px; font-weight:850; }
+.coordinator-person-copy { display:grid; gap:2px; min-width:0; }
+.coordinator-person-copy > strong,.coordinator-person-copy > small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.coordinator-person-copy > strong { color:#253044; font-size:11px; }
+.coordinator-person-copy > small { color:#7a8492; font-size:9.5px; }
+.coordinator-origin { display:inline-flex; align-items:center; gap:4px; width:max-content; max-width:100%; overflow:hidden; margin-top:2px; padding:3px 6px; border-radius:999px; color:#3f3a9e; background:#eef0ff; font-size:9px; font-weight:800; line-height:1.25; text-overflow:ellipsis; white-space:nowrap; }
+.coordinator-origin.inherited { color:#596b73; background:#edf2f3; }
+.coordinator-origin svg { flex:none; }
+.coordinator-person-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:6px; }
+.coordinator-person-actions .workspace-manage-access { border-color:#d8dced; color:#3730a3; background:#fff; }
+.coordinator-person-actions .coordinator-remove-assignment { border-color:#efc3c7; color:#b4232d; background:#fffafa; }
+.coordinator-person-actions .inherited-member-lock { color:#68777e; border-color:#dfe6e8; background:#f3f6f7; opacity:1; cursor:not-allowed; }
+.coordinator-empty-state { display:grid; place-items:center; gap:5px; min-height:150px; padding:24px; border:1px dashed #cfd6e3; border-radius:12px; color:#75808e; background:#fafbfc; text-align:center; }
+.coordinator-empty-state > span { display:grid; place-items:center; width:42px; height:42px; border-radius:12px; color:#5753b5; background:#eef0ff; }
+.coordinator-empty-state strong { color:#30394d; font-size:12px; }
+.coordinator-empty-state p { max-width:430px; color:#7a8491; font-size:10px; line-height:1.5; }
+@media (max-width: 1180px) { .coordinator-admin-tools { grid-template-columns:1fr; } }
+@media (max-width: 680px) {
+  .local-admin-overview,.coordinator-directory-heading { align-items:flex-start; flex-direction:column; }
+  .local-admin-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); width:100%; }
+  .local-admin-metric { min-width:0; }
+  .coordinator-policy-control .btn { width:100%; }
+  .coordinator-department-head { grid-template-columns:auto minmax(0,1fr) auto; }
+  .coordinator-department-icon { grid-column:1; grid-row:1 / span 2; }
+  .coordinator-department-copy { grid-column:2; grid-row:1; }
+  .coordinator-department-count { grid-column:2; grid-row:2; justify-self:start; }
+  .coordinator-department-head::after { grid-column:3; grid-row:1 / span 2; }
+  .coordinator-person-row { grid-template-columns:auto minmax(0,1fr); }
+  .coordinator-person-actions { grid-column:1 / -1; justify-content:flex-start; }
+}
 .workspace-settings-form { display:grid; gap:14px; max-width:760px; margin-top:16px; }
 .workspace-settings-form .form-field { margin:0; }
 .workspace-hierarchy-summary { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:14px; border:1px solid var(--border); border-radius:10px; background:var(--soft); }

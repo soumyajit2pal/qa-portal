@@ -20,6 +20,7 @@ import {
   DashboardAttentionMetric, DashboardAttentionOut, DashboardAttentionRow,
   FortifySuppressedSeverity, FortifySuppressionDetailOut, FortifySuppressionDetailRow,
 } from './types'
+import { formatRoleLabels } from './constants'
 
 // A single request, whatever its underlying type, reduced to the handful of
 // fields "My Requests & My Department" needs -- lets that section show one
@@ -448,7 +449,7 @@ function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
             <div className={`icon-wrap ${cls}`}><Icon width={14} height={14} /></div>
             <div>
               <div className="title">{a.step_name} {a.decision?.toLowerCase()}</div>
-              <div className="sub">{a.entity_type.replace('_', ' ')} #{a.entity_id} &middot; {a.actor_role || 'System'} &middot; {timeAgo(a.created_at)}</div>
+              <div className="sub">{a.entity_type.replace('_', ' ')} #{a.entity_id} &middot; {formatRoleLabels(a.actor_role) || 'System'} &middot; {timeAgo(a.created_at)}</div>
             </div>
           </div>
         )
@@ -1195,7 +1196,7 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
               <Table rowKey="at" columns={[
                 { key: 'step', header: 'Step' },
                 { key: 'decision', header: 'Decision' },
-                { key: 'actor_role', header: 'Role' },
+                { key: 'actor_role', header: 'Role', render: (r) => formatRoleLabels(r.actor_role) || '—' },
                 { key: 'at', header: 'When', render: (r) => formatDateTimeIST(r.at) },
               ]} rows={detail.lifecycle} />
               <div className="section-title">Readiness Checklist</div>

@@ -26,6 +26,7 @@ from ..constants import (
     GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
     QA_REQUEST_CREATOR_ROLES,
     POST_SIT_ENVIRONMENTS,
+    format_role_labels,
     validate_environment_promotion, validate_target_release_date,
 )
 # Every Functional/SAST/DAST/Performance checklist is Admin-configurable now
@@ -1841,7 +1842,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
     for h in history_rows:
         actor = db.get(models.User, h.actor_id) if h.actor_id else None
         history.append((h.step_name or "—", h.decision or "—", actor.full_name if actor else "—",
-                         h.actor_role or "—", h.comments or "—",
+                         format_role_labels(h.actor_role) or "—", h.comments or "—",
                          h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
 
     # request_id isn't assigned until the gateway is actually raised (see its

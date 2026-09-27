@@ -12,7 +12,7 @@ from ..pagination import Page, PageParams, apply_search, apply_status_filter, ap
 from ..deps import (get_workflow_user as get_current_user, require_workflow_roles as require_roles, require_not_requester,
                     dashboard_department_scope, active_qa_workspace_scope_ids,
                     require_entity_workspace_visibility)
-from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, validate_environment_promotion
+from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, format_role_labels, validate_environment_promotion
 from ..pdf_export import (
     DIGITAL_SIGNATURE_METHOD,
     QA_CLEARANCE_SIGNED_TYPE,
@@ -602,7 +602,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     reset_index = max((i for i, h in enumerate(history_rows) if h.decision == 'Approval reset'), default=-1)
     for h in history_rows[reset_index + 1:]:
         history.append((h.step_name or "—", h.decision or "—", uname(h.actor_id) or "—",
-                         h.actor_role or "—", h.comments or "—",
+                         format_role_labels(h.actor_role) or "—", h.comments or "—",
                          h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
 
     buf = build_request_detail_pdf(

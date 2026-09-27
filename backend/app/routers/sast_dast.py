@@ -17,7 +17,7 @@ from ..deps import (
     department_unit_visibility_condition, require_department_unit_visibility,
     require_department_unit_action_scope, has_department_unit_action_scope,
 )
-from ..constants import Role, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SAST_DAST_STATUS_LABELS, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES, is_readiness_evidence_editable, application_name_block_message
+from ..constants import Role, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SAST_DAST_STATUS_LABELS, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES, format_role_labels, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
@@ -74,7 +74,7 @@ def _sast_dast_history(db: Session, kind: str, req_id: int) -> Tuple[list, Optio
     for the PDF exporter."""
     rows = _sast_dast_history_rows(db, kind, req_id)
     history = [(h.step_name or "—", h.decision or "—", _uname(db, h.actor_id) or "—",
-                h.actor_role or "—", h.comments or "—",
+                format_role_labels(h.actor_role) or "—", h.comments or "—",
                 h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—") for h in rows]
     return history, None
 

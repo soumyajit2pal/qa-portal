@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session, selectinload
 
 from . import models
-from .constants import Role
+from .constants import Role, format_role_labels
 from .workspace_service import selectable_workspace_ids
 
 
@@ -53,7 +53,7 @@ def _access_source(user: models.User, workspace: models.QAWorkspace, assigned_ro
     if Role.ADMIN in assigned_roles:
         return "System Administrator", "Administrative access; workflow limited to own department and valid stage", direct, ""
     if Role.SCALE_6_PLUS in assigned_roles:
-        return "Scale 6+", "Organization-wide read only", direct, ""
+        return "Enterprise Viewer", "Organization-wide read only", direct, ""
     if direct:
         grant = direct[0]
         level = {
@@ -110,7 +110,7 @@ def user_access_workbook(db: Session, actor: models.User) -> io.BytesIO:
             "Active" if user.is_active else "Disabled",
             "Yes" if user.needs_role_review else "No",
             "Yes" if user.needs_department_selection else "No",
-            ", ".join(user.departments), ", ".join(sorted(roles)),
+            ", ".join(user.departments), format_role_labels(sorted(roles)),
             "Yes" if user.admin_managed_only else "No",
             "Yes" if user.show_in_user_dropdowns else "No",
             preferred.name if preferred else "", len(accessible_ids),
@@ -123,7 +123,7 @@ def user_access_workbook(db: Session, actor: models.User) -> io.BytesIO:
             effective.append([
                 user.id, user.username, workspace.id, workspace.workspace_key, workspace.name,
                 parent.name if parent else "", source, level, ", ".join(direct_roles),
-                inherited, ", ".join(user.departments), ", ".join(sorted(roles)),
+                inherited, ", ".join(user.departments), format_role_labels(sorted(roles)),
             ])
         for membership in sorted(user.qa_workspace_memberships,
                                  key=lambda row: (row.workspace_id, row.role, row.id)):

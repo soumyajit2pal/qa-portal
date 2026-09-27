@@ -14,6 +14,7 @@ from ldap3.utils.conv import escape_filter_chars
 from ldap3.utils.dn import escape_rdn
 
 from .config import settings
+from . import ldap_settings
 
 
 SECRET_KEY = settings.secret_key
@@ -93,11 +94,16 @@ def renew_access_token(token: str, username: str, roles: list[str]) -> str:
 # ---------------------------------------------------------------------------
 # Users whose account has login_type == "LDAP" are never given a local
 # password hash; instead their credentials are verified live against the
-# bank's directory server every time they log in. All connection details are
-# environment-driven so the same code works against on-prem AD or OpenLDAP
-# without a code change -- only the .env needs updating per environment.
+# bank's directory server every time they log in. Environment values bootstrap
+# the connection; after an administrator saves the LDAP page, the persistent
+# database configuration becomes authoritative at runtime.
 LDAP_SERVER_URI = os.getenv("LDAP_SERVER_URI", "").strip()
 LDAP_USE_SSL = os.getenv("LDAP_USE_SSL", "true").strip().lower() in {"1", "true", "yes", "on"}
+# Optional PEM bundle containing the private/root CA certificates that issue
+# the directory server certificate. When omitted, ldap3 uses the operating
+# system trust store. The singular name is intentional and is the supported
+# deployment setting.
+LDAP_CA_CERT_FILE = os.getenv("LDAP_CA_CERT_FILE", "").strip()
 LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "").strip()
 LDAP_USER_SEARCH_FILTER = os.getenv("LDAP_USER_SEARCH_FILTER", "(sAMAccountName={username})")
 # Strategy 1 (recommended): a read-only service account searches for the
@@ -117,6 +123,29 @@ LDAP_ATTR_FULL_NAME = os.getenv("LDAP_ATTR_FULL_NAME", "displayName")
 LDAP_ATTR_EMAIL = os.getenv("LDAP_ATTR_EMAIL", "mail")
 LDAP_ATTR_DEPARTMENT = os.getenv("LDAP_ATTR_DEPARTMENT", "department")
 _PROFILE_ATTRS = [LDAP_ATTR_FULL_NAME, LDAP_ATTR_EMAIL, LDAP_ATTR_DEPARTMENT, "cn"]
+
+
+def environment_ldap_config() -> dict:
+    """Current environment-backed defaults (also keeps legacy tests patchable)."""
+    return {
+        "enabled": bool(LDAP_SERVER_URI),
+        "server_uri": LDAP_SERVER_URI,
+        "use_ssl": LDAP_USE_SSL,
+        "ca_cert_file": LDAP_CA_CERT_FILE,
+        "base_dn": LDAP_BASE_DN,
+        "user_search_filter": LDAP_USER_SEARCH_FILTER,
+        "bind_dn": LDAP_BIND_DN,
+        "bind_password": LDAP_BIND_PASSWORD,
+        "user_dn_template": LDAP_USER_DN_TEMPLATE,
+        "attr_full_name": LDAP_ATTR_FULL_NAME,
+        "attr_email": LDAP_ATTR_EMAIL,
+        "attr_department": LDAP_ATTR_DEPARTMENT,
+        "fallback_file": settings.app_env_file,
+    }
+
+
+def effective_ldap_config(db=None) -> dict:
+    return ldap_settings.load(db, environment_ldap_config())
 
 
 _LDAP_PUBLIC_ERRORS = {
@@ -435,7 +464,23 @@ def _first_attr(entry, name):
         return None
 
 
-def _ldap_bind_and_fetch(username: str, password: str):
+def _ldap_transport_uses_ssl(server_uri: str, use_ssl: bool) -> bool:
+    """Resolve the real transport without rejecting an administrator's choice.
+
+    ldap3 treats an explicit URI scheme as authoritative.  Mirror that rule
+    here so plain ``ldap://`` remains usable (with the warning shown by the
+    admin UI), while hostnames without a scheme continue to use the persisted
+    TLS / SSL setting.
+    """
+    normalized_uri = server_uri.strip().lower()
+    if normalized_uri.startswith("ldap://"):
+        return False
+    if normalized_uri.startswith("ldaps://"):
+        return True
+    return bool(use_ssl)
+
+
+def _ldap_bind_and_fetch(username: str, password: str, db=None, config_override: dict | None = None):
     """Attempts to bind as `username` with `password` against the configured
     directory. Returns None if the bind fails, otherwise a dict:
     {"dn": ..., "full_name": ..., "email": ..., "department": ...}
@@ -444,6 +489,22 @@ def _ldap_bind_and_fetch(username: str, password: str):
     mock_profile, handled_by_mock = _mock_ldap_profile(username, password)
     if handled_by_mock:
         return mock_profile
+    config = config_override or effective_ldap_config(db)
+    enabled = bool(config.get("enabled"))
+    server_uri = (config.get("server_uri") or "").strip()
+    use_ssl = bool(config.get("use_ssl"))
+    ca_cert_file = (config.get("ca_cert_file") or "").strip()
+    base_dn = (config.get("base_dn") or "").strip()
+    user_search_filter = config.get("user_search_filter") or "(sAMAccountName={username})"
+    bind_dn = (config.get("bind_dn") or "").strip()
+    bind_password = config.get("bind_password") or ""
+    user_dn_template = config.get("user_dn_template") or ""
+    attr_full_name = config.get("attr_full_name") or "displayName"
+    attr_email = config.get("attr_email") or "mail"
+    attr_department = config.get("attr_department") or "department"
+    profile_attrs = list(dict.fromkeys([attr_full_name, attr_email, attr_department, "cn"]))
+    if not enabled:
+        return None
     # In a mock-only UAT environment the configured mock namespace is the
     # complete directory. A typo outside that namespace is an ordinary
     # invalid identity, not an attempt to contact a real LDAP service that is
@@ -451,23 +512,27 @@ def _ldap_bind_and_fetch(username: str, password: str):
     # to the missing LDAP_SERVER_URI check and was incorrectly reported as a
     # temporary service outage. When a real server is configured, non-mock
     # usernames continue to fall through to that server as before.
-    if settings.ldap_mock_enabled and not LDAP_SERVER_URI:
+    if settings.ldap_mock_enabled and not server_uri:
         return None
-    if not LDAP_SERVER_URI:
+    if not server_uri:
         raise LDAPAuthError(
             "LDAP_SERVER_URI is not configured on the server",
             code="LDAP_NOT_CONFIGURED",
             operation="configuration",
         )
-    if settings.app_env in {"uat", "prod", "production"} and not LDAP_USE_SSL:
+    use_ssl = _ldap_transport_uses_ssl(server_uri, use_ssl)
+    if ca_cert_file and (
+        not os.path.isfile(ca_cert_file)
+        or not os.access(ca_cert_file, os.R_OK)
+    ):
         raise LDAPAuthError(
-            "LDAP_USE_SSL must be enabled outside development",
+            "LDAP_CA_CERT_FILE does not identify a readable regular file",
             code="LDAP_NOT_CONFIGURED",
             operation="configuration",
         )
-    if LDAP_USE_SSL and LDAP_SERVER_URI.lower().startswith("ldap://"):
+    if bind_dn and base_dn and not bind_password:
         raise LDAPAuthError(
-            "Use an ldaps:// URI or hostname when LDAP_USE_SSL is enabled",
+            "LDAP_BIND_PASSWORD is required for search-then-bind authentication",
             code="LDAP_NOT_CONFIGURED",
             operation="configuration",
         )
@@ -476,22 +541,30 @@ def _ldap_bind_and_fetch(username: str, password: str):
 
     stage = "connect"
     try:
-        tls = Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=os.getenv("LDAP_CA_CERTS_FILE") or None)
-        server = Server(LDAP_SERVER_URI, use_ssl=LDAP_USE_SSL, tls=tls, get_info=None)
+        # PROTOCOL_TLS_CLIENT selects modern client-side TLS defaults (TLS 1.2+
+        # with the OpenSSL/Python versions supported by this application).
+        # ldap3 performs hostname matching after the handshake when validation
+        # is CERT_REQUIRED, so both chain and endpoint identity are checked.
+        tls = Tls(
+            validate=ssl.CERT_REQUIRED,
+            version=ssl.PROTOCOL_TLS_CLIENT,
+            ca_certs_file=ca_cert_file or None,
+        )
+        server = Server(server_uri, use_ssl=use_ssl, tls=tls, get_info=None)
 
-        if LDAP_BIND_DN and LDAP_BASE_DN:
+        if bind_dn and base_dn:
             # Strategy 1: service-account search (grabs profile attributes for
             # free), then bind as the resolved user DN to verify the password.
             stage = "service_bind"
-            with Connection(server, user=LDAP_BIND_DN, password=LDAP_BIND_PASSWORD,
+            with Connection(server, user=bind_dn, password=bind_password,
                              authentication=SIMPLE, auto_bind=True) as service_conn:
-                search_filter = LDAP_USER_SEARCH_FILTER.format(username=escape_filter_chars(username))
+                search_filter = user_search_filter.format(username=escape_filter_chars(username))
                 stage = "directory_search"
                 searched = service_conn.search(
-                    search_base=LDAP_BASE_DN,
+                    search_base=base_dn,
                     search_filter=search_filter,
                     search_scope=SUBTREE,
-                    attributes=_PROFILE_ATTRS,
+                    attributes=profile_attrs,
                 )
                 if not searched:
                     diagnostic = _ldap_result_diagnostic(service_conn.result)
@@ -508,9 +581,9 @@ def _ldap_bind_and_fetch(username: str, password: str):
                 user_dn = entry.entry_dn
                 profile = {
                     "dn": user_dn,
-                    "full_name": _first_attr(entry, LDAP_ATTR_FULL_NAME) or _first_attr(entry, "cn"),
-                    "email": _first_attr(entry, LDAP_ATTR_EMAIL),
-                    "department": _first_attr(entry, LDAP_ATTR_DEPARTMENT),
+                    "full_name": _first_attr(entry, attr_full_name) or _first_attr(entry, "cn"),
+                    "email": _first_attr(entry, attr_email),
+                    "department": _first_attr(entry, attr_department),
                 }
             # Do not use Connection as a context manager for the user bind.
             # ldap3 auto-binds during __enter__; invalid credentials then raise
@@ -531,11 +604,11 @@ def _ldap_bind_and_fetch(username: str, password: str):
                     pass
             return profile
 
-        elif LDAP_USER_DN_TEMPLATE:
+        elif user_dn_template:
             # Strategy 2: direct bind using a predictable DN template. No
             # service account, so profile attributes are only available if
             # the directory lets an authenticated user read their own entry.
-            user_dn = LDAP_USER_DN_TEMPLATE.format(username=escape_rdn(username))
+            user_dn = user_dn_template.format(username=escape_rdn(username))
             stage = "user_bind"
             conn = Connection(server, user=user_dn, password=password, authentication=SIMPLE)
             try:
@@ -547,12 +620,12 @@ def _ldap_bind_and_fetch(username: str, password: str):
                 profile = {"dn": user_dn, "full_name": None, "email": None, "department": None}
                 try:
                     conn.search(search_base=user_dn, search_filter="(objectClass=*)",
-                                search_scope=BASE, attributes=_PROFILE_ATTRS)
+                                search_scope=BASE, attributes=profile_attrs)
                     if conn.entries:
                         entry = conn.entries[0]
-                        profile["full_name"] = _first_attr(entry, LDAP_ATTR_FULL_NAME) or _first_attr(entry, "cn")
-                        profile["email"] = _first_attr(entry, LDAP_ATTR_EMAIL)
-                        profile["department"] = _first_attr(entry, LDAP_ATTR_DEPARTMENT)
+                        profile["full_name"] = _first_attr(entry, attr_full_name) or _first_attr(entry, "cn")
+                        profile["email"] = _first_attr(entry, attr_email)
+                        profile["department"] = _first_attr(entry, attr_department)
                 except LDAPException:
                     pass  # profile enrichment is best-effort only
                 return profile
@@ -582,14 +655,14 @@ def _ldap_bind_and_fetch(username: str, password: str):
         raise classified from exc
 
 
-def ldap_authenticate(username: str, password: str) -> bool:
+def ldap_authenticate(username: str, password: str, db=None) -> bool:
     """Simple pass/fail check used on every login for an existing LDAP account."""
-    return _ldap_bind_and_fetch(username, password) is not None
+    return _ldap_bind_and_fetch(username, password, db=db) is not None
 
 
-def ldap_authenticate_with_profile(username: str, password: str):
+def ldap_authenticate_with_profile(username: str, password: str, db=None):
     """Like ldap_authenticate, but also returns best-effort profile attributes
     (full_name/email/department). Used only for just-in-time provisioning of
     a brand-new local account on a first-ever LDAP login. Returns None on
     failed authentication."""
-    return _ldap_bind_and_fetch(username, password)
+    return _ldap_bind_and_fetch(username, password, db=db)
