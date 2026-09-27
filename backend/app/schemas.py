@@ -305,7 +305,17 @@ class LDAPSettingsUpdate(BaseModel):
     enabled: bool = True
     server_uri: str = Field(max_length=500)
     use_ssl: bool = True
+    # Retained only so older API clients do not fail schema validation. The
+    # server never treats this browser-supplied value as a client filesystem
+    # path; CA replacement is performed with the explicit fields below.
     ca_cert_file: str = Field(default="", max_length=1000)
+    ca_certificate_action: Literal["keep", "replace", "remove"] = "keep"
+    ca_certificate_data: Optional[str] = Field(
+        default=None,
+        max_length=1_398_104,
+        repr=False,
+    )
+    ca_certificate_name: Optional[str] = Field(default=None, max_length=255)
     base_dn: str = Field(default="", max_length=1000)
     user_search_filter: str = Field(default="(sAMAccountName={username})", max_length=1000)
     bind_dn: str = Field(default="", max_length=1000)
@@ -325,6 +335,10 @@ class LDAPSettingsUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_ldap_configuration(self):
+        if self.ca_certificate_action == "replace" and not self.ca_certificate_data:
+            raise ValueError("CA certificate data is required when replacing the certificate")
+        if self.ca_certificate_action != "replace" and self.ca_certificate_data is not None:
+            raise ValueError("CA certificate data is allowed only when replacing the certificate")
         if not self.enabled:
             return self
         if not self.server_uri:
@@ -338,11 +352,22 @@ class LDAPSettingsUpdate(BaseModel):
         return self
 
 
+class LDAPCACertificateMetadata(BaseModel):
+    fingerprint_sha256: str
+    subject: str
+    issuer: str
+    not_valid_before: datetime.datetime
+    not_valid_after: datetime.datetime
+
+
 class LDAPSettingsOut(BaseModel):
     enabled: bool
     server_uri: str
     use_ssl: bool
-    ca_cert_file: str
+    ca_certificate_source: Literal["uploaded", "server_file", "system_trust"]
+    ca_certificate_name: str = ""
+    ca_certificate_count: int = 0
+    ca_certificates: List[LDAPCACertificateMetadata] = Field(default_factory=list)
     base_dn: str
     user_search_filter: str
     bind_dn: str

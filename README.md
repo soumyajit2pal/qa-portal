@@ -517,6 +517,7 @@ For real directory authentication, use certificate-verified LDAPS:
 ```env
 LDAP_SERVER_URI=ldaps://directory.example:636
 LDAP_USE_SSL=true
+# Optional bootstrap/recovery path inside the backend host or container:
 LDAP_CA_CERT_FILE=/run/secrets/qualityops/ldap-ca.pem
 LDAP_BASE_DN=dc=example,dc=com
 LDAP_USER_SEARCH_FILTER=(sAMAccountName={username})
@@ -524,17 +525,26 @@ LDAP_BIND_DN=cn=qualityops-bind,ou=service-accounts,dc=example,dc=com
 LDAP_BIND_PASSWORD=secret-store-value
 ```
 
-The Admin page provides a connection-and-user test that evaluates the unsaved form values. Test
+The Admin page accepts a CA certificate upload in PEM or DER format with a `.cer`, `.crt`, or
+`.pem` filename. It stores the certificate bytes with the database-backed LDAP configuration;
+that uploaded certificate takes precedence over `LDAP_CA_CERT_FILE` and requires no writable
+certificate mount. A path from the administrator's workstation cannot be used because the backend
+cannot read the browser's local filesystem. Upload only public CA certificates: private keys,
+PFX/PKCS#12, and PKCS#7 files are unsupported.
+
+The Admin page also provides a connection-and-user test that evaluates the unsaved form values. Test
 credentials are never stored. The service-account bind password is write-only in the UI and is
 stored with authenticated encryption derived from the deployment `SECRET_KEY`; keep that key
 stable. After an intentional key rotation, re-enter and save the LDAP bind password. Every save
 and test is recorded in the audit log without credentials. Keep at least one active Standard
 System Administrator account for recovery from directory or configuration failures.
 
-`LDAP_CA_CERT_FILE` is a PEM CA bundle used to verify the directory server's
-certificate and hostname. If it is empty, the backend uses the operating-system
-trust store. For Compose, place `ldap-ca.pem` in `LOGIN_ENCRYPTION_KEY_HOST_DIR`;
-the existing read-only mount exposes it at `/run/secrets/qualityops/ldap-ca.pem`.
+`LDAP_CA_CERT_FILE` remains an optional bootstrap/recovery or legacy server-side path to a PEM CA
+bundle used to verify the directory server's certificate and hostname. It must name a path visible
+to the backend host or container, not a client-workstation path. If neither an uploaded certificate
+nor this path is configured, the backend uses the operating-system trust store. For the optional
+Compose file-based approach, place `ldap-ca.pem` in `LOGIN_ENCRYPTION_KEY_HOST_DIR`; the existing
+read-only mount exposes it at `/run/secrets/qualityops/ldap-ca.pem`.
 `LDAP_USE_SSL=true` with an `ldaps://` URI is strongly recommended and uses modern
 client defaults (TLS 1.2 or newer). Administrators may explicitly save a plaintext
 LDAP configuration, but the Admin page presents a prominent risk warning and requires

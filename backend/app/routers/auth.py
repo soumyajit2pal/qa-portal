@@ -163,6 +163,9 @@ def update_admin_ldap_settings(
     except HTTPException:
         db.rollback()
         raise
+    except ldap_settings.CertificateValidationError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         db.rollback()
         logger.exception("LDAP configuration could not be saved")
@@ -194,7 +197,13 @@ def test_admin_ldap_settings(
     if not payload.enabled:
         raise HTTPException(400, "Enable LDAP before testing the connection.")
     current = effective_ldap_config(db)
-    candidate = payload.model_dump(exclude={"test_username", "test_password"})
+    try:
+        candidate = ldap_settings.apply_certificate_action(
+            payload.model_dump(exclude={"test_username", "test_password"}),
+            current,
+        )
+    except ldap_settings.CertificateValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if not candidate.get("bind_password"):
         candidate["bind_password"] = current.get("bind_password", "")
     candidate.update(source="unsaved-test", configured=True)

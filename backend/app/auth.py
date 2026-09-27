@@ -494,6 +494,7 @@ def _ldap_bind_and_fetch(username: str, password: str, db=None, config_override:
     server_uri = (config.get("server_uri") or "").strip()
     use_ssl = bool(config.get("use_ssl"))
     ca_cert_file = (config.get("ca_cert_file") or "").strip()
+    ca_certificate_pem = config.get("ca_certificate_pem") or ""
     base_dn = (config.get("base_dn") or "").strip()
     user_search_filter = config.get("user_search_filter") or "(sAMAccountName={username})"
     bind_dn = (config.get("bind_dn") or "").strip()
@@ -521,7 +522,7 @@ def _ldap_bind_and_fetch(username: str, password: str, db=None, config_override:
             operation="configuration",
         )
     use_ssl = _ldap_transport_uses_ssl(server_uri, use_ssl)
-    if ca_cert_file and (
+    if not ca_certificate_pem and ca_cert_file and (
         not os.path.isfile(ca_cert_file)
         or not os.access(ca_cert_file, os.R_OK)
     ):
@@ -548,7 +549,8 @@ def _ldap_bind_and_fetch(username: str, password: str, db=None, config_override:
         tls = Tls(
             validate=ssl.CERT_REQUIRED,
             version=ssl.PROTOCOL_TLS_CLIENT,
-            ca_certs_file=ca_cert_file or None,
+            ca_certs_file=None if ca_certificate_pem else (ca_cert_file or None),
+            ca_certs_data=ca_certificate_pem or None,
         )
         server = Server(server_uri, use_ssl=use_ssl, tls=tls, get_info=None)
 

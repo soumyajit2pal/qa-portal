@@ -794,7 +794,6 @@ type LDAPSettings = {
   enabled: boolean
   server_uri: string
   use_ssl: boolean
-  ca_cert_file: string
   base_dn: string
   user_search_filter: string
   bind_dn: string
@@ -809,13 +808,27 @@ type LDAPSettings = {
   configured?: boolean
   updated_at?: string | null
   fallback_file?: string
+  ca_certificate_source?: 'uploaded' | 'server_file' | 'system_trust'
+  ca_certificate_name?: string | null
+  ca_certificate_count?: number
+  ca_certificates?: Array<{
+    fingerprint_sha256: string
+    subject: string
+    issuer: string
+    not_valid_before: string
+    not_valid_after: string
+  }>
 }
+
+type LDAPCertificateAction = 'keep' | 'replace' | 'remove'
+
+const LDAP_CA_CERTIFICATE_MAX_BYTES = 1024 * 1024
+const LDAP_CA_CERTIFICATE_EXTENSIONS = /\.(cer|crt|pem)$/i
 
 const EMPTY_LDAP_SETTINGS: LDAPSettings = {
   enabled: false,
   server_uri: '',
   use_ssl: true,
-  ca_cert_file: '',
   base_dn: '',
   user_search_filter: '(sAMAccountName={username})',
   bind_dn: '',
@@ -824,6 +837,21 @@ const EMPTY_LDAP_SETTINGS: LDAPSettings = {
   attr_email: 'mail',
   attr_department: 'department',
   bind_password: '',
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer)
+  const chunks: string[] = []
+  const chunkSize = 0x8000
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)))
+  }
+  return btoa(chunks.join(''))
+}
+
+function certificateDate(value: string) {
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
 }
 
 function ldapTransportUsesTls(serverUri: string, useSsl: boolean) {
@@ -844,6 +872,13 @@ function LDAPSettingsCard() {
   const [confirmInsecureSave, setConfirmInsecureSave] = useState(false)
   const [testUsername, setTestUsername] = useState('')
   const [testPassword, setTestPassword] = useState('')
+  const [certificateAction, setCertificateAction] = useState<LDAPCertificateAction>('keep')
+  const [certificateData, setCertificateData] = useState<string | null>(null)
+  const [certificateName, setCertificateName] = useState('')
+  const [certificateBytes, setCertificateBytes] = useState(0)
+  const [certificateError, setCertificateError] = useState('')
+  const [readingCertificate, setReadingCertificate] = useState(false)
+  const [certificateInputKey, setCertificateInputKey] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -860,12 +895,59 @@ function LDAPSettingsCard() {
     setSavedWarning('')
   }
 
+  function clearCertificateSelection(nextAction: LDAPCertificateAction = 'keep') {
+    setCertificateAction(nextAction)
+    setCertificateData(null)
+    setCertificateName('')
+    setCertificateBytes(0)
+    setCertificateError('')
+    setCertificateInputKey(value => value + 1)
+    setMessage('')
+    setSavedWarning('')
+  }
+
+  async function selectCertificate(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget
+    const file = input.files?.[0]
+    input.value = ''
+    if (!file) return
+    setCertificateError('')
+    setMessage('')
+    setSavedWarning('')
+    if (!LDAP_CA_CERTIFICATE_EXTENSIONS.test(file.name)) {
+      setCertificateError('Choose a certificate file ending in .cer, .crt, or .pem.')
+      return
+    }
+    if (file.size === 0) {
+      setCertificateError('The selected certificate file is empty.')
+      return
+    }
+    if (file.size > LDAP_CA_CERTIFICATE_MAX_BYTES) {
+      setCertificateError('The selected certificate file is larger than the 1 MiB limit.')
+      return
+    }
+    setReadingCertificate(true)
+    try {
+      const data = arrayBufferToBase64(await file.arrayBuffer())
+      setCertificateAction('replace')
+      setCertificateData(data)
+      setCertificateName(file.name)
+      setCertificateBytes(file.size)
+    } catch {
+      setCertificateError('The selected certificate file could not be read. Choose the file again.')
+    } finally {
+      setReadingCertificate(false)
+    }
+  }
+
   function payload() {
     return {
       enabled: form.enabled,
       server_uri: form.server_uri.trim(),
       use_ssl: form.use_ssl,
-      ca_cert_file: form.ca_cert_file.trim(),
+      ca_certificate_action: certificateAction,
+      ca_certificate_data: certificateAction === 'replace' ? certificateData : null,
+      ca_certificate_name: certificateAction === 'replace' ? certificateName : null,
       base_dn: form.base_dn.trim(),
       user_search_filter: form.user_search_filter.trim(),
       bind_dn: form.bind_dn.trim(),
@@ -878,12 +960,17 @@ function LDAPSettingsCard() {
   }
 
   async function persist() {
+    if (certificateAction === 'replace' && (!certificateData || !certificateName)) {
+      setError(new Error('Choose a CA certificate file before saving the replacement.'))
+      return
+    }
     const savingWithoutTls = !ldapTransportUsesTls(form.server_uri, form.use_ssl)
     setBusy(true); setError(null); setMessage('')
     setSavedWarning('')
     try {
       const saved = await api.put<LDAPSettings>('/api/auth/admin/ldap-settings', payload())
       setForm({ ...saved, bind_password: '' })
+      clearCertificateSelection()
       if (savingWithoutTls) setSavedWarning('LDAP configuration was saved with TLS disabled. Directory credentials and traffic are not protected by transport encryption.')
       else setMessage('LDAP configuration saved and is now the active runtime configuration.')
     } catch (err) { setError(err) } finally { setBusy(false) }
@@ -899,6 +986,10 @@ function LDAPSettingsCard() {
   }
 
   async function testConnection() {
+    if (certificateAction === 'replace' && (!certificateData || !certificateName)) {
+      setError(new Error('Choose a CA certificate file before testing the replacement.'))
+      return
+    }
     setTesting(true); setError(null); setMessage('')
     try {
       const result = await api.post<{ ok: boolean; message: string }>('/api/auth/admin/ldap-settings/test', {
@@ -912,6 +1003,11 @@ function LDAPSettingsCard() {
   if (loading) return <Card title="LDAP Configuration"><p>Loading LDAP configuration…</p></Card>
   const searchBind = !!form.bind_dn.trim() || !!form.base_dn.trim()
   const transportUsesTls = ldapTransportUsesTls(form.server_uri, form.use_ssl)
+  const certificateSourceLabel = form.ca_certificate_source === 'uploaded'
+    ? 'Uploaded CA certificate active'
+    : form.ca_certificate_source === 'server_file'
+      ? 'Server-managed CA certificate active'
+      : 'System trust store active'
   return <Card title="LDAP / Active Directory Configuration">
     <p className="muted small">Once saved, these database-backed values are authoritative and apply immediately. Values supplied through <code>APP_ENV_FILE</code> are used only while no database configuration exists. Keep a Standard System Administrator account available for recovery.</p>
     <div className="document-upload-summary" style={{ marginTop: 12 }}>
@@ -927,13 +1023,51 @@ function LDAPSettingsCard() {
       <div className="form-grid">
         <Field label="LDAP server URI *"><input required={form.enabled} value={form.server_uri} onChange={event => set('server_uri', event.target.value)} placeholder="ldap://directory.example:389 or ldaps://directory.example:636" /></Field>
         <Field label="TLS / SSL"><select value={String(form.use_ssl)} onChange={event => set('use_ssl', event.target.value === 'true')}><option value="true">True</option><option value="false">False</option></select></Field>
-        <Field label="CA certificate file"><input value={form.ca_cert_file} onChange={event => set('ca_cert_file', event.target.value)} placeholder="/run/secrets/qualityops/ldap-ca.pem" /></Field>
         <Field label="Base DN"><input value={form.base_dn} onChange={event => set('base_dn', event.target.value)} placeholder="dc=example,dc=com" /></Field>
         <Field label="User search filter"><input value={form.user_search_filter} onChange={event => set('user_search_filter', event.target.value)} placeholder="(sAMAccountName={username})" /></Field>
         <Field label="Bind DN"><input value={form.bind_dn} onChange={event => set('bind_dn', event.target.value)} placeholder="cn=service-account,ou=users,dc=example,dc=com" autoComplete="off" /></Field>
         <Field label={`Bind password${form.bind_password_configured ? ' (configured)' : ''}`}><input type="password" value={form.bind_password || ''} onChange={event => set('bind_password', event.target.value)} placeholder={form.bind_password_configured ? 'Leave blank to keep current password' : 'Required for search bind'} autoComplete="new-password" /></Field>
         <Field label="Direct user DN template"><input value={form.user_dn_template} onChange={event => set('user_dn_template', event.target.value)} placeholder="uid={username},ou=people,dc=example,dc=com" /></Field>
       </div>
+      <section style={{ marginTop: 18 }}>
+        <h4>LDAP TLS CA certificate</h4>
+        <p className="muted small">Upload a certificate from this device for LDAPS verification. The certificate contents are sent securely; the local file path is never sent or stored. PEM bundles may contain more than one CA certificate.</p>
+        <div className={`document-upload-summary${certificateAction === 'keep' ? '' : ' partial'}`} style={{ marginTop: 10 }}>
+          <strong>{certificateAction === 'replace' ? 'Replacement selected' : certificateAction === 'remove' ? 'Certificate removal pending' : certificateSourceLabel}</strong>
+          <span>{certificateAction === 'replace'
+            ? `${certificateName} (${certificateBytes.toLocaleString()} bytes) will be used by Test and saved when you save this configuration.`
+            : certificateAction === 'remove'
+              ? 'Test will use the operating system trust store. Save the configuration to make this change permanent.'
+              : form.ca_certificate_source === 'system_trust'
+                ? 'LDAPS uses the certificate authorities installed in the operating system trust store.'
+                : `${form.ca_certificate_name || 'CA certificate'}${form.ca_certificate_count ? ` · ${form.ca_certificate_count} certificate${form.ca_certificate_count === 1 ? '' : 's'}` : ''}. Existing certificate is retained unless you replace or remove it.`}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 10 }}>
+          <input
+            key={certificateInputKey}
+            type="file"
+            accept=".cer,.crt,.pem,application/pkix-cert,application/x-x509-ca-cert"
+            aria-label="Choose LDAP CA certificate"
+            disabled={busy || testing || readingCertificate}
+            onChange={selectCertificate}
+          />
+          {certificateAction === 'replace' && <button type="button" className="btn btn-sm" disabled={busy || testing || readingCertificate} onClick={() => clearCertificateSelection()}>Cancel replacement</button>}
+          {certificateAction === 'remove' && <button type="button" className="btn btn-sm" disabled={busy || testing} onClick={() => clearCertificateSelection()}>Keep current certificate</button>}
+          {certificateAction === 'keep' && form.ca_certificate_source !== 'system_trust' && <button type="button" className="btn btn-sm" disabled={busy || testing || readingCertificate} onClick={() => clearCertificateSelection('remove')}>Remove certificate and use system trust</button>}
+          {readingCertificate && <span className="muted small" role="status">Reading certificate…</span>}
+        </div>
+        <p className="muted small">Accepted file types: .cer, .crt, and .pem. Maximum size: 1 MiB.</p>
+        {certificateError && <div className="document-upload-capacity error" role="alert"><strong>Certificate not selected</strong><span>{certificateError}</span></div>}
+        {certificateAction === 'keep' && !!form.ca_certificates?.length && <details style={{ marginTop: 10 }}>
+          <summary>View certificate details</summary>
+          {form.ca_certificates.map((certificate, index) => <div className="document-upload-summary" style={{ marginTop: 8 }} key={`${certificate.fingerprint_sha256}-${index}`}>
+            <strong>{certificate.subject || `Certificate ${index + 1}`}</strong>
+            <span>Issuer: {certificate.issuer || 'Unknown'}</span>
+            <span>Valid: {certificateDate(certificate.not_valid_before)} – {certificateDate(certificate.not_valid_after)}</span>
+            <span style={{ overflowWrap: 'anywhere' }}>SHA-256: {certificate.fingerprint_sha256}</span>
+          </div>)}
+        </details>}
+      </section>
       {!transportUsesTls && <div className="alert-banner" role="alert" style={{ marginTop: 12 }}><div className="icon-wrap"><IconWarning width={16} height={16} /></div><div className="body"><div className="title">Warning: this LDAP connection is not encrypted</div><div className="sub">Plain LDAP is allowed, but bind credentials and user passwords may travel without transport encryption. Use an <code>ldaps://</code> URI whenever the directory supports it.</div></div></div>}
       <p className="muted small">Use either service-account search (Bind DN + Base DN) or a Direct user DN template. The selected username pattern must contain <code>{'{username}'}</code>.</p>
       <h4 style={{ marginTop: 20 }}>Directory profile attributes</h4>
@@ -952,8 +1086,8 @@ function LDAPSettingsCard() {
       {message && <div className="document-upload-summary" role="status"><strong>✓ {message}</strong></div>}
       {savedWarning && <div className="alert-banner" role="alert"><div className="icon-wrap"><IconWarning width={16} height={16} /></div><div className="body"><div className="title">Saved with TLS disabled</div><div className="sub">{savedWarning}</div></div></div>}
       <div className="modal-actions" style={{ justifyContent: 'flex-start', marginTop: 16 }}>
-        <button type="button" className="btn" disabled={testing || busy || !form.enabled || !testUsername.trim() || !testPassword || (searchBind && (!form.bind_password_configured || form.bind_password_unavailable) && !form.bind_password)} onClick={testConnection}>{testing ? 'Testing…' : 'Test connection and user'}</button>
-        <button type="submit" className="btn btn-primary" disabled={busy || testing}>{busy ? 'Saving…' : 'Save LDAP configuration'}</button>
+        <button type="button" className="btn" disabled={testing || busy || readingCertificate || (certificateAction === 'replace' && !certificateData) || !form.enabled || !testUsername.trim() || !testPassword || (searchBind && (!form.bind_password_configured || form.bind_password_unavailable) && !form.bind_password)} onClick={testConnection}>{testing ? 'Testing…' : 'Test connection and user'}</button>
+        <button type="submit" className="btn btn-primary" disabled={busy || testing || readingCertificate || (certificateAction === 'replace' && !certificateData)}>{busy ? 'Saving…' : 'Save LDAP configuration'}</button>
       </div>
     </form>
     {confirmInsecureSave && <Modal title="Save LDAP configuration without TLS?" variant="dialog" compact preventBackdropClose onClose={() => { if (!busy) setConfirmInsecureSave(false) }}>

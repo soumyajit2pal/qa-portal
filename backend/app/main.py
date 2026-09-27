@@ -216,8 +216,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     otherwise bypass http_exception_handler entirely."""
     request_id = _request_id_for(request)
     errors = exc.errors()
-    if request.url.path.startswith('/api/auth/users'):
-        # Rejected legacy password fields must never be echoed back to clients.
+    if request.url.path == "/api/auth" or request.url.path.startswith('/api/auth/'):
+        # Authentication payloads can contain encrypted credentials, LDAP bind
+        # and test passwords, or an uploaded CA bundle. Pydantic includes the
+        # rejected input in its normal error structure, so return only the
+        # location/type/message for every auth endpoint instead of reflecting
+        # any credential or certificate material back to the browser.
         errors = [{key: value for key, value in error.items() if key not in {'input', 'ctx'}}
                   for error in errors]
     return JSONResponse(
