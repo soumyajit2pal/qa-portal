@@ -17,3 +17,4 @@ export function jsxs(type: ElementType, props: Record<string, unknown> | null, k
 }
 
 export { Fragment }
+export type { JSX } from 'react/jsx-runtime'

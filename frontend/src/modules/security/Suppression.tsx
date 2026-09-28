@@ -1158,6 +1158,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
                   setShowReapprovalConfirm(false)
                   act('security-team-decision', { decision: 'Returned', comments: comments.trim(), require_dept_head_reapproval: false })
                 }}
+                onDismiss={() => setShowReapprovalConfirm(false)}
               />
             )}
           </section>

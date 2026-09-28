@@ -362,7 +362,7 @@ export function insertRichTextImages(editor: HTMLDivElement | null, images: Pend
 
 // ---- Inline link editor (Add link toolbar button + URL input row) ----
 
-export function useRichTextLink(editorRef: React.RefObject<HTMLDivElement>, onError: (message: string) => void) {
+export function useRichTextLink(editorRef: React.RefObject<HTMLDivElement | null>, onError: (message: string) => void) {
   const linkInputRef = useRef<HTMLInputElement>(null)
   const savedRange = useRef<Range | null>(null)
   const [showLink, setShowLink] = useState(false)
@@ -458,7 +458,7 @@ export function RichTextToolbar({
 export function RichTextImageInput({
   inputRef, onFiles,
 }: {
-  inputRef: React.RefObject<HTMLInputElement>
+  inputRef: React.RefObject<HTMLInputElement | null>
   onFiles: (files: File[]) => void
 }) {
   return (
@@ -480,7 +480,7 @@ export function RichTextLinkEditor({
   onChange: (value: string) => void
   onApply: () => void
   onCancel: () => void
-  inputRef: React.RefObject<HTMLInputElement>
+  inputRef: React.RefObject<HTMLInputElement | null>
 }) {
   return (
     <div className="jira-link-editor">

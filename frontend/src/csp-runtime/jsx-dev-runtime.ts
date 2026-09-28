@@ -20,3 +20,4 @@ export function jsxDEV(
 }
 
 export { Fragment }
+export type { JSX } from 'react/jsx-dev-runtime'

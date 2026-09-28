@@ -19,6 +19,8 @@ import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconFolder, IconGrid, IconInbox, IconLock, IconPlus, IconTrash, IconWorkflow } from '../../components/Icons'
 import { defectEvidenceError, DEFECT_EVIDENCE_EXTENSIONS } from '../../defectEvidence'
 import { resolvePreferredProjectId } from '../../projectPreferences'
+import { lazyModule } from '../../lazyModule'
+import ModuleBoundary from '../../components/ModuleBoundary'
 
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
@@ -40,8 +42,8 @@ const CYCLE_UNFILED = '__unfiled__'
 
 // Keep Defect Management in its existing lazy bundle. The completion review
 // loads the full detail only when someone explicitly opens a defect row.
-const EmbeddedDefectDetail = React.lazy(() => import('./Defects')
-  .then((module) => ({ default: module.EmbeddedDefectDetail })))
+const EmbeddedDefectDetail = lazyModule(() => import('./Defects')
+  .then((module) => ({ default: module.EmbeddedDefectDetail })), { displayName: 'EmbeddedDefectDetail' })
 
 function CycleModal({ project, requests, users, folders, defaultFolderId, editing, onClose, onSaved }: {
   project: TestProjectOut
@@ -611,7 +613,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
           </form>
         </Modal>
       )}
-      {showComplete && (
+      {showComplete && !selectedCompletionDefect && (
         <Modal title={`Review before completing ${cycle.cycle_key}`} onClose={() => setShowComplete(false)} variant="dialog" preventBackdropClose wide>
           <div className="tm-cycle-completion-review">
             {loadingCompletion ? <p className="muted">Loading defect validation…</p> : <>
@@ -703,7 +705,21 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
           </div>
         </Modal>
       )}
-      {selectedCompletionDefect && <React.Suspense fallback={null}><EmbeddedDefectDetail defectKey={selectedCompletionDefect} onClose={() => setSelectedCompletionDefect(null)} /></React.Suspense>}
+      {selectedCompletionDefect && (
+        <ModuleBoundary
+          key={selectedCompletionDefect}
+          moduleName="Defect details"
+          recoveryModal={{ title: `Unable to open ${selectedCompletionDefect}`, onClose: () => setSelectedCompletionDefect(null) }}
+        >
+          <React.Suspense fallback={
+            <Modal title={`Opening ${selectedCompletionDefect}`} onClose={() => setSelectedCompletionDefect(null)} wide>
+              <div className="tm-empty"><strong>Loading defect details…</strong><span>The cycle completion review will remain available behind this dialog.</span></div>
+            </Modal>
+          }>
+            <EmbeddedDefectDetail defectKey={selectedCompletionDefect} onClose={() => setSelectedCompletionDefect(null)} />
+          </React.Suspense>
+        </ModuleBoundary>
+      )}
     </>
   )
 }

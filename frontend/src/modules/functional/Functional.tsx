@@ -1533,6 +1533,7 @@ export function FunctionalDetail({
                       require_dept_head_reapproval: false,
                     });
                   }}
+                  onDismiss={() => setShowReapprovalConfirm(false)}
                 />
               )}
 

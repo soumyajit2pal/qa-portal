@@ -100,13 +100,37 @@ server {
     location ~* \.map$ { return 404; }
     location ~ /\. { return 404; }
 
-    location / {
-        try_files $uri $uri/ /index.html;
+    # Vite's generated assets include an eight-character content fingerprint.
+    # Only those deployment-immutable files may be cached across releases.
+    location ~* "^/assets/(?:[^/]+/)*[^/]+-[a-z0-9_-]{8}\.[a-z0-9]+$" {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-elem 'self'; style-src-attr 'none'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
     }
 
-    location ~* \.(?:js|css|woff2?|png|jpg|jpeg|svg|ico)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
+    # Reject missing asset paths instead of serving the SPA shell. Any real
+    # unversioned file under /assets/ remains release-mutable and is no-store.
+    location /assets/ {
+        try_files $uri =404;
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-elem 'self'; style-src-attr 'none'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
+    }
+
+    # HTML, the SPA fallback, csp-runtime.css, the web manifest, icons, and
+    # every other unversioned public file must be re-fetched after a release.
+    location / {
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
@@ -116,7 +140,7 @@ server {
     }
 
     location = /index.html {
-        add_header Cache-Control "no-cache";
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;

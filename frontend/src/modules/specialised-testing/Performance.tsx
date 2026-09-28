@@ -681,6 +681,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
                   setShowReapprovalConfirm(false)
                   act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: false })
                 }}
+                onDismiss={() => setShowReapprovalConfirm(false)}
               />
             )}
             {canCompleteFeasibility && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-feasibility')}>Complete Feasibility</button>}

@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2022",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
 
@@ -13,9 +13,8 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "jsxImportSource": "@qualityops/csp-runtime",
-    "baseUrl": ".",
     "paths": {
-      "@qualityops/csp-runtime/*": ["src/csp-runtime/*"]
+      "@qualityops/csp-runtime/*": ["./src/csp-runtime/*"]
     },
 
     "strict": false,

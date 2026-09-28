@@ -164,7 +164,7 @@ services:
     # a QualityOps-built artifact), but fully qualify it so Podman never has
     # to resolve an ambiguous short name. Load this exact tag before using
     # `--pull never` on an offline host.
-    image: docker.io/library/redis:7-alpine
+    image: docker.io/library/redis:8.10.1-alpine3.23
     command: ["redis-server", "--appendonly", "yes"]
 
     healthcheck:

@@ -10,7 +10,11 @@ export function isWorkspaceSelectionStorageChange(event: Pick<StorageEvent, 'key
 }
 
 export function selectedWorkspaceStorageId(storage: Pick<Storage, 'getItem'>): string {
-  return storage.getItem('active_workspace_id') || storage.getItem('qa_active_workspace_id') || ''
+  try {
+    return storage.getItem('active_workspace_id') || storage.getItem('qa_active_workspace_id') || ''
+  } catch {
+    return ''
+  }
 }
 export function readWorkspaceTransition(): WorkspaceTransition | null {
   try {

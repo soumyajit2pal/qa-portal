@@ -1,4 +1,4 @@
-import React, { ReactNode, Suspense, lazy, useEffect, useState } from 'react'
+import React, { ReactNode, Suspense, useEffect, useState } from 'react'
 import { Routes, Route, Navigate, Link, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
@@ -11,6 +11,7 @@ import PendingApprovalsNotice from './components/PendingApprovalsNotice'
 import { UserOut } from './types'
 import { hasWorkspaceRole, isViewOnly, uniqueWorkspaceAccess } from './constants'
 import { ADMIN_ACCESS_DENIED_EVENT, HttpError, api } from './api'
+import { lazyModule } from './lazyModule'
 
 // Cross-cutting pages -- not owned by any one domain module (the QA Request
 // gateway feeds every module, the Dashboard summarizes across all of
@@ -25,33 +26,33 @@ import GlobalButtonTooltips from './components/GlobalButtonTooltips'
 import GlobalToastCenter from './components/GlobalToastCenter'
 import AppVersion from './components/AppVersion'
 
-const Help = lazy(() => import('./Help'))
+const Help = lazyModule(() => import('./Help'), { displayName: 'Help' })
 
 // The 4 domain modules (Functional / Security / Specialised Testing /
 // Governance) live under src/modules/<group>/ as plain local folders in
-// this same app/build -- not separately deployed. `React.lazy()` still
+// this same app/build -- not separately deployed. `lazyModule()` still
 // code-splits each into its own chunk (so e.g. visiting only "/sast" never
 // downloads the Governance or Specialised Testing code), it's just resolved from
 // this repo's own filesystem at build time instead of fetched from another
 // origin's remoteEntry.js at runtime. This project previously used real
 // Module Federation (separate images/deploys per module) and reverted to
 // this single-app model -- see README "Frontend architecture" for why.
-const Functional = lazy(() => import('./modules/functional/Functional'))
-const SAST = lazy(() => import('./modules/security/SAST'))
-const DAST = lazy(() => import('./modules/security/DAST'))
-const Suppression = lazy(() => import('./modules/security/Suppression'))
-const Performance = lazy(() => import('./modules/specialised-testing/Performance'))
-const SignOff = lazy(() => import('./modules/governance/SignOff'))
-const PendingApprovals = lazy(() => import('./modules/governance/PendingApprovals'))
-const Approvals = lazy(() => import('./modules/governance/Approvals'))
-const Reports = lazy(() => import('./modules/governance/Reports'))
-const Admin = lazy(() => import('./modules/governance/Admin'))
-const DepartmentAdmin = lazy(() => import('./modules/governance/DepartmentAdmin'))
-const ParentWorkspaceAdmin = lazy(() => import('./modules/governance/ParentWorkspaceAdmin'))
-const AuditLog = lazy(() => import('./modules/governance/AuditLog'))
-const ChecklistConfig = lazy(() => import('./modules/governance/ChecklistConfig'))
-const RequestTypeConfig = lazy(() => import('./modules/governance/RequestTypeConfig'))
-const DocumentPortal = lazy(() => import('./modules/governance/DocumentPortal'))
+const Functional = lazyModule(() => import('./modules/functional/Functional'), { displayName: 'Functional' })
+const SAST = lazyModule(() => import('./modules/security/SAST'), { displayName: 'SAST' })
+const DAST = lazyModule(() => import('./modules/security/DAST'), { displayName: 'DAST' })
+const Suppression = lazyModule(() => import('./modules/security/Suppression'), { displayName: 'Suppression' })
+const Performance = lazyModule(() => import('./modules/specialised-testing/Performance'), { displayName: 'Performance' })
+const SignOff = lazyModule(() => import('./modules/governance/SignOff'), { displayName: 'SignOff' })
+const PendingApprovals = lazyModule(() => import('./modules/governance/PendingApprovals'), { displayName: 'PendingApprovals' })
+const Approvals = lazyModule(() => import('./modules/governance/Approvals'), { displayName: 'Approvals' })
+const Reports = lazyModule(() => import('./modules/governance/Reports'), { displayName: 'Reports' })
+const Admin = lazyModule(() => import('./modules/governance/Admin'), { displayName: 'Admin' })
+const DepartmentAdmin = lazyModule(() => import('./modules/governance/DepartmentAdmin'), { displayName: 'DepartmentAdmin' })
+const ParentWorkspaceAdmin = lazyModule(() => import('./modules/governance/ParentWorkspaceAdmin'), { displayName: 'ParentWorkspaceAdmin' })
+const AuditLog = lazyModule(() => import('./modules/governance/AuditLog'), { displayName: 'AuditLog' })
+const ChecklistConfig = lazyModule(() => import('./modules/governance/ChecklistConfig'), { displayName: 'ChecklistConfig' })
+const RequestTypeConfig = lazyModule(() => import('./modules/governance/RequestTypeConfig'), { displayName: 'RequestTypeConfig' })
+const DocumentPortal = lazyModule(() => import('./modules/governance/DocumentPortal'), { displayName: 'DocumentPortal' })
 
 const DOCUMENT_PORTAL_ROLES = new Set([
   'DOCUMENT_PORTAL_VIEWER',
@@ -204,15 +205,15 @@ function DocumentOnlyAccessGuard({ children, user }: { children: ReactNode; user
 // nav group rather than folded into Functional/Specialised Testing since
 // it's a distinct workflow (author/import/execute test cases) rather than a
 // request-approval flow like every other module.
-const TestProjects = lazy(() => import('./modules/test-management/TestProjects'))
-const TestRepository = lazy(() => import('./modules/test-management/TestRepository'))
-const TestExecution = lazy(() => import('./modules/test-management/TestExecution'))
-const Defects = lazy(() => import('./modules/test-management/Defects'))
+const TestProjects = lazyModule(() => import('./modules/test-management/TestProjects'), { displayName: 'TestProjects' })
+const TestRepository = lazyModule(() => import('./modules/test-management/TestRepository'), { displayName: 'TestRepository' })
+const TestExecution = lazyModule(() => import('./modules/test-management/TestExecution'), { displayName: 'TestExecution' })
+const Defects = lazyModule(() => import('./modules/test-management/Defects'), { displayName: 'Defects' })
 // SRS EXE-002 "My Executions" -- the signed-in user's actionable items
 // across every authorized project.
-const MyExecutions = lazy(() => import('./modules/test-management/MyExecutions'))
+const MyExecutions = lazyModule(() => import('./modules/test-management/MyExecutions'), { displayName: 'MyExecutions' })
 // SRS section 11 -- the 8 Test Management reporting views.
-const TestReports = lazy(() => import('./modules/test-management/TestReports'))
+const TestReports = lazyModule(() => import('./modules/test-management/TestReports'), { displayName: 'TestReports' })
 
 // Onboarding is a standalone signed-in state. Mounting the portal behind a
 // blocking modal still runs dashboard/navigation effects and requests data

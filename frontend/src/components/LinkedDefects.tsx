@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api'
-import { Badge } from './Common'
+import { Badge, Modal } from './Common'
 import { DefectListOut } from '../types'
+import { lazyModule } from '../lazyModule'
+import ModuleBoundary from './ModuleBoundary'
 
 // Keep the Defect Management implementation in its existing lazy bundle;
 // linked-defect panels only download it after the user asks to open one.
-const EmbeddedDefectDetail = React.lazy(() => import('../modules/test-management/Defects')
-  .then((module) => ({ default: module.EmbeddedDefectDetail })))
+const EmbeddedDefectDetail = lazyModule(() => import('../modules/test-management/Defects')
+  .then((module) => ({ default: module.EmbeddedDefectDetail })), { displayName: 'EmbeddedDefectDetail' })
 
 export default function LinkedDefects({ query, title = 'Linked Defects' }: { query: string; title?: string }) {
   const [items, setItems] = useState<DefectListOut[]>([])
@@ -27,6 +29,20 @@ export default function LinkedDefects({ query, title = 'Linked Defects' }: { que
         <span><b>{defect.defect_key}</b><small>{defect.title}</small></span><Badge status={defect.status} /><em className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</em>
       </button>)}</div>
     </section>
-    {selectedKey && <React.Suspense fallback={null}><EmbeddedDefectDetail defectKey={selectedKey} onClose={() => setSelectedKey(null)} /></React.Suspense>}
+    {selectedKey && (
+      <ModuleBoundary
+        key={selectedKey}
+        moduleName="Defect details"
+        recoveryModal={{ title: `Unable to open ${selectedKey}`, onClose: () => setSelectedKey(null) }}
+      >
+        <React.Suspense fallback={
+          <Modal title={`Opening ${selectedKey}`} onClose={() => setSelectedKey(null)} wide>
+            <div className="tm-empty"><strong>Loading defect details…</strong><span>The current workspace will remain open behind this dialog.</span></div>
+          </Modal>
+        }>
+          <EmbeddedDefectDetail defectKey={selectedKey} onClose={() => setSelectedKey(null)} />
+        </React.Suspense>
+      </ModuleBoundary>
+    )}
   </>
 }

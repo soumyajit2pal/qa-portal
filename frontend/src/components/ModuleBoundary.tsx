@@ -1,18 +1,20 @@
 import React, { Component, ReactNode } from 'react'
+import { LazyModuleRecoveryContext, nextLazyModuleRecoveryKey } from '../lazyModule'
+import { isLazyModuleLoadError, isLazyModuleTimeoutError } from '../lazyModuleLoader'
+import { Modal } from './Common'
 
 interface Props {
   moduleName: string
   children: ReactNode
+  recoveryModal?: {
+    title: string
+    onClose: () => void
+  }
 }
 
 interface State {
   error: Error | null
-}
-
-function isChunkLoadError(error: Error): boolean {
-  return /ChunkLoadError|Loading chunk|Failed to fetch dynamically imported module|Importing a module script failed/i.test(
-    `${error.name} ${error.message}`,
-  )
+  recoveryKey: number
 }
 
 // A `React.lazy()` chunk can fail to load -- most commonly after a fresh
@@ -28,9 +30,9 @@ function isChunkLoadError(error: Error): boolean {
 // of staying stuck showing a stale error for a module that isn't even
 // mounted anymore.
 export default class ModuleBoundary extends Component<Props, State> {
-  state: State = { error: null }
+  state: State = { error: null, recoveryKey: 0 }
 
-  static getDerivedStateFromError(error: Error): State {
+  static getDerivedStateFromError(error: Error): Pick<State, 'error'> {
     return { error }
   }
 
@@ -39,25 +41,45 @@ export default class ModuleBoundary extends Component<Props, State> {
     console.error(`[ModuleBoundary] Failed to load the ${this.props.moduleName} module:`, error)
   }
 
+  retry = () => {
+    // React.lazy permanently caches a rejection. A new recovery key makes
+    // lazyModule() create a fresh wrapper and invoke its importer again.
+    this.setState({ error: null, recoveryKey: nextLazyModuleRecoveryKey() })
+  }
+
   render() {
     if (this.state.error) {
-      const chunkLoadFailed = isChunkLoadError(this.state.error)
-      return (
-        <div style={{ padding: 40, maxWidth: 640 }}>
+      const lazyLoadFailed = isLazyModuleLoadError(this.state.error)
+      const timedOut = isLazyModuleTimeoutError(this.state.error)
+      const recovery = (
+        <div style={{ padding: 40, maxWidth: 640 }} role="alert" aria-live="polite">
           <h3 style={{ marginTop: 0 }}>
-            {chunkLoadFailed ? `${this.props.moduleName} update available` : `${this.props.moduleName} could not be displayed`}
+            {timedOut
+              ? `${this.props.moduleName} is taking too long to load`
+              : lazyLoadFailed
+                ? `${this.props.moduleName} could not be loaded`
+                : `${this.props.moduleName} could not be displayed`}
           </h3>
-          <p>{chunkLoadFailed
-            ? 'The application was updated while this page was open. Reload to continue with the latest version.'
-            : 'An unexpected display error occurred. Retry this view; your saved request data is unchanged.'}
+          <p>{timedOut
+            ? 'The module download did not finish. Check your connection and retry; your saved request data is unchanged.'
+            : lazyLoadFailed
+              ? 'The module files are temporarily unavailable or the application was updated while this page was open. Retry the download, or reload to use the latest version.'
+              : 'An unexpected display error occurred. Retry this view; your saved request data is unchanged.'}
           </p>
           <div style={{ display: 'flex', gap: 12 }}>
-            {!chunkLoadFailed && <button className="btn btn-primary" onClick={() => this.setState({ error: null })}>Retry</button>}
-            <button className="btn" onClick={() => window.location.reload()}>Reload page</button>
+            <button className="btn btn-primary" type="button" onClick={this.retry}>Retry</button>
+            <button className="btn" type="button" onClick={() => window.location.reload()}>Reload page</button>
           </div>
         </div>
       )
+      return this.props.recoveryModal
+        ? <Modal title={this.props.recoveryModal.title} onClose={this.props.recoveryModal.onClose} wide>{recovery}</Modal>
+        : recovery
     }
-    return this.props.children
+    return (
+      <LazyModuleRecoveryContext.Provider value={this.state.recoveryKey}>
+        {this.props.children}
+      </LazyModuleRecoveryContext.Provider>
+    )
   }
 }

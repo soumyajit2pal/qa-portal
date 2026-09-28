@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { RequestViewerContext, useInternalNavigate } from '../hooks/useRequestNavigation'
 import { api, HttpError } from '../api'
@@ -8,13 +8,14 @@ import { Modal } from './Common'
 import { IconSearch } from './Icons'
 import ModuleBoundary from './ModuleBoundary'
 import { RequestDetail as QA } from '../QARequests/RequestDetail'
+import { lazyModule } from '../lazyModule'
 
-const Functional = lazy(() => import('../modules/functional/Functional').then((m) => ({ default: m.FunctionalDetail })))
-const SAST = lazy(() => import('../modules/security/SAST').then((m) => ({ default: m.SASTDetail })))
-const DAST = lazy(() => import('../modules/security/DAST').then((m) => ({ default: m.DASTDetail })))
-const Performance = lazy(() => import('../modules/specialised-testing/Performance').then((m) => ({ default: m.PerformanceDetail })))
-const Suppression = lazy(() => import('../modules/security/Suppression').then((m) => ({ default: m.SuppressionDetail })))
-const SignOff = lazy(() => import('../modules/governance/SignOff').then((m) => ({ default: m.SignOffDetail })))
+const Functional = lazyModule(() => import('../modules/functional/Functional').then((m) => ({ default: m.FunctionalDetail })), { displayName: 'FunctionalDetail' })
+const SAST = lazyModule(() => import('../modules/security/SAST').then((m) => ({ default: m.SASTDetail })), { displayName: 'SASTDetail' })
+const DAST = lazyModule(() => import('../modules/security/DAST').then((m) => ({ default: m.DASTDetail })), { displayName: 'DASTDetail' })
+const Performance = lazyModule(() => import('../modules/specialised-testing/Performance').then((m) => ({ default: m.PerformanceDetail })), { displayName: 'PerformanceDetail' })
+const Suppression = lazyModule(() => import('../modules/security/Suppression').then((m) => ({ default: m.SuppressionDetail })), { displayName: 'SuppressionDetail' })
+const SignOff = lazyModule(() => import('../modules/governance/SignOff').then((m) => ({ default: m.SignOffDetail })), { displayName: 'SignOffDetail' })
 type RequestRecord = QARequestOut | FunctionalOut | SASTOut | DASTOut | PerformanceOut | SuppressionOut | SignOffOut
 
 export default function RequestViewer({ children }: { children: React.ReactNode }) {

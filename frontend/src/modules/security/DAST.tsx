@@ -913,6 +913,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
                     setShowReapprovalConfirm(false)
                     act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: false })
                   }}
+                  onDismiss={() => setShowReapprovalConfirm(false)}
                 />
               )}
               {canAssignSecurityAnalyst && (

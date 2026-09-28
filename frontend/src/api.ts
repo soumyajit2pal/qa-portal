@@ -25,6 +25,11 @@ function csrfToken(): string | null {
   return readCookie('__Host-QAP-CSRF') || readCookie('QAP-CSRF')
 }
 
+function activeWorkspaceStorageId(): string {
+  try { return selectedWorkspaceStorageId(localStorage) }
+  catch { return '' }
+}
+
 interface RequestOptions {
   method?: string
   body?: unknown
@@ -53,9 +58,14 @@ interface RequestOptions {
   // Authentication/authorization probes must always reach the origin. They
   // must not reuse the normal short-lived GET cache, even within one tab.
   cache?: boolean
+  // Normal GETs make one retry for a brief gateway restart. Startup identity
+  // and privilege checks deliberately opt out: two full request deadlines in
+  // sequence made a browser with a blocked request look stuck for a minute.
+  retry?: boolean
 }
 
 const REQUEST_TIMEOUT_MS = 30_000
+export const AUTH_BOOTSTRAP_TIMEOUT_MS = 8_000
 const GET_CACHE_TTL_MS = 8_000
 const RETRYABLE_STATUSES = new Set([408, 502, 503, 504])
 const inFlightGets = new Map<string, Promise<unknown>>()
@@ -272,7 +282,7 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
     const csrf = csrfToken()
     if (csrf) headers['X-CSRF-Token'] = csrf
   }
-  const activeWorkspace = selectedWorkspaceStorageId(localStorage)
+  const activeWorkspace = activeWorkspaceStorageId()
   if (activeWorkspace) headers['X-Workspace-ID'] = activeWorkspace
 
   let payload: BodyInit | undefined
@@ -343,7 +353,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
   // contain that scope because it is carried in X-Workspace-ID. Without it,
   // an in-flight or eight-second cached response from workspace A could be
   // rendered after workspace B became active.
-  const activeWorkspace = selectedWorkspaceStorageId(localStorage)
+  const activeWorkspace = activeWorkspaceStorageId()
   // Encryption challenges are single-use, including across concurrent actions.
   const key = method === 'GET' && opts.cache !== false && !['/api/auth/me', '/api/auth/login-key'].includes(path.split('?')[0])
     ? `${activeWorkspace}:${path}:${opts.isBlob ? 'blob' : 'json'}`
@@ -383,7 +393,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
       } catch (error) {
         // A single safe retry handles brief proxy/backend restarts. Mutations
         // are never retried because doing so could submit data twice.
-        const retryable = method === 'GET' &&
+        const retryable = opts.retry !== false && method === 'GET' &&
           (!(error instanceof HttpError) || error.status === 0 || RETRYABLE_STATUSES.has(error.status))
         if (!retryable) throw error
         await new Promise((resolve) => window.setTimeout(resolve, 350))
@@ -427,10 +437,32 @@ export const api = {
     fetchAllPages<T>((pagePath) => request(pagePath), path),
   getWithoutActivity: <T = any>(path: string): Promise<T> =>
     request<T>(path, { trackActivity: false }),
+  // Page startup must either restore the session or present an actionable
+  // recovery screen promptly. These checks therefore have one short,
+  // uncached attempt instead of the normal 30-second GET + retry policy.
+  restoreSession: <T = any>(): Promise<T> =>
+    request<T>('/api/auth/me', {
+      timeoutMs: AUTH_BOOTSTRAP_TIMEOUT_MS,
+      trackActivity: false,
+      cache: false,
+      retry: false,
+    }),
   confirmLoginIdentity: <T = any>(username: string): Promise<T> =>
     request<T>('/api/auth/me', { expectedUsername: username }),
   verifyAdminAccess: (): Promise<void> =>
-    request<void>(ADMIN_BOOTSTRAP_PATH, { trackActivity: false, cache: false }),
+    request<void>(ADMIN_BOOTSTRAP_PATH, {
+      timeoutMs: AUTH_BOOTSTRAP_TIMEOUT_MS,
+      trackActivity: false,
+      cache: false,
+      retry: false,
+    }),
+  retryPendingLogout: (): Promise<void> =>
+    request<void>('/api/auth/logout', {
+      method: 'POST',
+      timeoutMs: AUTH_BOOTSTRAP_TIMEOUT_MS,
+      trackActivity: false,
+      retry: false,
+    }),
   // `timeoutMs` (optional, third arg) lets a caller whose POST triggers slow
   // server-side bulk work (e.g. adding a few thousand testcases to a Test
   // Cycle at once) raise the default 30s budget instead of racing it -- see
@@ -558,7 +590,7 @@ export const api = {
     xhr.open('POST', `${BASE_URL}${path}`)
     const csrf = csrfToken()
     if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf)
-    const activeWorkspace = selectedWorkspaceStorageId(localStorage)
+    const activeWorkspace = activeWorkspaceStorageId()
     if (activeWorkspace) xhr.setRequestHeader('X-Workspace-ID', activeWorkspace)
     xhr.withCredentials = true
     xhr.timeout = timeoutMs

@@ -4,7 +4,15 @@ import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import ModuleBoundary from './components/ModuleBoundary'
 import { AuthProvider } from './context/AuthContext'
+import { installVitePreloadErrorHandler } from './lazyModuleLoader'
 import './index.css'
+
+// Keep Vite preload failures on the normal rejected-import path. The nearest
+// ModuleBoundary presents recovery controls; this listener is diagnostic only
+// and deliberately never performs an automatic reload (which could loop while
+// a deployment is incomplete).
+const removeVitePreloadErrorHandler = installVitePreloadErrorHandler(window)
+if (import.meta.hot) import.meta.hot.dispose(removeVitePreloadErrorHandler)
 
 // NOTE: React.StrictMode intentionally double-invokes effects in development
 // (mount -> cleanup -> mount) to help surface side-effect bugs -- this is why

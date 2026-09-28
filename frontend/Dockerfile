@@ -1,4 +1,4 @@
-FROM docker.io/library/node:24.20.0-alpine3.23 AS build
+FROM docker.io/library/node:26.10.0-alpine3.24 AS build
 
 WORKDIR /app
 
@@ -18,7 +18,7 @@ COPY public ./public
 RUN npm run build
 
 
-FROM docker.io/library/nginx:1.28.3-alpine3.23
+FROM docker.io/library/nginx:1.30.5-alpine3.24
 
 COPY --from=build /app/dist /usr/share/nginx/html
 

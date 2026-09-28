@@ -3,7 +3,7 @@
 A full-stack quality operations platform built from the **"Centralized QA Portal Creation"** change request
 (Bank of Maharashtra, Information Technology Department, FY 2026-27).
 
-- **Frontend:** a single React 18 + Vite SPA (one build, one deploy). Internally organized by
+- **Frontend:** a single React 19 + Vite SPA (one build, one deploy). Internally organized by
   domain area — Functional, Security, Specialised Testing, Governance — as plain folders under
   `src/modules/`, code-split via `React.lazy()` so each area only downloads its own JS when
   visited, without the operational overhead of separately deployed micro-frontends (see
@@ -177,7 +177,7 @@ tear down/recreate alongside the app services.
 
 ## Quickstart (local dev, no Docker)
 
-Requires Python 3.10+, Node 24 LTS, and a reachable Oracle database (see above).
+Requires Python 3.14.x, Node 26.x, and a reachable Oracle database (see above).
 
 ### 1. Backend
 
