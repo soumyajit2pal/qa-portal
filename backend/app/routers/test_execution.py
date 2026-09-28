@@ -546,8 +546,8 @@ _DEFECT_RETEST_CLEAR_STATUSES = (
 # These dispositions do not represent a delivered fix and therefore do not
 # need environment verification, including for modern workflows.
 # ``Closed`` is deliberately absent: a modern Closed defect clears only when
-# its verification covers this execution's environment. The recorded build is
-# retained for traceability but does not have to match the cycle build.
+# its verification covers this execution's environment. Recorded build values
+# are retained for traceability but never partition verification coverage.
 _DEFECT_UNCONDITIONAL_CLEAR_STATUSES = (
     "Deferred", "Duplicate", "Not a Defect", "Change Request Raised",
 )
@@ -593,7 +593,7 @@ def _execution_lock_state(db: Session, execution_id: int):
 def _defect_blocks_execution(defect, cycle, verification_check=None) -> bool:
     """Return whether one governed defect still locks a linked execution.
 
-    Non-remediation outcomes short-circuit before build verification. This is
+    Non-remediation outcomes short-circuit before environment verification. This is
     particularly important for Duplicate: a duplicate has no fix or
     verification of its own, so ``verified_for`` can never clear it. Legacy
     Closed defects retain their historic clear behavior, while modern Closed
@@ -609,7 +609,7 @@ def _defect_blocks_execution(defect, cycle, verification_check=None) -> bool:
         from ..defect_workflow import verified_for as verification_check
     return not (
         cycle
-        and verification_check(defect, cycle.environment, cycle.build)
+        and verification_check(defect, cycle.environment)
     )
 
 
@@ -658,8 +658,7 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
         return (
             f"Linked defect verification does not cover this execution ({names}). "
             "Check the environment in Edit Cycle. A Closed workflow defect needs verification in that same "
-            "environment, regardless of build number; defects still moving through verification retain their "
-            "stage build checks."
+            "environment, regardless of build number."
         )
     if status_value == "Retest Passed" and not has_prior_failed_or_blocked:
         return (
@@ -1297,7 +1296,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                          models.Defect.resolution_type == "Fixed")),
             ).all()
             from ..defect_workflow import verified_for
-            severe = [d for d in severe if not verified_for(d, obj.environment, obj.build)]
+            severe = [d for d in severe if not verified_for(d, obj.environment)]
             if severe:
                 labels = ", ".join(defect.defect_key for defect in severe[:8])
                 raise HTTPException(
@@ -1327,7 +1326,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                     and_(models.Defect.workflow_json.isnot(None), models.Defect.status == "Closed",
                          models.Defect.resolution_type == "Fixed")),
             ).all()
-            residual = [d for d in residual if not verified_for(d, obj.environment, obj.build)]
+            residual = [d for d in residual if not verified_for(d, obj.environment)]
             if residual:
                 # 2026-08 whole-module simplification: QA Lead Group system
                 # role only -- the old per-project "Project Lead"/"Owner"

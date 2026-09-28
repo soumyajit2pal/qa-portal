@@ -365,15 +365,22 @@ def _validate_comment_images(files: List[UploadFile]) -> None:
 
 
 def _create_comment(db: Session, normalized_type: str, entity_id: int, body: str,
-                    current_user: models.User) -> models.ApprovalAction:
+                    current_user: models.User, *, commit: bool = True) -> models.ApprovalAction:
     row = models.ApprovalAction(
         entity_type=normalized_type, entity_id=entity_id, step_name="Comment",
         actor_id=current_user.id, actor_role=current_user.roles_csv,
         decision="Commented", comments=body or None,
     )
     db.add(row)
-    db.commit()
-    db.refresh(row)
+    if commit:
+        db.commit()
+        db.refresh(row)
+    else:
+        # Reserve the comment id inside the same transaction that will write
+        # its attachments.  save_documents commits both together; if upload
+        # validation, storage, or the database operation fails, its rollback
+        # removes this pending comment instead of leaving a phantom audit row.
+        db.flush()
     return row
 
 
@@ -399,11 +406,20 @@ def add_rich_comment(entity_type: str, entity_id: int, body: str = Form(""),
     normalized_type = _comment_target_or_404(db, entity_type, entity_id, current_user)
     _validate_comment_images(files)
     text = _validated_comment_body(body, allow_empty=bool(files))
-    row = _create_comment(db, normalized_type, entity_id, text, current_user)
+    row = _create_comment(
+        db, normalized_type, entity_id, text, current_user, commit=not files
+    )
     if files:
-        doc_store.save_documents(
-            db, "COMMENT_IMAGE", row.id, f"comment-{row.id}", files, current_user.id
-        )
+        try:
+            doc_store.save_documents(
+                db, "COMMENT_IMAGE", row.id, f"comment-{row.id}", files, current_user.id
+            )
+        except Exception:
+            # save_documents rolls back failures reached during file writes or
+            # commit.  Validation happens before its own try block, so keep an
+            # outer rollback to cover malformed filenames/content as well.
+            db.rollback()
+            raise
     return _to_out(db, row)
 
 

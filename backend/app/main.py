@@ -25,11 +25,15 @@ configure_logging()  # must run before `from .database import ...` below, since
                       # this and database.py's own call are both harmless.
 logger = logging.getLogger("qa_portal.main")
 
-from .database import SessionLocal, AuditSessionLocal, main_pool_metrics
+from .database import (
+    SessionLocal,
+    AuditSessionLocal,
+    main_pool_metrics,
+)
 from . import cache, models, email_notifications  # noqa: F401  (models ensures models are registered before create_all)
 from .session_security import resolve_session
 from .constants import is_document_portal_only
-from .audit_service import request_audit_target, write_audit
+from .audit_service import normalize_request_id, request_audit_target, write_audit
 from .documents import migrate_legacy_document_layout
 from .resilience import CircuitOpenError, database_circuit, is_transient_database_error, snapshot as resilience_snapshot
 from .routers import (
@@ -578,7 +582,7 @@ async def application_audit_middleware(request, call_next):
     if not request.url.path.startswith("/api") or request.url.path == "/api/health":
         return await call_next(request)
 
-    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    request_id = normalize_request_id(request.headers.get("x-request-id"))
     request.state.audit_request_id = request_id
     request_log_token = bind_request_id(request_id)
     started = time.perf_counter()

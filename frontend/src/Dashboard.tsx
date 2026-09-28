@@ -1027,9 +1027,20 @@ function SuppressionTab({ range }: { range: RaisedRange }) {
   const [detail, setDetail] = useState<FortifySuppressionDetailOut | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<unknown>(null)
-  useEffect(() => { api.get<SuppressionDashboard>(`/api/dashboard/suppression${rangeQuery(range)}`).then(setData).catch(setError) }, [range])
+  const detailRequest = useRef(0)
+  useEffect(() => {
+    let active = true
+    detailRequest.current++
+    setData(null); setError(null)
+    setSeverity(null); setDetail(null); setDetailError(null); setDetailLoading(false)
+    api.get<SuppressionDashboard>(`/api/dashboard/suppression${rangeQuery(range)}`)
+      .then((result) => { if (active) { setData(result); setError(null) } })
+      .catch((failure) => { if (active) setError(failure) })
+    return () => { active = false; detailRequest.current++ }
+  }, [range])
 
   async function loadDetails(selectedSeverity: FortifySuppressedSeverity, page: number, pageSize: number) {
+    const request = ++detailRequest.current
     setDetailLoading(true)
     setDetailError(null)
     try {
@@ -1037,12 +1048,21 @@ function SuppressionTab({ range }: { range: RaisedRange }) {
       query.set('severity', selectedSeverity)
       query.set('page', String(page))
       query.set('page_size', String(pageSize))
-      setDetail(await api.get<FortifySuppressionDetailOut>(`/api/dashboard/suppression/fortify-details?${query.toString()}`))
+      const result = await api.get<FortifySuppressionDetailOut>(`/api/dashboard/suppression/fortify-details?${query.toString()}`)
+      if (request === detailRequest.current) {
+        setDetail(result)
+        setDetailError(null)
+      }
     } catch (err) {
-      setDetailError(err)
+      if (request === detailRequest.current) setDetailError(err)
     } finally {
-      setDetailLoading(false)
+      if (request === detailRequest.current) setDetailLoading(false)
     }
+  }
+
+  function closeDetails() {
+    detailRequest.current++
+    setSeverity(null); setDetail(null); setDetailError(null); setDetailLoading(false)
   }
 
   function openDetails(key: string) {
@@ -1092,7 +1112,7 @@ function SuppressionTab({ range }: { range: RaisedRange }) {
       {severity && (
         <Modal
           title={detail?.title || `Fortify Suppressed ${severity} Findings`}
-          onClose={() => { setSeverity(null); setDetail(null); setDetailError(null) }}
+          onClose={closeDetails}
           wide
         >
           {detailLoading && <p className="muted">Loading application details…</p>}
@@ -1133,11 +1153,20 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
   const [error, setError] = useState<unknown>(null)
   const [detail, setDetail] = useState<ThreeWDetailOut | null>(null)
 
-  useEffect(() => { api.get<ThreeWOut>(`/api/dashboard/3w${rangeQuery(range)}`).then(setData).catch(setError) }, [range])
-
   const detailRequestId = useRef(0)
   const [detailError, setDetailError] = useState<unknown>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  useEffect(() => {
+    let active = true
+    detailRequestId.current++
+    setData(null); setError(null)
+    setDetail(null); setDetailError(null); setDetailLoading(false)
+    api.get<ThreeWOut>(`/api/dashboard/3w${rangeQuery(range)}`)
+      .then((result) => { if (active) { setData(result); setError(null) } })
+      .catch((failure) => { if (active) setError(failure) })
+    return () => { active = false; detailRequestId.current++ }
+  }, [range])
+
   async function openProject(projectId: string, source: string) {
     const requestId = ++detailRequestId.current
     setDetail(null); setDetailError(null); setDetailLoading(true)

@@ -23,4 +23,4 @@ RUN mkdir -p /data/qualityops/uploads/document-portal /app/logs /run/config \
 EXPOSE 8000
 
 ENV WEB_CONCURRENCY=4
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY}"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-4}"]

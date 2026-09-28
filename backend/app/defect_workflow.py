@@ -84,23 +84,22 @@ def _verification_state_is_usable(obj, workflow_state):
     )
 
 
-def verified_for(obj, environment, build):
+def verified_for(obj, environment, build=None):
     """Return whether verification covers an execution context.
 
-    While a modern defect is still moving through verification stages, build
-    matching remains exact. Once the defect is Closed/Fixed, the verification
-    applies to every non-empty build in the same environment. Builds remain
-    recorded as audit evidence, but no longer partition closed-defect coverage.
+    Verification is environment-scoped for every modern workflow stage. The
+    optional build argument is retained for caller compatibility and build
+    values remain recorded as audit evidence, but they do not partition
+    verification coverage.
     """
-    if not getattr(obj, 'workflow_json', None) or not environment or not build:
+    if not getattr(obj, 'workflow_json', None) or not environment:
         return False
     s = state(obj)
     if not _verification_state_is_usable(obj, s):
         return False
     results = [e for e in s.get('history', []) if e.get('kind') == 'verification'
                and e.get('iteration') == s.get('iteration', 0)
-               and e.get('environment') == environment
-               and (obj.status == 'Closed' or e.get('build') == build)]
+               and e.get('environment') == environment]
     return bool(results and results[-1]['result'] == 'Passed')
 
 
@@ -108,9 +107,8 @@ def verified_records(obj):
     """Return real verification events currently counted as passed.
 
     The public list field retains its historical ``verified_builds`` shape for
-    API compatibility. For Closed defects, one latest event per environment is
-    returned so an older/failed build is never fabricated as verified merely
-    because closed-defect coverage is now environment-scoped.
+    API compatibility. One latest event per environment is returned so the
+    recorded build remains visible as evidence without partitioning coverage.
     """
     if not getattr(obj, 'workflow_json', None):
         return []
@@ -121,13 +119,12 @@ def verified_records(obj):
     for event in s.get('history', []):
         if (event.get('kind') != 'verification'
                 or event.get('iteration') != s.get('iteration', 0)
-                or not event.get('environment')
-                or not event.get('build')):
+                or not event.get('environment')):
             continue
-        key = event['environment'] if obj.status == 'Closed' else (event['environment'], event['build'])
+        key = event['environment']
         latest[key] = event
     records = [
-        {'environment': event['environment'], 'build': event['build']}
+        {'environment': event['environment'], 'build': event.get('build') or ''}
         for event in latest.values() if event.get('result') == 'Passed'
     ]
     return sorted(records, key=lambda item: (item['environment'], item['build']))

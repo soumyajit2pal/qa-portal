@@ -142,6 +142,8 @@ class Settings(BaseSettings):
     document_portal_upload_chunk_size: int = 1024 * 1024
     document_portal_allowed_extensions: str = ""
     document_portal_blocked_extensions: str = ".exe,.bat,.cmd,.sh,.ps1,.dll,.com,.msi,.scr"
+    redis_url: str | None = None
+    cache_enabled: bool = True
     cors_allowed_origins: str = ""
     trusted_hosts: str = "localhost,127.0.0.1,backend,document_portal"
     domain_name: str = ""
@@ -186,6 +188,10 @@ class Settings(BaseSettings):
                         "CORS_ALLOWED_ORIGINS must contain only explicit HTTPS origins "
                         "without credentials, paths, queries, or fragments in UAT or production"
                     )
+        if self.redis_url:
+            parsed_redis_url = urlsplit(self.redis_url)
+            if parsed_redis_url.scheme.lower() not in {"redis", "rediss"} or not parsed_redis_url.hostname:
+                raise ValueError("REDIS_URL must be a valid redis:// or rediss:// URL")
         if self.app_env in {"prod", "production"} and self.ldap_mock_enabled:
             raise ValueError("LDAP mock authentication cannot be enabled in production")
         if self.ldap_mock_enabled:

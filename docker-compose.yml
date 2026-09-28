@@ -48,14 +48,10 @@ services:
       DOCUMENT_PORTAL_EMBEDDED: "false"
       DOCUMENT_PORTAL_STORAGE_HOST_PATH: /data/qualityops/document-storage/repository
       LOGIN_ENCRYPTION_PRIVATE_KEY_FILE: /run/secrets/qualityops/login-private.pem
-      # The bundled Redis service is the shared cache for every API worker.
-      # Without this explicit URL the application silently falls back to a
-      # separate no-op cache in each process even though Redis is healthy.
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL in the selected environment file}
 
     # Read the trust list from the selected service env_file at runtime.
-    # Nginx terminates TLS; Uvicorn must trust that proxy's source IP to
-    # recognize X-Forwarded-Proto. Never default to trusting every container.
+    # Uvicorn must trust only nginx's source IP for forwarding metadata.
     command:
       - sh
       - -c
@@ -168,7 +164,8 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
 
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -186,9 +183,10 @@ services:
     volumes:
       # The same frontend image is promoted through every environment. The
       # selected host directory must contain qualityops.crt and qualityops.key.
-      # Mounting the directory keeps the environment configuration to one path
-      # while nginx continues to use stable in-container filenames.
-      - ${TLS_CERT_HOST_PATH:?Set TLS_CERT_HOST_PATH to the certificate directory in the selected environment file}:/etc/nginx/ssl:ro,Z
+      # Mount only those files so nginx cannot read unrelated keys from a
+      # shared certificate directory.
+      - ${TLS_CERT_HOST_PATH:?Set TLS_CERT_HOST_PATH to the certificate directory in the selected environment file}/qualityops.crt:/etc/nginx/ssl/qualityops.crt:ro,Z
+      - ${TLS_CERT_HOST_PATH:?Set TLS_CERT_HOST_PATH to the certificate directory in the selected environment file}/qualityops.key:/etc/nginx/ssl/qualityops.key:ro,Z
     depends_on:
       backend:
         condition: service_healthy
@@ -201,8 +199,10 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
-      - /var/cache/nginx:rw,noexec,nosuid,size=64m
-      - /var/run:rw,noexec,nosuid,size=8m
+      # These mounts hide the ownership prepared in the image, so assign them
+      # to the non-root nginx runtime user explicitly.
+      - /var/cache/nginx:rw,noexec,nosuid,size=64m,uid=101,gid=101,mode=0755
+      - /var/run:rw,noexec,nosuid,size=8m,uid=101,gid=101,mode=0755
     restart: unless-stopped
 
 volumes:

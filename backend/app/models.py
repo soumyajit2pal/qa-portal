@@ -3740,7 +3740,7 @@ class Defect(Base):
         if not self.workflow_json:
             return []
         executions = ([self.execution] if self.execution else []) + [link.execution for link in self.execution_links if link.execution]
-        return list({ex.id for ex in executions if ex.cycle and verified_for(self, ex.cycle.environment, ex.cycle.build)})
+        return list({ex.id for ex in executions if ex.cycle and verified_for(self, ex.cycle.environment)})
 
     @property
     def workflow(self):

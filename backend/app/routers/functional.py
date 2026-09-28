@@ -81,6 +81,70 @@ def _get_or_404(db: Session, req_id: int, lock: bool = False) -> "models.Functio
     return obj
 
 
+def _clearance_certificate_for_request(
+    db: Session,
+    obj: "models.FunctionalRequest",
+    signoff_id: int,
+    *,
+    current_user: Optional[models.User] = None,
+    require_requester_ownership: bool = False,
+    require_issued: bool = False,
+) -> "models.QASignOff":
+    """Resolve a certificate without allowing cross-request/workspace reuse.
+
+    ``confirm-signoff`` is retained only as a legacy recovery path for an
+    issued certificate that was not auto-synchronised. It must never act as
+    an alternative approval path for a Draft or pending certificate.
+    """
+    # Lock the certificate before checking whether another Functional Request
+    # already owns the link. Without this row lock, two concurrent requests
+    # could both observe no existing link and reuse the same certificate.
+    # one_or_none() is intentional: Oracle cannot combine FOR UPDATE with the
+    # FETCH FIRST shape that a convenience first()/limit() would generate.
+    cert = (
+        db.query(models.QASignOff)
+        .filter_by(id=signoff_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if not cert:
+        raise HTTPException(400, "signoff_id does not reference an existing clearance certificate")
+
+    workspace_id = obj.qa_request.qa_workspace_id if obj.qa_request else None
+    if (
+        workspace_id is None
+        or cert.qa_workspace_id != workspace_id
+        or cert.testing_request_id != obj.request_id
+    ):
+        raise HTTPException(
+            400,
+            "The clearance certificate must belong to this Functional Request and QA workspace",
+        )
+    if cert.certificate_type not in {"Full Clearance", "Conditional Clearance"}:
+        raise HTTPException(400, "A Clearance Denied certificate cannot clear a Functional Request")
+
+    other_link = (
+        db.query(models.FunctionalRequest.id)
+        .filter(
+            models.FunctionalRequest.signoff_id == cert.id,
+            models.FunctionalRequest.id != obj.id,
+        )
+        .first()
+    )
+    if other_link:
+        raise HTTPException(409, "The clearance certificate is already linked to another Functional Request")
+
+    if require_requester_ownership:
+        if current_user is None:
+            raise RuntimeError("current_user is required for certificate ownership validation")
+        if cert.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
+            raise HTTPException(403, "Only the certificate requester or an admin can link this certificate")
+    if require_issued and cert.status != "ISSUED":
+        raise HTTPException(409, "Requester verification requires an issued clearance certificate")
+    return cert
+
+
 def _is_active_delegate(obj: "models.FunctionalRequest", user: models.User) -> bool:
     delegation = obj.active_delegation
     return bool(delegation and delegation.assigned_to_id == user.id)
@@ -976,10 +1040,20 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
     # rather than leaving it to confirm-signoff, so the certificate is
     # associated with this request from the moment sign-off is requested.
     if payload.signoff_id is not None:
-        cert = db.get(models.QASignOff, payload.signoff_id)
-        if not cert:
-            raise HTTPException(400, "signoff_id does not reference an existing clearance certificate")
-        obj.signoff_id = payload.signoff_id
+        if obj.signoff_id is not None and obj.signoff_id != payload.signoff_id:
+            raise HTTPException(409, "This Functional Request is already linked to another clearance certificate")
+        cert = _clearance_certificate_for_request(
+            db,
+            obj,
+            payload.signoff_id,
+            current_user=current_user,
+            require_requester_ownership=True,
+        )
+        obj.signoff_id = cert.id
+    elif obj.signoff_id is not None:
+        # A retry may omit the ID, but an existing link must still satisfy
+        # the request/workspace/type constraints before the workflow moves.
+        _clearance_certificate_for_request(db, obj, obj.signoff_id)
     obj.status = QAStatus.QA_SIGNOFF_PENDING
     _log(db, obj.id, "QA Completed", current_user, "Clearance Requested", None)
     db.commit()
@@ -1006,11 +1080,13 @@ def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session 
     obj = _get_or_404(db, req_id, lock=True)
     _require_visible(db, obj, current_user)
     _require(obj, QAStatus.QA_SIGNOFF_PENDING, "Confirm clearance")
-    if payload.signoff_id is not None:
-        cert = db.get(models.QASignOff, payload.signoff_id)
-        if not cert:
-            raise HTTPException(400, "signoff_id does not reference an existing clearance certificate")
-        obj.signoff_id = payload.signoff_id
+    if obj.signoff_id is not None and payload.signoff_id is not None and obj.signoff_id != payload.signoff_id:
+        raise HTTPException(409, "This Functional Request is already linked to another clearance certificate")
+    signoff_id = payload.signoff_id if payload.signoff_id is not None else obj.signoff_id
+    if signoff_id is None:
+        raise HTTPException(409, "Requester verification requires an issued clearance certificate")
+    cert = _clearance_certificate_for_request(db, obj, signoff_id, require_issued=True)
+    obj.signoff_id = cert.id
     obj.status = QAStatus.QA_SIGNED_OFF
     _log(db, obj.id, "QA Clearance", current_user, "Cleared", payload.comments)
     obj.status = QAStatus.REQUESTER_VERIFICATION

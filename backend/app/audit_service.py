@@ -1,12 +1,37 @@
 import json
 import ipaddress
 import os
+import re
+import uuid
 from typing import Any, Optional
 
 from fastapi import Request
 from sqlalchemy.orm import Session
 
 from . import models
+
+
+_REQUEST_ID_MAX_LENGTH = 64
+_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}\Z")
+
+
+def normalize_request_id(header_value: str | None) -> str:
+    """Return an untrusted correlation header in audit-column-safe form."""
+    candidate = (header_value or "").strip()
+    if (
+        candidate
+        and len(candidate) <= _REQUEST_ID_MAX_LENGTH
+        and _REQUEST_ID_PATTERN.fullmatch(candidate)
+    ):
+        return candidate
+    return str(uuid.uuid4())
+
+
+def _bounded_text(value: Any, max_length: int) -> Optional[str]:
+    """Coerce an audit value without exceeding its fixed-width DB column."""
+    if value is None:
+        return None
+    return str(value)[:max_length]
 
 
 def _trusted_proxy_networks():
@@ -167,6 +192,9 @@ def write_audit(
     """
     if request_id is None and request is not None:
         request_id = getattr(request.state, "audit_request_id", None)
+    if request_id is not None:
+        # Defense in depth for audit calls outside main's HTTP middleware.
+        request_id = normalize_request_id(request_id)
     user_agent = None
     if request is not None:
         user_agent = (request.headers.get("user-agent") or "")[:500] or None
@@ -176,19 +204,19 @@ def write_audit(
     # its own "must never break the action" promise above.
     try:
         row = models.AuditLog(
-            event_type=event_type,
-            action=action,
-            outcome=outcome,
+            event_type=_bounded_text(event_type, 40),
+            action=_bounded_text(action, 80),
+            outcome=_bounded_text(outcome, 20),
             actor_id=actor.id if actor else actor_id,
-            actor_username=(actor.username if actor else actor_username),
-            actor_name=(actor.full_name if actor else actor_name),
-            actor_roles=(actor.roles_csv if actor else actor_roles),
-            method=method or (request.method if request else None),
-            path=path or (request.url.path if request else None),
+            actor_username=_bounded_text(actor.username if actor else actor_username, 150),
+            actor_name=_bounded_text(actor.full_name if actor else actor_name, 150),
+            actor_roles=_bounded_text(actor.roles_csv if actor else actor_roles, 500),
+            method=_bounded_text(method or (request.method if request else None), 10),
+            path=_bounded_text(path or (request.url.path if request else None), 500),
             status_code=status_code,
-            target_type=target_type,
-            target_id=str(target_id) if target_id is not None else None,
-            target_name=target_name,
+            target_type=_bounded_text(target_type, 64),
+            target_id=_bounded_text(target_id, 100),
+            target_name=_bounded_text(target_name, 255),
             details=json.dumps(details, default=str, ensure_ascii=False) if details else None,
             ip_address=request_ip(request) if request else None,
             user_agent=user_agent,

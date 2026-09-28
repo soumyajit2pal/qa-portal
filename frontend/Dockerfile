@@ -24,7 +24,8 @@ COPY --from=build /app/dist /usr/share/nginx/html
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-RUN touch /var/run/nginx.pid \
+RUN mkdir -p /etc/nginx/ssl \
+    && touch /var/run/nginx.pid \
     && chown -R nginx:nginx /usr/share/nginx/html /var/cache/nginx /var/log/nginx /var/run/nginx.pid
 
 EXPOSE 8443

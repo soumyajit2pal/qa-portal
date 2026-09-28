@@ -221,8 +221,17 @@ function RepositoryHealthPanel({ projectId }: { projectId: number }) {
   const [data, setData] = useState<RepositoryHealthOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   useEffect(() => {
+    let active = true
     setData(null)
-    api.get<RepositoryHealthOut>(`/api/test-reports/projects/${projectId}/repository-health`).then(setData).catch(setError)
+    setError(null)
+    api.get<RepositoryHealthOut>(`/api/test-reports/projects/${projectId}/repository-health`)
+      .then((result) => {
+        if (!active) return
+        setData(result)
+        setError(null)
+      })
+      .catch((failure) => { if (active) setError(failure) })
+    return () => { active = false }
   }, [projectId])
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading…</p>
@@ -257,17 +266,30 @@ function CycleProgressPanel({ projectId, onExportPath }: { projectId: number; on
 
   useEffect(() => {
     setCycleId(''); setData(null)
-
+    setCycles([]); setError(null)
+    let active = true
     api.getAll<TestCycleOut>(`/api/test-execution/projects/${projectId}/cycles`).then((c) => {
+      if (!active) return
       setCycles(c)
       if (c.length) setCycleId(c[0].id)
-    }).catch(setError)
+      setError(null)
+    }).catch((failure) => { if (active) setError(failure) })
+    return () => { active = false }
   }, [projectId])
 
   useEffect(() => {
-    if (!cycleId) return
+    if (!cycleId) { setData(null); return }
+    let active = true
     setData(null)
-    api.get<CycleProgressOut>(`/api/test-reports/cycles/${cycleId}/progress`).then(setData).catch(setError)
+    setError(null)
+    api.get<CycleProgressOut>(`/api/test-reports/cycles/${cycleId}/progress`)
+      .then((result) => {
+        if (!active) return
+        setData(result)
+        setError(null)
+      })
+      .catch((failure) => { if (active) setError(failure) })
+    return () => { active = false }
   }, [cycleId])
 
   if (error) return <ErrorText error={error} />
@@ -319,12 +341,20 @@ function DefectQualityPanel({ projectId, onExportPath }: { projectId: number; on
   }, [projectId, resolverFilter, onExportPath])
   useEffect(() => { setOffset(0); setResolverFilter(null); setResolverSearch(''); setResolverPage(1); setExpandedResolverId(null) }, [projectId])
   useEffect(() => {
+    let active = true
     setData(null)
     setError(null)
     const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
     if (resolverFilter) params.set('resolver_id', String(resolverFilter.id))
     if (resolverFilter?.reopened) params.set('reopened_only', 'true')
-    api.get<DefectQualityOut>(`/api/test-reports/projects/${projectId}/defect-quality?${params}`).then(setData).catch(setError)
+    api.get<DefectQualityOut>(`/api/test-reports/projects/${projectId}/defect-quality?${params}`)
+      .then((result) => {
+        if (!active) return
+        setData(result)
+        setError(null)
+      })
+      .catch((failure) => { if (active) setError(failure) })
+    return () => { active = false }
   }, [projectId, offset, resolverFilter])
   const filterResolver = (id: number, name: string, reopened: boolean) => {
     setOffset(0)
@@ -388,8 +418,17 @@ function VersionImpactPanel({ projectId }: { projectId: number }) {
   const [error, setError] = useState<unknown>(null)
   useEffect(() => { setOffset(0) }, [projectId])
   useEffect(() => {
+    let active = true
     setData(null)
-    api.get<VersionImpactOut>(`/api/test-reports/projects/${projectId}/version-impact?limit=${PAGE_SIZE}&offset=${offset}`).then(setData).catch(setError)
+    setError(null)
+    api.get<VersionImpactOut>(`/api/test-reports/projects/${projectId}/version-impact?limit=${PAGE_SIZE}&offset=${offset}`)
+      .then((result) => {
+        if (!active) return
+        setData(result)
+        setError(null)
+      })
+      .catch((failure) => { if (active) setError(failure) })
+    return () => { active = false }
   }, [projectId, offset])
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading…</p>
@@ -420,7 +459,12 @@ function ProjectPortfolioPanel() {
   const [data, setData] = useState<ProjectPortfolioOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   useEffect(() => {
-    api.get<ProjectPortfolioOut>('/api/test-reports/portfolio').then(setData).catch(setError)
+    let active = true
+    setError(null)
+    api.get<ProjectPortfolioOut>('/api/test-reports/portfolio')
+      .then((result) => { if (active) { setData(result); setError(null) } })
+      .catch((failure) => { if (active) setError(failure) })
+    return () => { active = false }
   }, [])
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading…</p>
@@ -499,10 +543,12 @@ export default function TestReports() {
   const updateExportPath = useCallback((path: string | null) => setActiveExportPath(path), [])
 
   const load = useCallback(async () => {
+    setError(null)
     try {
       const p = await api.getAll<TestProjectOut>('/api/test-projects')
       setProjects(p)
       setProjectId((current) => resolvePreferredProjectId(p, null, current, user?.id))
+      setError(null)
     } catch (err) { setError(err) }
   }, [user?.id])
   useEffect(() => { load() }, [load])

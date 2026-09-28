@@ -1244,6 +1244,12 @@ class CommentIn(BaseModel):
 
 
 class ConfirmSignoffIn(BaseModel):
+    """Legacy recovery input for a certificate that is already ISSUED.
+
+    ``signoff_id`` may be omitted only when the Functional Request already
+    carries a secure certificate link; the router always requires and
+    validates an issued certificate before requester verification.
+    """
     signoff_id: Optional[int] = None
     comments: Optional[str] = None
 
@@ -1254,8 +1260,10 @@ class RequestSignoffIn(BaseModel):
     NewSignOffModal opened from the Functional module's "Request Sign-off"
     button) at the moment sign-off is requested, rather than waiting until
     confirm-signoff. confirm-signoff still accepts its own optional
-    signoff_id for backward compatibility / the case where no certificate
-    was linked yet at request time."""
+    signoff_id for the secure legacy-recovery case where an already-issued
+    certificate was not linked at request time. Requesting clearance without
+    an ID may enter the pending state, but cannot reach requester verification
+    without an issued certificate."""
     signoff_id: Optional[int] = None
 
 

@@ -4,10 +4,13 @@ from collections import Counter
 from fastapi import HTTPException
 from sqlalchemy import func, or_
 from . import models
-from .constants import SAST_DAST_CLEARANCE_RESOLVED_STATUSES
+from .constants import ENVIRONMENT_PIPELINE_ORDER, QAStatus, SAST_DAST_CLEARANCE_RESOLVED_STATUSES
 
 TERMINAL = {'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'}
 EXECUTION_STATUSES = ['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed']
+FULL_CLEARANCE_EXECUTION_STATUSES = {'Pass', 'Retest Passed', 'NA'}
+FULL_CLEARANCE_SOURCE_STATUSES = {QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING}
+FULL_CLEARANCE_ENVIRONMENTS = {value.casefold() for value in ENVIRONMENT_PIPELINE_ORDER[:-1]}
 DEFECT_BUCKETS = ['Fix Pending', 'Not a Defect Review Pending', 'Retest Pending', 'Reopened / Retest Failed', 'Business Acceptance Pending', 'Release Pending', 'Production Verification Pending', 'Blocked', 'Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised']
 
 
@@ -141,26 +144,19 @@ def capture(db, obj):
     if not source or not source.qa_request or source.qa_request.qa_workspace_id != obj.qa_workspace_id:
         raise HTTPException(400, 'The certificate must link to a Functional Request in its workspace')
     require_linked_security_resolved(db, source)
-    cycles = db.query(models.TestCycle.id).join(models.TestCycleChildRequestLink).filter(
+    cycles_query = db.query(models.TestCycle).join(models.TestCycleChildRequestLink).filter(
         models.TestCycleChildRequestLink.child_type == 'Functional', models.TestCycleChildRequestLink.child_id == source.id)
-    # A certificate is scoped to the declared tested environment/build. Both
-    # fields originate in human-entered forms on different records, so their
-    # display casing is not a meaningful part of the identity (for example,
-    # build ``NA`` on a cycle and ``na`` on its Functional request). Matching
-    # them byte-for-byte silently produced an empty evidence snapshot even
-    # though the correctly linked cycle contained results. Trim and compare
-    # case-insensitively while keeping genuinely different builds isolated.
+    # A certificate is scoped to its declared tested environment. Build values
+    # remain captured on the certificate and cycles as audit evidence, but they
+    # do not partition eligible execution evidence.
     environment_tested = (obj.environment_tested or '').strip().lower()
-    build_number = (obj.build_number or '').strip().lower()
     if environment_tested:
-        cycles = cycles.filter(
+        cycles_query = cycles_query.filter(
             func.lower(func.trim(models.TestCycle.environment)) == environment_tested,
         )
-    if build_number:
-        cycles = cycles.filter(
-            func.lower(func.trim(models.TestCycle.build)) == build_number,
-        )
-    execution_ids = db.query(models.TestExecution.id).filter(models.TestExecution.cycle_id.in_(cycles))
+    cycles = cycles_query.order_by(models.TestCycle.id).all()
+    cycle_ids = [cycle.id for cycle in cycles]
+    execution_ids = db.query(models.TestExecution.id).filter(models.TestExecution.cycle_id.in_(cycle_ids))
     executions = db.query(models.TestExecution).filter(models.TestExecution.id.in_(execution_ids)).order_by(models.TestExecution.id).all()
     defects = db.query(models.Defect).filter(
         or_(models.Defect.qa_workspace_id == obj.qa_workspace_id,
@@ -168,12 +164,17 @@ def capture(db, obj):
         or_(models.Defect.qa_request_id == source.qa_request_id,
             models.Defect.execution_id.in_(execution_ids),
             models.Defect.execution_links.any(models.DefectExecutionLink.execution_id.in_(execution_ids)),
-            models.Defect.cycle_id.in_(cycles))).order_by(models.Defect.id).all()
+            models.Defect.cycle_id.in_(cycle_ids))).order_by(models.Defect.id).all()
     result = aggregate(executions, defects)
     result['testing_scope'] = obj.live_testing_scope
     result['assigned_testers'] = assigned_testers(db, source)
     result['certificate_fields'] = {key: str(getattr(obj, key, None) or '') for key in ('certificate_type', 'testing_type', 'testing_request_id', 'application_name', 'application_owner', 'department', 'release_version', 'build_number', 'environment_tested', 'target_promotion_environment', 'exit_criteria_notes', 'open_defect_summary', 'residual_risk_notes', 'known_limitations', 'business_acceptance_status', 'security_testing_status', 'deployment_recommendation', 'conditional_observations')}
     result['execution_results'] = sorted([{'id': item.id, 'status': item.status, 'pinned_version_id': item.pinned_version_id, 'run_version': item.run_version, 'executed_at': str(item.executed_at)} for item in executions], key=lambda item: item['id'])
+    result['cycle_results'] = [
+        {'id': cycle.id, 'status': cycle.status, 'environment': cycle.environment}
+        for cycle in cycles
+    ]
+    result['source_status'] = source.status
     result['defect_results'] = sorted([{'id': item.id, 'status': item.status, 'severity': item.severity, 'revision': item.workflow_revision, 'updated_at': str(item.updated_at)} for item in defects], key=lambda item: item['id'])
     result['conditional_observations'] = (obj.conditional_observations or '').strip()
     result['observations'] = [{'defect_key': item.defect_key, 'functionality': item.module_feature,
@@ -198,8 +199,8 @@ def capture(db, obj):
                   testing_request_id=obj.testing_request_id, qa_request_id=source.qa_request_id,
                   environment=obj.environment_tested, build=obj.build_number,
                   execution_ids=[item.id for item in executions], defect_ids=[item.id for item in defects],
-                  cycle_ids=[row[0] for row in cycles.all()],
-                  population_note='Latest result per execution slot in linked Functional Request cycles, filtered by certificate environment and build when specified. Defects include direct QA Request links and primary/additional links to these cycles; each defect is counted once. Deferred remains open. Pass % = (Pass + Retest Passed) / (Total − NA). No matching records means no evidence, not a passing result.')
+                  cycle_ids=cycle_ids,
+                  population_note='Latest result per execution slot in linked Functional Request cycles, filtered by certificate environment when specified. Build values are retained as evidence and do not filter eligibility. Defects include direct QA Request links and primary/additional links to these cycles; each defect is counted once. Deferred remains open. Pass % = (Pass + Retest Passed) / (Total − NA). No matching records means no evidence, not a passing result.')
     return result
 
 
@@ -218,18 +219,53 @@ def validate(obj, db=None):
     snapshot = obj.certificate_summary
     if not snapshot:
         raise HTTPException(400, 'Refresh certificate summaries before requesting approval')
+    live = None
     if db is not None:
         live = capture(db, obj)
         # Never silently replace reviewed evidence. Changes require an explicit refresh.
         if snapshot.get('testing_scope') and live.get('testing_scope') != snapshot['testing_scope']:
             raise HTTPException(409, 'Linked testing scope changed since capture. Refresh the certificate and obtain full reapproval.')
-        for field in ('assigned_testers', 'execution', 'defects', 'severity', 'execution_ids', 'defect_ids', 'observations', 'security', 'execution_results', 'defect_results', 'change_request_ids', 'change_description', 'conditional_observations'):
+        for field in ('assigned_testers', 'execution', 'defects', 'severity', 'execution_ids', 'defect_ids', 'observations', 'security', 'execution_results', 'cycle_results', 'defect_results', 'change_request_ids', 'change_description', 'conditional_observations'):
             if live.get(field) != snapshot.get(field):
                 raise HTTPException(409, 'Linked evidence changed since capture. Refresh the certificate and obtain full reapproval.')
     if obj.certificate_type == 'Full Clearance':
-        if not snapshot['execution']['total']:
-            raise HTTPException(400, 'Full Clearance requires linked test execution evidence for the selected environment/build')
-        if snapshot['open_critical_high']:
+        evidence = live or snapshot
+        environment = str(evidence.get('environment') or '').strip()
+        if not environment:
+            raise HTTPException(400, 'Full Clearance requires a non-blank tested environment')
+        if environment.casefold() not in FULL_CLEARANCE_ENVIRONMENTS:
+            raise HTTPException(
+                400,
+                'Full Clearance requires a valid tested environment: '
+                + ', '.join(ENVIRONMENT_PIPELINE_ORDER[:-1]),
+            )
+        if evidence.get('source_status') not in FULL_CLEARANCE_SOURCE_STATUSES:
+            raise HTTPException(
+                400,
+                'Full Clearance requires the linked Functional Request to have completed QA and be eligible for clearance',
+            )
+        cycles = evidence.get('cycle_results') or []
+        if not cycles:
+            raise HTTPException(400, 'Full Clearance requires a linked Test Cycle matching the selected environment')
+        incomplete_cycles = [cycle for cycle in cycles if cycle.get('status') != 'Completed']
+        if incomplete_cycles:
+            labels = ', '.join(str(cycle.get('id')) for cycle in incomplete_cycles)
+            raise HTTPException(400, f'Full Clearance requires every matching Test Cycle to be Completed (cycle IDs: {labels})')
+        if not evidence['execution']['total']:
+            raise HTTPException(400, 'Full Clearance requires linked test execution evidence for the selected environment')
+        invalid_results = {
+            status: count
+            for status, count in evidence['execution']['counts'].items()
+            if count and status not in FULL_CLEARANCE_EXECUTION_STATUSES
+        }
+        if invalid_results:
+            labels = ', '.join(f'{status}: {count}' for status, count in sorted(invalid_results.items()))
+            raise HTTPException(
+                400,
+                'Full Clearance requires every applicable test to be Pass or Retest Passed; '
+                f'NA is allowed. Blocking results: {labels}',
+            )
+        if evidence['open_critical_high']:
             raise HTTPException(400, 'Full Clearance cannot be issued while linked Critical or High defects remain open, including Deferred defects')
 
 

@@ -318,32 +318,110 @@ def can_delete_document(doc, user: "models.User", is_current_stage_actor: bool =
     return bool(is_current_stage_actor and doc.uploaded_by_id and doc.uploaded_by_id == user.id)
 
 
-def delete_document(db: Session, doc: models.RequestDocument,
-                     log_entity_type: Optional[str] = None, log_entity_id: Optional[int] = None,
-                     log_actor: Optional["models.User"] = None,
-                     log_label: Optional[str] = None) -> None:
-    """See save_documents' matching docstring for what log_entity_type/
-    log_entity_id/log_actor/log_label do -- same opt-in logging, this time
-    an "Removed" ApprovalAction. file_name is captured before the row is
-    deleted so the log message still names the file afterward."""
-    path = full_path(doc)
+_DELETION_DOCUMENT_MODELS = {
+    "REQUEST_DOCUMENT": models.RequestDocument,
+    "QA_REQUEST_DOCUMENT": models.QARequestDocument,
+}
+
+
+def _file_identity(path: Path) -> Optional[dict[str, int]]:
+    """Return enough metadata to distinguish a deleted file from a replacement.
+
+    A deletion journal can outlive the process that created it.  Another
+    worker may subsequently reuse the now-free filename before recovery runs;
+    recovery must never unlink that replacement merely because it occupies
+    the same path.
+    """
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return {
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
+    }
+
+
+def _unlink_recorded_file(path: Path, recorded_identity: Optional[dict[str, int]]) -> None:
+    """Unlink only the exact file captured when the journal was created."""
+    if recorded_identity is None:
+        # The tracked row already had no file.  Anything now at this path was
+        # created later and therefore belongs to a different operation.
+        return
+    current_identity = _file_identity(path)
+    if current_identity is None or current_identity != recorded_identity:
+        return
+    path.unlink()
+
+
+def _delete_tracked_document(db: Session, doc,
+                             document_kind: str,
+                             log_entity_type: Optional[str] = None,
+                             log_entity_id: Optional[int] = None,
+                             log_actor: Optional["models.User"] = None,
+                             log_label: Optional[str] = None) -> None:
+    """Commit a tracked-row deletion before removing its file.
+
+    The journal makes the operation recoverable if the process stops after
+    the database commit but before unlinking the file.  It also means a
+    failed or uncertain commit never destroys bytes that may still be
+    referenced by a database row.  The optional logging arguments have the
+    same meaning as save_documents: they append a "Removed" action naming
+    the file after a successful transaction.
+    """
+    if document_kind not in _DELETION_DOCUMENT_MODELS:
+        raise ValueError("Unsupported document deletion kind")
+    path = Path(full_path(doc))
+    original_identity = _file_identity(path)
     journal_dir = Path(get_upload_root()) / '.document-deletions'
     journal_dir.mkdir(parents=True, exist_ok=True)
     journal = journal_dir / (uuid.uuid4().hex + '.json')
     # Persist intent first. Recovery checks the DB row before deleting bytes,
     # so a crash before commit cannot destroy an existing document.
     with journal.open('x') as handle:
-        json.dump({'id': doc.id, 'stored_path': doc.stored_path}, handle)
+        json.dump({
+            'document_kind': document_kind,
+            'id': doc.id,
+            'stored_path': doc.stored_path,
+            'file_identity': original_identity,
+        }, handle)
     file_name = doc.file_name
     db.delete(doc)
     suffix = f" from {log_label}" if log_label else ""
     _log_document_action(db, log_entity_type, log_entity_id, log_actor, "Removed", f"Removed {file_name}{suffix}")
-    db.commit()
     try:
-        Path(path).unlink(missing_ok=True)
+        db.commit()
+    except Exception:
+        db.rollback()
+        # Keep the journal: a disconnected commit can have an uncertain
+        # outcome, and startup recovery will decide from the authoritative
+        # row whether the bytes should be retained or removed.
+        raise
+    try:
+        _unlink_recorded_file(path, original_identity)
         journal.unlink(missing_ok=True)
     except OSError:
         logging.getLogger(__name__).exception("Committed document deletion queued for cleanup: %s", path)
+
+
+def delete_document(db: Session, doc: models.RequestDocument,
+                    log_entity_type: Optional[str] = None, log_entity_id: Optional[int] = None,
+                    log_actor: Optional["models.User"] = None,
+                    log_label: Optional[str] = None) -> None:
+    """Delete a shared module document without risking a dangling DB row."""
+    _delete_tracked_document(
+        db, doc, "REQUEST_DOCUMENT",
+        log_entity_type=log_entity_type, log_entity_id=log_entity_id,
+        log_actor=log_actor, log_label=log_label,
+    )
+
+
+def delete_qa_request_document(db: Session, doc: models.QARequestDocument) -> None:
+    """Delete a gateway supporting document with the same crash safety."""
+    _delete_tracked_document(db, doc, "QA_REQUEST_DOCUMENT")
 
 
 def cleanup_deleted_documents(db: Session) -> int:
@@ -352,10 +430,23 @@ def cleanup_deleted_documents(db: Session) -> int:
     for journal in (Path(get_upload_root()) / '.document-deletions').glob('*.json'):
         try:
             data = json.loads(journal.read_text())
-            if db.get(models.RequestDocument, data['id']) is not None:
+            # Journals created before document_kind was introduced belong to
+            # the original shared RequestDocument table.
+            model = _DELETION_DOCUMENT_MODELS.get(
+                data.get('document_kind', 'REQUEST_DOCUMENT')
+            )
+            if model is None:
+                raise ValueError("Unknown document deletion kind")
+            if db.get(model, data['id']) is not None:
                 continue  # The delete did not commit (or is still in flight).
-            path = resolve_upload_path(data['stored_path'])
-            Path(path).unlink(missing_ok=True)
+            path = Path(resolve_upload_path(data['stored_path']))
+            if 'file_identity' in data:
+                _unlink_recorded_file(path, data['file_identity'])
+            else:
+                # Backward compatibility for journals created before file
+                # identity was recorded.  Those journals can only describe
+                # the path, so retain the historical recovery behavior.
+                path.unlink(missing_ok=True)
             journal.unlink(missing_ok=True)
             cleaned += 1
         except (OSError, ValueError, KeyError):

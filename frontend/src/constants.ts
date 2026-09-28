@@ -1083,7 +1083,7 @@ export function executionStatusGate(
   const activeDefects = (linkedDefects || []).filter((defect) => defectBlocksExecution(defect, executionId))
   if (activeDefects.length) {
     const names = activeDefects.map((d) => `${d.defect_key} (${d.status})`).join(', ')
-    return `Linked defect verification does not cover this execution (${names}). Check the environment in Edit Cycle. A Closed workflow defect needs verification in that same environment, regardless of build number; defects still moving through verification retain their stage build checks.`
+    return `Linked defect verification does not cover this execution (${names}). Check the environment in Edit Cycle. Build numbers remain visible as audit evidence, but do not need to match the cycle build.`
   }
   // currentStatus is a compatibility fallback for executions recorded
   // before immutable attempt history existed. A genuinely new slot is

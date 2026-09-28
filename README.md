@@ -140,8 +140,10 @@ no other database backend is supported or tested.
 
 ### Option A — point at your bank's Oracle instance
 
+Set the Oracle listener hostname, port, and service name in `DATABASE_URL`:
+
 ```bash
-export DATABASE_URL="oracle+oracledb://QA_PORTAL:your_password@dbhost:1521/?service_name=ORCLPDB1"
+export DATABASE_URL="oracle+oracledb://QA_PORTAL:your_password@oracle.example.com:1521/?service_name=ORCLPDB1"
 ```
 
 The `QA_PORTAL` user needs `CREATE TABLE`/`CREATE SEQUENCE` privileges the first time you run
@@ -329,12 +331,14 @@ docker build -f backend/Dockerfile -t qualityops-backend backend
 docker build -f frontend/Dockerfile -t qualityops-frontend frontend
 ```
 
-The frontend image copies `frontend/nginx.conf`. Nginx serves the SPA over TLS, sends
+The frontend image copies `frontend/nginx.conf`. Nginx serves the SPA over TLS, terminates that
+TLS connection, sends
 `/api/document-portal/*` to the isolated `document_portal` service, and sends the remaining
 `/api/*` traffic to `backend`. The browser therefore uses one origin and never receives a direct
 Python-service address. The three services must share a container network where those two service
 names resolve, as they do in the supplied Compose files. A different topology must provide an
-equivalent TLS reverse-proxy configuration and trusted-proxy address.
+equivalent reverse-proxy configuration and trusted-proxy address. Nginx connects to the private
+Python services over HTTP on port 8000.
 
 ### Running everything together (docker-compose)
 
@@ -372,13 +376,15 @@ templates, and do not commit populated profile files containing secrets.
 
 Set `DATABASE_URL` explicitly in the selected profile; there is no database-host default. The
 hostname in that URL must be reachable from the backend containers. `localhost` inside a container
-means that container itself, not the Docker host or a separately running Oracle instance.
+means that container itself, not the Docker host or a separately running Oracle instance. The
+`/api/health` endpoint checks connectivity with `SELECT 1 FROM DUAL`.
 
 The core backend runs 4 worker processes by default (`WEB_CONCURRENCY`, see `backend/Dockerfile`) and
-a `redis` service is included and wired up by default (`REDIS_URL`) for shared dashboard and
-reference-data caching across workers (see `backend/app/cache.py`). If Redis is unavailable, cache
-operations safely become misses; correctness does not depend on stale per-process caches. Startup
-file maintenance is coordinated separately with a lock on the shared upload filesystem.
+a `redis` service is included and wired up by `REDIS_URL` for shared dashboard and reference-data
+caching across workers (see `backend/app/cache.py`). The supplied topology uses `redis://` on the
+private Compose network. An operational Redis outage becomes cache misses because workflow
+correctness never depends on cached data. Startup file maintenance is coordinated separately with
+a shared-filesystem lock.
 
 ### Production Oracle pool capacity
 
@@ -435,9 +441,10 @@ users without an email address are skipped.
 
 ### Enable HTTPS
 
-The frontend terminates TLS in nginx and publishes unprivileged container port 8443 on host port 8080. Keep the
-certificate and private key outside the image. Set one host directory in the environment file
-selected at deploy time; that directory must contain `qualityops.crt` and `qualityops.key`:
+The frontend accepts browser TLS in nginx and publishes unprivileged container port 8443 on host
+port 8080. TLS terminates at nginx; nginx connects to the private Python services over HTTP and the
+backend connects to the private Redis service with `redis://`. Keep the browser-facing certificate
+and private key outside the image. Set its directory in the environment file selected at deploy time:
 
 ```env
 # .env.uat
@@ -447,7 +454,8 @@ TLS_CERT_HOST_PATH=./certs/
 TLS_CERT_HOST_PATH=./certs/
 ```
 
-The directory and both required files must already exist before `compose up`. Nginx runs as
+The directories and all required files must already exist before `compose up`. Compose mounts the
+two edge files individually rather than exposing every file in that host directory. Nginx runs as
 non-root UID/GID 101, so grant that identity read-only access to the certificate and private key
 with a host ACL or an equivalent deployment-time group mapping; do not make the private key
 world-readable. The backend and document services run as root because this deployment does not
@@ -455,15 +463,15 @@ permit assigning the required ownership to mounted storage and log directories:
 
 ```text
 certs/
-├── qualityops.crt
-└── qualityops.key
+├── qualityops.crt                       # browser-facing leaf/full chain
+└── qualityops.key                       # browser-facing private key
 ```
 
-The required-variable check in `docker-compose.yml` stops early when the directory setting is
-omitted. The same frontend image can therefore be promoted unchanged; certificates and private
-keys are mounted at runtime and excluded from both source control and Docker build contexts.
+The required-variable check in `docker-compose.yml` stops early when `TLS_CERT_HOST_PATH` is
+omitted. The same frontend image can therefore be promoted unchanged; the certificate and private
+key are mounted at runtime and excluded from both source control and Docker build contexts.
 
-For local localhost UAT only, the repository contains one certificate helper:
+For local localhost UAT only, the repository contains certificate helpers:
 
 ```bash
 python3 scripts/generate-local-uat-tls.py
@@ -480,8 +488,8 @@ This repository does not contain certificate-issuance/renewal automation, an HTT
 HTTP-to-HTTPS redirect. Nginx listens only on container port 8443, mapped by Compose to host port
 8080, so the Compose URL is `https://<host>:8080`. Certificate issuance and renewal are operator
 responsibilities; after replacing a mounted certificate, recreate or reload the frontend container.
-If an external load balancer terminates public TLS, it must either re-encrypt to this nginx TLS
-listener or the deployment must supply and review a different frontend configuration. The Python
+If an external load balancer terminates public TLS, it must forward to this nginx TLS listener or
+the deployment must supply and review a different frontend configuration. The Python
 services must remain private, and their `FORWARDED_ALLOW_IPS` value must trust only the actual
 nginx/reverse-proxy peer. The supplied nginx configuration treats its direct TCP peer as the
 client and overwrites inbound forwarding headers. When a controlled load balancer sits in front,

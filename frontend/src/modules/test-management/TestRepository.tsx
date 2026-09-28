@@ -455,9 +455,14 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
   // where the import likely is, not a literal server-reported progress
   // stream; it always completes for real once the response actually comes
   // back (see submit() below).
-  const [stage, setStage] = useState<'form' | 'importing'>('form')
+  const [stage, setStage] = useState<'form' | 'importing' | 'completed' | 'failed'>('form')
   const [progress, setProgress] = useState(0)
   const [progressMessage, setProgressMessage] = useState('Uploading file…')
+  const jobController = useRef<AbortController | null>(null)
+
+  useEffect(() => () => {
+    jobController.current?.abort()
+  }, [])
 
   async function downloadTemplate() {
     setDownloadingTemplate(true)
@@ -505,7 +510,10 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
         { file, folder_id: targetFolder ? String(targetFolder) : undefined },
       )
       setProgressMessage('Import queued; processing rows in the background…')
-      const completed = await waitForJob<TestCaseImportResult>(queued.id)
+      const controller = new AbortController()
+      jobController.current?.abort()
+      jobController.current = controller
+      const completed = await waitForJob<TestCaseImportResult>(queued.id, { signal: controller.signal })
       const res = completed.result!
       const remainingDisplayTime = Math.max(0, 600 - (Date.now() - startedAt))
       if (remainingDisplayTime) await new Promise((resolve) => window.setTimeout(resolve, remainingDisplayTime))
@@ -513,19 +521,41 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
       setProgress(100)
       setProgressMessage('Import complete')
       setResult(res)
+      setStage('completed')
       onImported()
     } catch (err) {
       window.clearInterval(timer)
-      setError(err)
-      setStage('form')
+      if (!(err instanceof Error && err.name === 'AbortError')) {
+        setError(err)
+        setStage('failed')
+      }
+    } finally {
+      jobController.current = null
     }
   }
 
+  // A rendered result always wins over a stale progress stage. This keeps
+  // the header close control available once the server operation has
+  // finished, even if future result handling changes miss a stage update.
+  const importActive = stage === 'importing' && result === null
+  const modalTitle = importActive
+    ? 'Importing test cases'
+    : result
+      ? primaryFailureReason
+        ? 'Test case import failed'
+        : resultErrors.length || result.skipped_rows
+          ? 'Test case import completed with issues'
+          : 'Test cases imported successfully'
+      : stage === 'failed'
+        ? 'Test case import failed'
+        : 'Import Test Cases from Excel'
+
   return (
     <Modal
-      title={stage === 'importing' ? 'Importing test cases' : 'Import Test Cases from Excel'}
+      title={modalTitle}
       onClose={onClose}
-      preventBackdropClose={stage === 'importing'}
+      preventBackdropClose={importActive}
+      closeDisabled={importActive}
     >
       {!result ? (
         stage === 'importing' ? (
@@ -784,7 +814,7 @@ function BulkArchiveModal({ projectId, selectedIds, onClose, onArchived }: {
         : `Archive ${archiveIds.length} test case${archiveIds.length !== 1 ? 's' : ''}?`
 
   return (
-    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={onClose} closeDisabled={stage === 'archiving'} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <form onSubmit={archive}>
           <div className="tm-bulk-confirm-count"><strong>{archiveIds.length}</strong><span>test case{archiveIds.length !== 1 ? 's' : ''} will be archived</span></div>
@@ -883,7 +913,7 @@ function BulkApproveModal({ projectId, selectedIds, onClose, onApproved }: {
         : `Approve ${approvalIds.length} pending testcase${approvalIds.length !== 1 ? 's' : ''}?`
 
   return (
-    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={onClose} closeDisabled={stage === 'approving'} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <form onSubmit={approve}>
           <div className="tm-bulk-confirm-count"><strong>{approvalIds.length}</strong><span>pending testcase{approvalIds.length !== 1 ? 's' : ''} will be approved</span></div>
@@ -982,7 +1012,7 @@ function BulkRecommendModal({ project, selectedCases, onClose, onRecommended }: 
         : `Recommend ${recommendIds.length} pending testcase${recommendIds.length !== 1 ? 's' : ''} for approval?`
 
   return (
-    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={onClose} closeDisabled={stage === 'recommending'} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <form onSubmit={recommend}>
           <div className="tm-bulk-confirm-count"><strong>{recommendIds.length}</strong><span>pending testcase{recommendIds.length !== 1 ? 's' : ''} will move to Stage 2 final approval</span></div>
@@ -1095,7 +1125,7 @@ function BulkDecisionModal({ action, project, selectedCases, onClose, onDone }: 
         : `${action === 'return' ? 'Return' : 'Reject'} ${ids.length} pending testcase${ids.length !== 1 ? 's' : ''}?`
 
   return (
-    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={onClose} closeDisabled={stage === 'working'} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <form onSubmit={run}>
           <div className="tm-bulk-confirm-count"><strong>{ids.length}</strong><span>pending testcase{ids.length !== 1 ? 's' : ''} will be {verbPast}</span></div>
@@ -1198,7 +1228,7 @@ function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
         : `Submit ${submitIds.length} testcase${submitIds.length !== 1 ? 's' : ''} for review?`
 
   return (
-    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={onClose} closeDisabled={stage === 'submitting'} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <form onSubmit={doSubmit}>
           <div className="tm-bulk-confirm-count"><strong>{submitIds.length}</strong><span>Draft / Returned testcase{submitIds.length !== 1 ? 's' : ''} will move to review</span></div>
@@ -1563,7 +1593,7 @@ function BulkRestoreFromArchiveModal({ projectId, selectedIds, onClose, onRestor
         : `Restore ${restoreIds.length} test case${restoreIds.length !== 1 ? 's' : ''} from archive?`
 
   return (
-    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={onClose} closeDisabled={stage === 'restoring'} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <form onSubmit={restore}>
           <div className="tm-bulk-confirm-count"><strong>{restoreIds.length}</strong><span>test case{restoreIds.length !== 1 ? 's' : ''} will be restored to Approved</span></div>
@@ -2399,7 +2429,7 @@ function BulkUpdateModal({ projectId, selectedCases, folders, onClose, onUpdated
           : `Update ${totalSelected} test case${totalSelected !== 1 ? 's' : ''}`
 
   return (
-    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose wide>
+    <Modal title={title} onClose={onClose} closeDisabled={stage === 'updating'} variant="dialog" preventBackdropClose wide>
       {stage === 'edit' && <form className="tm-bulk-editor" onSubmit={review}>
         <div className="tm-bulk-hero">
           <span className="tm-bulk-hero-icon">✦</span>
@@ -2714,6 +2744,8 @@ export default function TestRepository() {
   // fresh via GET /test-cases/{id} before the editor modal is shown.
   const [openingCaseId, setOpeningCaseId] = useState<number | null>(null)
   const detailRequests = useRef(createLatestRequestGate()).current
+  const foldersRequest = useRef(0)
+  const summaryRequest = useRef(0)
   const [search, setSearch] = useState('')
   const [priorityFilter, setPriorityFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
@@ -2742,6 +2774,22 @@ export default function TestRepository() {
   const [downloadingTemplate, setDownloadingTemplate] = useState(false)
   const [exportingRepository, setExportingRepository] = useState(false)
   const [exportingFolderId, setExportingFolderId] = useState<number | null>(null)
+  const exportJobControllers = useRef(new Set<AbortController>())
+
+  useEffect(() => () => {
+    exportJobControllers.current.forEach((controller) => controller.abort())
+    exportJobControllers.current.clear()
+  }, [])
+
+  async function waitForOwnedExport(jobId: string) {
+    const controller = new AbortController()
+    exportJobControllers.current.add(controller)
+    try {
+      return await waitForJob(jobId, { signal: controller.signal })
+    } finally {
+      exportJobControllers.current.delete(controller)
+    }
+  }
 
   async function downloadTemplate() {
     setDownloadingTemplate(true)
@@ -2755,12 +2803,14 @@ export default function TestRepository() {
     setExportingRepository(true); setError(null)
     try {
       const queued = await api.post<{ id: string }>(`/api/test-repository/projects/${projectId}/export-xlsx/jobs`)
-      await waitForJob(queued.id)
+      await waitForOwnedExport(queued.id)
       await api.downloadFile(
         `/api/jobs/${queued.id}/download`,
         `${selectedProject.project_key}_test_repository.xlsx`,
       )
-    } catch (err) { setError(err) } finally { setExportingRepository(false) }
+    } catch (err) {
+      if (!(err instanceof Error && err.name === 'AbortError')) setError(err)
+    } finally { setExportingRepository(false) }
   }
 
   async function exportFolder(folder: TestFolderOut) {
@@ -2770,13 +2820,15 @@ export default function TestRepository() {
       const queued = await api.post<{ id: string }>(
         `/api/test-repository/projects/${projectId}/export-xlsx/jobs?folder_id=${folder.id}`,
       )
-      await waitForJob(queued.id)
+      await waitForOwnedExport(queued.id)
       const safeFolderName = folder.name.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '') || `folder_${folder.id}`
       await api.downloadFile(
         `/api/jobs/${queued.id}/download`,
         `${selectedProject.project_key}_${safeFolderName}_test_repository.xlsx`,
       )
-    } catch (err) { setError(err) } finally { setExportingFolderId(null) }
+    } catch (err) {
+      if (!(err instanceof Error && err.name === 'AbortError')) setError(err)
+    } finally { setExportingFolderId(null) }
   }
 
   useEffect(() => {
@@ -2798,8 +2850,14 @@ export default function TestRepository() {
   }, [])
 
   const loadFolders = useCallback(async (pid: number) => {
-    try { setFolders(await api.get<TestFolderOut[]>(`/api/test-repository/projects/${pid}/folders`)) }
-    catch (err) { setError(err) }
+    const request = ++foldersRequest.current
+    try {
+      const result = await api.get<TestFolderOut[]>(`/api/test-repository/projects/${pid}/folders`)
+      if (request === foldersRequest.current) {
+        setFolders(result)
+        setError(null)
+      }
+    } catch (err) { if (request === foldersRequest.current) setError(err) }
   }, [])
   // Reported directly: "Testcases count and all should be updated based on
   // folder. otherwise creating confusion" -- the "Current view" stat cards
@@ -2821,18 +2879,33 @@ export default function TestRepository() {
     : selectedFolder === '' || selectedFolder === RECYCLE_BIN ? undefined
     : String(selectedFolder)
   const loadSummary = useCallback(async (pid: number, folderParam?: string) => {
+    const request = ++summaryRequest.current
     try {
       const qs = folderParam ? `?folder_id=${encodeURIComponent(folderParam)}` : ''
-      setSummary(await api.get<TestCaseSummaryOut>(`/api/test-repository/projects/${pid}/test-cases/summary${qs}`))
-    } catch (err) { setError(err) }
+      const result = await api.get<TestCaseSummaryOut>(`/api/test-repository/projects/${pid}/test-cases/summary${qs}`)
+      if (request === summaryRequest.current) {
+        setSummary(result)
+        setError(null)
+      }
+    } catch (err) { if (request === summaryRequest.current) setError(err) }
   }, [])
   useEffect(() => {
     setSelectedCaseIds(new Set())
-    if (projectId) { loadFolders(projectId) } else { setFolders([]) }
+    setFolders([])
+    if (projectId) loadFolders(projectId)
+    else foldersRequest.current++
   }, [projectId, loadFolders])
   useEffect(() => {
-    if (projectId) { loadSummary(projectId, summaryFolderParam) } else { setSummary(null) }
+    setSummary(null)
+    if (projectId) loadSummary(projectId, summaryFolderParam)
+    else summaryRequest.current++
   }, [projectId, summaryFolderParam, loadSummary])
+
+  useEffect(() => () => {
+    foldersRequest.current++
+    summaryRequest.current++
+    detailRequests.invalidate()
+  }, [detailRequests])
 
   useEffect(() => {
     if (!projectId) { setMyAccess(null); return }

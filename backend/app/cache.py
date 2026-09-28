@@ -11,10 +11,10 @@ worker the same cache and the same invalidation, which is the whole point of
 caching data that changes.
 
 This module is designed to degrade to a harmless no-op cache, never to break
-a request, in any of these cases:
+a request, for operational failures such as:
   - the `redis` package isn't installed at all (ImportError on first use)
   - REDIS_URL isn't set (caching simply stays off)
-  - Redis is unreachable / times out / errors for any other reason
+  - Redis is unreachable / times out / returns an operation error
 
 That matters a lot in this codebase: there is no live Redis available in
 every environment this app runs in (e.g. this sandbox, or a fresh dev
@@ -34,19 +34,19 @@ Usage:
 """
 import json
 import logging
-import os
 import threading
 import time
 from typing import Any, Optional
 
+from .config import settings
 from .resilience import CircuitOpenError, redis_circuit
 
 logger = logging.getLogger("qa_portal.cache")
 
-REDIS_URL = os.getenv("REDIS_URL")
+REDIS_URL = settings.redis_url
 # Escape hatch to force caching off even with REDIS_URL set (e.g. to isolate
 # a cache-related bug in production without touching the connection string).
-CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
+CACHE_ENABLED = settings.cache_enabled
 
 # Every key this app writes is namespaced under this prefix, so a shared
 # Redis instance (e.g. one Redis used by more than one app) can never collide
@@ -76,8 +76,7 @@ def _cache_failure(operation: str, exc: Exception) -> None:
 
 def _get_client():
     """Lazily builds, with bounded retry, and returns the redis client, or None if caching
-    is disabled/unconfigured/unavailable. Safe to call from any request --
-    never raises."""
+    is disabled/unconfigured/unavailable."""
     global _client, _warned_unavailable, _next_init_at
     if not _cache_circuit_allows():
         return None

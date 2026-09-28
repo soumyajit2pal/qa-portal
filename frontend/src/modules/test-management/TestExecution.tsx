@@ -461,12 +461,11 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
     // cycle grows beyond one server page. The table below paginates locally
     // after every server page has been collected.
     async function loadAllCompletionDefects() {
-      const first = await api.get<PageOut<DefectListOut>>(`/api/defects?cycle_id=${cycle.id}&page=1&page_size=100`)
-      const remaining = first.total_pages > 1
-        ? await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) =>
-          api.get<PageOut<DefectListOut>>(`/api/defects?cycle_id=${cycle.id}&page=${index + 2}&page_size=100`)))
-        : []
-      if (active) setCompletionDefects([first, ...remaining].flatMap((page) => page.items))
+      const defects = await api.getAll<DefectListOut>(`/api/defects?cycle_id=${cycle.id}`)
+      if (active) {
+        setCompletionDefects(defects)
+        setDialogError(null)
+      }
     }
     loadAllCompletionDefects()
       .catch((error) => { if (active) setDialogError(error) })
@@ -501,8 +500,11 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
           ? [{ label: 'Resume Execution', status: 'In Progress' }]
           : []
   const unresolvedStatuses = new Set(['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Not a Defect Review', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification'])
+  // Verification coverage is environment-scoped. Builds stay on each
+  // verification record as audit evidence, but a different recorded build
+  // must not make otherwise valid environment coverage disappear.
   const verifiedForCycleContext = (defect: DefectListOut) => !!defect.verified_builds?.some(v =>
-    v.environment === cycle.environment && (defect.status === 'Closed' || v.build === cycle.build))
+    v.environment === cycle.environment)
   const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect))
   const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect))
   const deferredDefects = completionDefects.filter((defect) => defect.status === 'Deferred')
@@ -595,7 +597,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
         )}
       </div>
       {showBlock && (
-        <Modal title={`Block ${cycle.cycle_key}?`} onClose={() => setShowBlock(false)} variant="dialog" preventBackdropClose>
+        <Modal title={`Block ${cycle.cycle_key}?`} onClose={() => setShowBlock(false)} closeDisabled={busy} variant="dialog" preventBackdropClose>
           <form onSubmit={(event) => {
             event.preventDefault()
             if (!blockingReason.trim()) { setDialogError(new Error('A blocking reason is required')); return }
@@ -616,7 +618,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
         </Modal>
       )}
       {showComplete && !selectedCompletionDefect && (
-        <Modal title={`Review before completing ${cycle.cycle_key}`} onClose={() => setShowComplete(false)} variant="dialog" preventBackdropClose wide>
+        <Modal title={`Review before completing ${cycle.cycle_key}`} onClose={() => setShowComplete(false)} closeDisabled={busy} variant="dialog" preventBackdropClose wide>
           <div className="tm-cycle-completion-review">
             {loadingCompletion ? <p className="muted">Loading defect validation…</p> : <>
               <section className={`tm-completion-state ${completionState}`}>
@@ -784,6 +786,11 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
   const [assignedTo, setAssignedTo] = useState('')
   const submittingRef = useRef(false)
   const requestRef = useRef(0)
+  const jobController = useRef<AbortController | null>(null)
+
+  useEffect(() => () => {
+    jobController.current?.abort()
+  }, [])
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250)
@@ -900,22 +907,25 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
         created_by_id: createdById ? Number(createdById) : null,
         assigned_to_id: assignedTo ? Number(assignedTo) : null,
       }, 180_000)
-      while (result.job_id && result.status !== 'COMPLETED') {
-        await new Promise((resolve) => window.setTimeout(resolve, 1000))
-        const job = await api.get<{ status: string; error?: string | null; result?: { created_count: number; skipped_count: number } | null }>(`/api/jobs/${result.job_id}`)
-        if (job.status === 'FAILED') throw new Error(job.error || 'The background add operation failed')
-        if (job.status === 'COMPLETED') result = { ...result, ...job.result, status: job.status }
-        else result = { ...result, status: job.status }
+      if (result.job_id && result.status !== 'COMPLETED') {
+        const controller = new AbortController()
+        jobController.current?.abort()
+        jobController.current = controller
+        const job = await waitForJob<{ created_count: number; skipped_count: number }>(result.job_id, { signal: controller.signal })
+        result = { ...result, ...job.result, status: job.status }
       }
       onAdded(result.created_count)
-    } catch (err) { setError(err) } finally {
+    } catch (err) {
+      if (!(err instanceof Error && err.name === 'AbortError')) setError(err)
+    } finally {
+      jobController.current = null
       submittingRef.current = false
       setBusy(false)
     }
   }
 
   return (
-    <Modal title="Add Test Cases to Cycle" onClose={() => { if (!busy) onClose() }} wide>
+    <Modal title="Add Test Cases to Cycle" onClose={() => { if (!busy) onClose() }} closeDisabled={busy} wide>
       <div className="tm-add-cases-modal" aria-busy={busy}>
       {busy && (
         <div className="tm-add-cases-loading-overlay" role="status" aria-live="assertive">
@@ -1171,12 +1181,11 @@ function LinkExistingDefectModal({ execution, onClose, onLinked }: {
     openStatuses.forEach((s) => qs.append('status', s))
     let active = true
     async function loadCandidates() {
-      const first = await api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=1`)
-      const remaining = first.total_pages > 1
-        ? await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) =>
-          api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=${index + 2}`)))
-        : []
-      if (active) setDefects([first, ...remaining].flatMap((page) => page.items))
+      const candidates = await api.getAll<DefectListOut>(`/api/defects?${qs.toString()}`)
+      if (active) {
+        setDefects(candidates)
+        setError(null)
+      }
     }
     loadCandidates().catch((reason) => { if (active) setError(reason) })
     return () => { active = false }
@@ -1190,7 +1199,7 @@ function LinkExistingDefectModal({ execution, onClose, onLinked }: {
       onLinked()
     } catch (err) { setError(err); setBusy(false) }
   }
-  return <Modal title="Link existing defect" onClose={onClose} variant="dialog" preventBackdropClose wide>
+  return <Modal title="Link existing defect" onClose={onClose} closeDisabled={busy} variant="dialog" preventBackdropClose wide>
     <form onSubmit={submit}>
       <div className="defect-trace-banner"><strong>{execution.test_case?.test_case_key} · {execution.status}</strong><span>Select a previously opened governed defect. This execution's Cycle, Test Case, and latest attempt will be linked automatically. A defect already linked elsewhere is added as an additional trace, without disturbing its original link.</span></div>
       <Field label="Governed Defect *"><SearchableSelect value={defectId} onChange={setDefectId} placeholder="Select open defect…" options={defects.map((defect) => ({ value: String(defect.id), label: `${defect.defect_key} · ${defect.title} · ${defect.qa_request_key || 'QA Request'}${defect.execution_id ? ` · already linked to ${defect.cycle_key || 'a cycle'} / ${defect.test_case_key || 'a test case'}` : ''}` }))} /></Field>
@@ -1296,14 +1305,11 @@ function DefectLinks({ executionId, run, readOnly, onChanged, onExecutionChanged
     let active = true
     setLoadingInternal(true)
     async function loadInternalDefects() {
-      const first = await api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=1`)
-      const remaining = first.total_pages > 1
-        ? await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) =>
-          api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=${index + 2}`)))
-        : []
+      const defects = await api.getAll<DefectListOut>(`/api/defects?${qs.toString()}`)
       if (active) {
         const alreadyLinked = new Set((run.defects || []).map((defect) => defect.defect_key))
-        setInternalDefects([first, ...remaining].flatMap((page) => page.items).filter((defect) => !alreadyLinked.has(defect.defect_key)))
+        setInternalDefects(defects.filter((defect) => !alreadyLinked.has(defect.defect_key)))
+        setError(null)
       }
     }
     loadInternalDefects().catch((reason) => { if (active) setError(reason) }).finally(() => { if (active) setLoadingInternal(false) })
@@ -1726,7 +1732,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
         <div className="info-banner warning">
           <strong>Verification required:</strong> Linked defect verification does not cover this execution
           {' '}({activeLinkedDefects.map((d) => `${d.defect_key} · ${d.status}`).join(', ')}). The execution
-          status cannot be changed until verification requirements are met. Check the environment in Edit Cycle; a closed workflow defect needs verification in that same environment, regardless of build number.
+          status cannot be changed until verification requirements are met. Check the environment in Edit Cycle. Build numbers remain visible as audit evidence, but do not need to match the cycle build.
         </div>
       )}
       {activeLinkedDefects.length === 0 && hasPriorFailedOrBlocked && (
@@ -1924,7 +1930,7 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
   const preview = selectedExecutions.slice(0, 6).map((execution) => execution.test_case?.test_case_key || `#${execution.test_case_id}`)
 
   return (
-    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose wide>
+    <Modal title={title} onClose={onClose} closeDisabled={stage === 'executing'} variant="dialog" preventBackdropClose wide>
       {stage === 'edit' && (
         <form onSubmit={review}>
           <div className="tm-bulk-confirm-count"><strong>{selectedExecutions.length}</strong><span>assigned testcase{selectedExecutions.length !== 1 ? 's' : ''} selected for a new attempt</span></div>
@@ -2083,7 +2089,7 @@ function BulkRemoveModal({ cycleId, cycleKey, executions, eligibility, onClose, 
         : `Remove ${selectedExecutions.length} testcase${selectedExecutions.length !== 1 ? 's' : ''} from ${cycleKey}?`
 
   return (
-    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={onClose} closeDisabled={stage === 'removing'} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <div className="tm-bulk-confirm">
           <div className="tm-bulk-confirm-count"><strong>{removableExecutions.length}</strong><span>testcase{removableExecutions.length !== 1 ? 's' : ''} will leave this test cycle</span></div>
@@ -2212,6 +2218,8 @@ export default function TestExecution() {
   // instead of being derived from the complete (now paginated) execution
   // list.
   const [executionSummary, setExecutionSummary] = useState<TestExecutionSummaryOut | null>(null)
+  const cycleFoldersRequest = useRef(0)
+  const executionSummaryRequest = useRef(0)
   const [error, setError] = useState<unknown>(null)
   const [showNewCycle, setShowNewCycle] = useState(false)
   const [editingCycle, setEditingCycle] = useState<TestCycleOut | null>(null)
@@ -2239,6 +2247,7 @@ export default function TestExecution() {
   const [cycleSidebarCollapsed, setCycleSidebarCollapsed] = useState(false)
   const [users, setUsers] = useState<UserOption[]>([])
   const [exportingCycle, setExportingCycle] = useState(false)
+  const exportJobController = useRef<AbortController | null>(null)
   const [functionalRequestOptions, setFunctionalRequestOptions] = useState<LinkedRequestRef[]>([])
   const [linkingExistingExecution, setLinkingExistingExecution] = useState<TestExecutionOut | null>(null)
   // 2026-08 -- reported directly: "once test cycle completed, then test
@@ -2249,6 +2258,10 @@ export default function TestExecution() {
   // LinkCycleRequestModal, a narrower standalone form for just that one
   // field, and the matching backend allowance in update_cycle.
   const [linkingCycleRequest, setLinkingCycleRequest] = useState<TestCycleOut | null>(null)
+
+  useEffect(() => () => {
+    exportJobController.current?.abort()
+  }, [])
 
   useEffect(() => {
     // A project picker must not silently omit projects after the first page.
@@ -2320,11 +2333,14 @@ export default function TestExecution() {
     } catch (err) { if (isCurrent()) setError(err) }
   }, [searchParams])
   const loadCycleFolders = useCallback(async (pid: number) => {
+    const request = ++cycleFoldersRequest.current
     try {
       const data = await api.get<TestCycleFolderListOut>(`/api/test-execution/projects/${pid}/cycle-folders`)
+      if (request !== cycleFoldersRequest.current) return
       setCycleFolders(data.folders)
       setCycleFolderTotals({ unfiled_count: data.unfiled_count, total: data.total })
-    } catch (err) { setError(err) }
+      setError(null)
+    } catch (err) { if (request === cycleFoldersRequest.current) setError(err) }
   }, [])
   const cycleFolderParam = selectedCycleFolder === '' ? undefined : selectedCycleFolder === CYCLE_UNFILED ? 'unfiled' : String(selectedCycleFolder)
   // A direct result link can target a cycle outside the folder currently
@@ -2334,8 +2350,9 @@ export default function TestExecution() {
     if (searchParams.get('execution') && selectedCycleFolder !== '') setSelectedCycleFolder('')
   }, [searchParams, selectedCycleFolder])
   useEffect(() => {
+    setCycleFolders([]); setCycleFolderTotals({ unfiled_count: 0, total: 0 })
     if (projectId) loadCycleFolders(projectId)
-    else { setCycleFolders([]); setCycleFolderTotals({ unfiled_count: 0, total: 0 }) }
+    else cycleFoldersRequest.current++
   }, [projectId, loadCycleFolders])
   useEffect(() => {
     let active = true
@@ -2363,21 +2380,38 @@ export default function TestExecution() {
     { cursor: true },
   )
   const loadExecutionExtras = useCallback(async (cid: number) => {
+    const request = ++executionSummaryRequest.current
     try {
       const summaryData = await api.get<TestExecutionSummaryOut>(`/api/test-execution/cycles/${cid}/executions/summary`)
-      setExecutionSummary(summaryData)
-    } catch (err) { setError(err) }
+      if (request === executionSummaryRequest.current) {
+        setExecutionSummary(summaryData)
+        setError(null)
+      }
+    } catch (err) { if (request === executionSummaryRequest.current) setError(err) }
   }, [])
   const refreshExecutions = useCallback(() => {
     reloadExecutions()
     if (cycleId) loadExecutionExtras(cycleId)
   }, [reloadExecutions, loadExecutionExtras, cycleId])
   useEffect(() => {
+    let active = true
+    setExecutionSummary(null)
     if (cycleId) {
       loadExecutionExtras(cycleId)
-      api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => setCycleActivity([]))
-    } else { setExecutionSummary(null); setCycleActivity([]) }
+      api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`)
+        .then((result) => { if (active) setCycleActivity(result) })
+        .catch(() => { if (active) setCycleActivity([]) })
+    } else {
+      executionSummaryRequest.current++
+      setCycleActivity([])
+    }
+    return () => { active = false }
   }, [cycleId, loadExecutionExtras])
+
+  useEffect(() => () => {
+    cycleFoldersRequest.current++
+    executionSummaryRequest.current++
+  }, [])
   // Defect traceability deep-link -- fetches the specific execution by id
   // directly (PAG-006-style) rather than searching the loaded page, since
   // the target row may not be on whatever page/filter happens to be active.
@@ -2566,12 +2600,20 @@ export default function TestExecution() {
     setExportingCycle(true); setError(null)
     try {
       const queued = await api.post<{ id: string }>(`/api/test-execution/cycles/${cycleId}/export-xlsx/jobs`)
-      await waitForJob(queued.id)
+      const controller = new AbortController()
+      exportJobController.current?.abort()
+      exportJobController.current = controller
+      await waitForJob(queued.id, { signal: controller.signal })
       await api.downloadFile(
         `/api/jobs/${queued.id}/download`,
         `${selectedCycle.cycle_key}_test_lifecycle.xlsx`,
       )
-    } catch (err) { setError(err) } finally { setExportingCycle(false) }
+    } catch (err) {
+      if (!(err instanceof Error && err.name === 'AbortError')) setError(err)
+    } finally {
+      exportJobController.current = null
+      setExportingCycle(false)
+    }
   }
 
   // Reported directly: "MAKE child hierarchy based, more easier to

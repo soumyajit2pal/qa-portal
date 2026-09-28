@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import shutil
 import uuid
@@ -2023,29 +2024,61 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
     os.makedirs(request_dir, exist_ok=True)
 
     created = []
-    for f in files:
-        original_name = os.path.basename(f.filename or "unnamed_file")
-        dest_path = os.path.join(request_dir, original_name)
-        if os.path.exists(dest_path):
+    written_paths = []
+    try:
+        for f in files:
+            original_name = os.path.basename(f.filename or "unnamed_file")
             stem, ext = os.path.splitext(original_name)
-            original_name = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
-            dest_path = os.path.join(request_dir, original_name)
+            # Atomically reserve the destination.  An exists() check followed
+            # by open(..., "wb") lets concurrent workers both select the same
+            # name and the later writer silently overwrites the first upload.
+            while True:
+                dest_path = os.path.join(request_dir, original_name)
+                try:
+                    output = open(dest_path, "xb")
+                    break
+                except FileExistsError:
+                    original_name = f"{stem}_{uuid.uuid4().hex}{ext}"
+            with output as out:
+                written_paths.append(dest_path)
+                shutil.copyfileobj(f.file, out)
 
-        with open(dest_path, "wb") as out:
-            shutil.copyfileobj(f.file, out)
+            doc = models.QARequestDocument(
+                qa_request_id=req.id,
+                file_name=f.filename or original_name,
+                stored_path=os.path.join(storage_key, original_name),
+                content_type=f.content_type,
+                file_size=os.path.getsize(dest_path),
+                uploaded_by_id=current_user.id,
+            )
+            db.add(doc)
+            created.append(doc)
 
-        doc = models.QARequestDocument(
-            qa_request_id=req.id,
-            file_name=f.filename or original_name,
-            stored_path=os.path.join(storage_key, original_name),
-            content_type=f.content_type,
-            file_size=os.path.getsize(dest_path),
-            uploaded_by_id=current_user.id,
-        )
-        db.add(doc)
-        created.append(doc)
-
-    db.commit()
+        db.commit()
+    except Exception:
+        # A commit can fail after files have reached shared storage. Roll the
+        # unit of work back, then remove only paths that no committed row owns.
+        try:
+            db.rollback()
+            for path in written_paths:
+                stored_path = os.path.relpath(path, upload_root)
+                committed = (
+                    db.query(models.QARequestDocument)
+                    .filter_by(stored_path=stored_path)
+                    .first()
+                )
+                if committed is None:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        logging.getLogger(__name__).exception(
+                            "Could not clean up failed QA supporting-document upload"
+                        )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "QA supporting-document upload outcome uncertain; preserving files for reconciliation"
+            )
+        raise
     for d in created:
         db.refresh(d)
     return created
@@ -2087,9 +2120,5 @@ def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Document not found")
     if not doc_store.can_delete_document(doc, current_user):
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
-    full_path = doc_store.resolve_upload_path(doc.stored_path)
-    if os.path.exists(full_path):
-        os.remove(full_path)
-    db.delete(doc)
-    db.commit()
+    doc_store.delete_qa_request_document(db, doc)
     return {"ok": True}

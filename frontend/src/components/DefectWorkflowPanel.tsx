@@ -216,7 +216,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
     Triaged: 'The resolver is assigned. Start work when investigation or the fix begins.',
     'In Progress': 'Document the root cause and fix, then hand the tested build to a QA owner.',
     'Ready for QA': 'The fix is ready. The QA owner can start validating the submitted build.',
-    'QA Testing': 'Record the tested build, observed result and evidence. Confirm regression testing before passing.',
+    'QA Testing': 'Record the tested build, observed result and evidence before passing. The regression-testing confirmation is optional.',
     'Business Acceptance': 'The business owner validates the fixed build against the agreed requirements.',
     'Ready for Release': 'The release owner deploys the approved fix and records the production build and reference.',
     'Production Verification': 'Verify the deployed fix in production and attach evidence before closing.',
@@ -313,7 +313,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
       {choice === 'Not a Defect Review' && owner('retest_tester_id', 'QA reviewer')}
       {choice === 'occurrence' && <Field label="Affected environment *"><select value={data.environment} onChange={e => setData({ ...data, environment: e.target.value })}>{ENVIRONMENTS.map(x => <option key={x}>{x}</option>)}</select></Field>}
       {(['Ready for QA', 'Production Verification', 'occurrence'].includes(choice) || verification) && field('build', verification ? 'Tested build' : 'Deployed / affected build')}
-      {choice === 'Business Acceptance' && <p>Business verification uses the same fixed build. Deploy that build to {workflow.business_environment} before starting acceptance.</p>}
+      {choice === 'Business Acceptance' && <p>Complete business verification in {workflow.business_environment}. Record the build used as audit evidence; it does not need to match a build recorded at another stage.</p>}
       {['Ready for Release', 'Deferred'].includes(choice) && field('target_release', 'Target release')}
       {choice === 'Ready for Release' && owner('release_owner_id', 'Release owner')}
       {['Deferred', 'block'].includes(choice) && field('review_date', 'Review date', true, 'date')}
@@ -335,7 +335,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
         {requiresReference && richField('reference', 'Evidence notes / deployment reference', 'Add a change ID, deployment reference, test result link, or explain the attached evidence…', false)}
         {requiresReference && <p className="muted small">Provide an attachment or an evidence reference before saving.</p>}
       </section>
-      {defect.status === 'QA Testing' && forward && <label className="workflow-regression-check"><input disabled={busy} type="checkbox" required checked={!!data.regression_confirmed} onChange={e => setData({ ...data, regression_confirmed: e.target.checked })} /> Confirmation and applicable regression testing passed</label>}
+      {defect.status === 'QA Testing' && forward && <label className="workflow-regression-check"><input disabled={busy} type="checkbox" checked={!!data.regression_confirmed} onChange={e => setData({ ...data, regression_confirmed: e.target.checked })} /> Confirmation and applicable regression testing passed <small>(optional)</small></label>}
       <ErrorText error={candidateError || error} /><div className="workflow-action-footer"><span role="status">{uploadStatus || 'Review before submitting. Submitted action details cannot be edited.'}</span><div className="workflow-actions"><button className="btn btn-primary" disabled={busy || loadingCandidates || !!candidateError}>{busy ? 'Saving…' : submitActionLabel}</button><button type="button" className="btn" disabled={busy} onClick={clearAction}>Cancel</button></div></div>
     </form>}
 

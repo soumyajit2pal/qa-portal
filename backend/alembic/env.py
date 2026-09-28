@@ -69,7 +69,10 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = create_engine(database_url, poolclass=pool.NullPool)
+    connectable = create_engine(
+        database_url,
+        poolclass=pool.NullPool,
+    )
     try:
         with connectable.connect() as connection:
             configure_context(connection=connection)

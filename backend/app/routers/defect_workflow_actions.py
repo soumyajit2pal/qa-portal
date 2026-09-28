@@ -57,14 +57,15 @@ def apply_action(db, obj, payload, user):
     def verification(result):
         env = environment_for(obj, previous)
         build = required(payload.build, 'Tested build')
-        if build != s.get('deployed_build'):
-            raise HTTPException(400, 'Tested build must match the build recorded for this stage')
         evidence = required(payload.reference, 'Evidence reference')
         notes = required(payload.remarks, 'Observed result and verification notes')
-        if result == 'Passed' and previous == 'QA Testing' and not payload.regression_confirmed:
-            raise HTTPException(400, 'Confirm applicable regression testing before passing QA')
         event.update(kind='verification', stage=previous, environment=env, build=build,
                      result=result, reference=evidence, remarks=notes)
+        # Regression confirmation is optional.  Retain an explicitly supplied
+        # answer in the immutable workflow history without manufacturing a
+        # value for older clients that omit the field.
+        if 'regression_confirmed' in payload.model_fields_set:
+            event['regression_confirmed'] = payload.regression_confirmed
         obj.tested_build_version = build
         obj.retest_result = result
         obj.retest_actual_result = notes

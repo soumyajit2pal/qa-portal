@@ -100,9 +100,22 @@ def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", curren
     removed from the frontend (see Functional.tsx). Mirrors confirm_signoff's
     own two-step log (QA Clearance "Signed Off", then Requester Verification
     "Pending") so the History tab reads identically either way."""
+    if obj.certificate_type not in {"Full Clearance", "Conditional Clearance"}:
+        return
     linked = (db.query(models.FunctionalRequest)
               .filter_by(signoff_id=obj.id, status=QAStatus.QA_SIGNOFF_PENDING).all())
     for fr in linked:
+        workspace_id = fr.qa_request.qa_workspace_id if fr.qa_request else None
+        if (
+            obj.status != "ISSUED"
+            or fr.request_id != obj.testing_request_id
+            or workspace_id is None
+            or workspace_id != obj.qa_workspace_id
+        ):
+            raise HTTPException(
+                409,
+                "The issued clearance certificate does not belong to the linked Functional Request and QA workspace",
+            )
         fr.status = QAStatus.QA_SIGNED_OFF
         db.add(models.ApprovalAction(
             entity_type="FUNCTIONAL_REQUEST", entity_id=fr.id, step_name="QA Clearance",
@@ -244,8 +257,17 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
     except ValueError as e:
         raise HTTPException(400, str(e))
     obj = models.QASignOff(**data, status="DRAFT", requester_id=current_user.id)
-    certificate_summary.refresh(db, obj)
-    db.add(obj)
+    # Isolate the early INSERT in a savepoint. If evidence capture rejects
+    # the request, only this new certificate is rolled back; other valid
+    # changes already present in the request transaction are preserved.
+    with db.begin_nested():
+        db.add(obj)
+        # Attach and flush before capture so QASignOff.live_testing_scope can
+        # resolve its view-only Functional Request relationship. Capturing a
+        # transient object freezes the fallback "Functional" scope even when
+        # the parent request contains multiple testing types.
+        db.flush()
+        certificate_summary.refresh(db, obj)
     db.commit()
     db.refresh(obj)
     _log(db, obj.id, "Requester", current_user, "Drafted", "QA Clearance Certificate created as draft")
@@ -591,7 +613,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     ] or [('Observations', 'No open linked defect observations in the captured evidence.' if snapshot else 'No captured evidence available.')]
     if obj.certificate_type == 'Conditional Clearance':
         sections.append(('Section F – Conditional Clearance Observations', observation_fields))
-    sections.append(('Section G – Certificate Validity & Compliance Declaration', [('Declaration', 'This certificate remains valid only for the tested build/version/hash. Code, configuration, infrastructure, dependency or requirement changes and production hotfixes require QA recertification. This certificate does not constitute Business Acceptance or Production readiness unless countersigned by the Application Owner.')]))
+    sections.append(('Section G – Certificate Validity & Compliance Declaration', [('Declaration', 'This certificate applies to the tested environment. The recorded build/version/hash is retained as audit evidence and is not a matching gate. Code, configuration, infrastructure, dependency or requirement changes and production hotfixes require QA recertification. This certificate does not constitute Business Acceptance or Production readiness unless countersigned by the Application Owner.')]))
     sections.append(('Section H – Approval Matrix', approval_fields))
     if signatures:
         sections.append(("QA Clearance Digital Signatures", [

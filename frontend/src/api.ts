@@ -2,6 +2,7 @@ import { encryptLogin, LoginKey } from './loginEncryption'
 import { isQaEvidenceUpload, qaDocumentSizeError } from './qaDocumentUpload'
 import { isWorkspaceSelectionStorageChange, selectedWorkspaceStorageId } from './workspaceTransition'
 import { fetchAllPages } from './pagination'
+import { BACKGROUND_JOB_TIMEOUT_MS, BackgroundJobPollOptions, PollableBackgroundJob, backgroundJobTimeoutError, pollBackgroundJob } from './backgroundJobPolling'
 
 const BASE_URL: string = (import.meta.env.VITE_API_BASE_URL as string) || ''
 
@@ -62,6 +63,10 @@ interface RequestOptions {
   // and privilege checks deliberately opt out: two full request deadlines in
   // sequence made a browser with a blocked request look stuck for a minute.
   retry?: boolean
+  // Lets long-lived workflows (notably background-job polling) stop their
+  // current HTTP request when the owning component unmounts. The request's
+  // own deadline is still enforced independently below.
+  signal?: AbortSignal
 }
 
 const REQUEST_TIMEOUT_MS = 30_000
@@ -294,7 +299,14 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
   }
 
   const controller = new AbortController()
-  const timeout = window.setTimeout(() => controller.abort(), opts.timeoutMs ?? REQUEST_TIMEOUT_MS)
+  let timedOut = false
+  const abortFromCaller = () => controller.abort()
+  if (opts.signal?.aborted) controller.abort()
+  else opts.signal?.addEventListener('abort', abortFromCaller, { once: true })
+  const timeout = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, opts.timeoutMs ?? REQUEST_TIMEOUT_MS)
   try {
     const res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload, signal: controller.signal, credentials: 'include' })
 
@@ -333,13 +345,19 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
     if (res.status === 204) return null as T
     return await res.json() as T
   } catch (error) {
-    if (controller.signal.aborted) throw new HttpError(STATUS_MESSAGES[408], 408)
+    if (opts.signal?.aborted) {
+      const cancelled = new Error('The operation was cancelled because its screen was closed.')
+      cancelled.name = 'AbortError'
+      throw cancelled
+    }
+    if (timedOut || controller.signal.aborted) throw new HttpError(STATUS_MESSAGES[408], 408)
     if (error instanceof HttpError) throw error
     throw new HttpError(
       'QualityOps could not connect to the application service. Check your network connection and try again.', 0,
     )
   } finally {
     window.clearTimeout(timeout)
+    opts.signal?.removeEventListener('abort', abortFromCaller)
   }
 }
 
@@ -645,21 +663,33 @@ export const api = {
   },
 }
 
-export interface BackgroundJob<T = Record<string, unknown>> {
-  id: string
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
-  progress: number
-  result?: T | null
-  error?: string | null
-  artifact_name?: string | null
-}
+export type BackgroundJob<T = Record<string, unknown>> = PollableBackgroundJob<T>
+export type WaitForJobOptions = BackgroundJobPollOptions
+export { BACKGROUND_JOB_TIMEOUT_MS }
 
-export async function waitForJob<T = Record<string, unknown>>(jobId: string): Promise<BackgroundJob<T>> {
-  for (;;) {
-    const job = await api.get<BackgroundJob<T>>(`/api/jobs/${jobId}?poll=${Date.now()}`)
-    if (job.status === 'FAILED') throw new Error(job.error || 'The background operation failed')
-    if (job.status === 'COMPLETED') return job
-    await new Promise((resolve) => window.setTimeout(resolve, 1000))
+export async function waitForJob<T = Record<string, unknown>>(
+  jobId: string,
+  options: WaitForJobOptions = {},
+): Promise<BackgroundJob<T>> {
+  try {
+    return await pollBackgroundJob(
+      (remainingMs) => request<BackgroundJob<T>>(`/api/jobs/${jobId}?poll=${Date.now()}`, {
+        cache: false,
+        retry: false,
+        signal: options.signal,
+        timeoutMs: Math.min(REQUEST_TIMEOUT_MS, remainingMs),
+        trackActivity: false,
+      }),
+      options,
+    )
+  } catch (error) {
+    // A status request can hit its own HTTP deadline before the overall poll
+    // budget. The operation is server-owned and may still finish, so never
+    // imply that retrying the mutation is immediately safe.
+    if (!options.signal?.aborted && error instanceof HttpError && error.status === 408) {
+      throw backgroundJobTimeoutError()
+    }
+    throw error
   }
 }
 

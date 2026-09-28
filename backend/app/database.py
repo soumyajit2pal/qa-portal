@@ -2,7 +2,8 @@
 Database configuration -- Oracle only.
 
 Set the DATABASE_URL environment variable to an Oracle connection string using
-SQLAlchemy's oracledb dialect (thin mode, no Oracle Instant Client required):
+SQLAlchemy's oracledb dialect (thin mode, no Oracle Instant Client required).
+Local development may use a plaintext Oracle listener:
 
     DATABASE_URL=oracle+oracledb://QA_PORTAL:password@dbhost:1521/?service_name=ORCLPDB1
 
@@ -50,6 +51,7 @@ if not DATABASE_URL.startswith("oracle"):
         f"DATABASE_URL must be an Oracle connection string (oracle+oracledb://...). "
         f"Got: {DATABASE_URL.split(':')[0]}://..."
     )
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
