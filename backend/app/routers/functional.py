@@ -969,7 +969,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
     # on a request they own, same "QA Lead group OR current tester" shape
     # as tester reassignment.
     _require_assigned_qa_lead_or_current_tester(obj, current_user, "request sign-off on this request")
-    certificate_summary.require_linked_security_closed(db, obj)
+    certificate_summary.require_linked_security_resolved(db, obj)
     # The frontend now creates the QA Clearance Certificate (POST /api/signoffs)
     # right before calling this, via SignOff.tsx's NewSignOffModal opened from
     # this request's own "Request Sign-off" button -- link it immediately

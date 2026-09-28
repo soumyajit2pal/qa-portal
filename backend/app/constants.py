@@ -539,6 +539,12 @@ DEFECT_REASSIGNABLE_STATUSES = ["Triaged", "Assigned", "In Progress", "Resolved"
 # DEPARTMENT_HEAD_REJECTED is untouched/still terminal -- only SM rejection
 # was asked to become reopenable.
 SAST_DAST_TERMINAL_STATUSES = ["REPORT_READY", "CLOSED", "DEPARTMENT_HEAD_REJECTED"]
+# A linked security request satisfies the QA-clearance prerequisite once it
+# either completed normally or ended in a non-reopenable rejection.  Keep this
+# narrower than ``SAST_DAST_TERMINAL_STATUSES``: REPORT_READY is a transient
+# pre-close state, while SM_REJECTED is deliberately reopenable by the
+# requester and must therefore continue to block clearance.
+SAST_DAST_CLEARANCE_RESOLVED_STATUSES = ["CLOSED", "DEPARTMENT_HEAD_REJECTED"]
 # Statuses from which mandatory details (repo URL/branch/commit/tech stack
 # for SAST; target URL/env/credentials for DAST) can still be edited by
 # *someone* -- see routers/sast_dast.py::_can_edit_details for exactly who,

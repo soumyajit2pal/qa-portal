@@ -4,6 +4,7 @@ from collections import Counter
 from fastapi import HTTPException
 from sqlalchemy import func, or_
 from . import models
+from .constants import SAST_DAST_CLEARANCE_RESOLVED_STATUSES
 
 TERMINAL = {'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'}
 EXECUTION_STATUSES = ['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed']
@@ -64,8 +65,8 @@ def assigned_testers_label(snapshot):
     return ', '.join(item['name'] for item in snapshot['assigned_testers']) or 'Not assigned'
 
 
-def require_linked_security_closed(db, source):
-    """A Functional clearance waits for every security sibling of its parent request."""
+def require_linked_security_resolved(db, source):
+    """Wait for each selected security sibling to finish or be terminally rejected."""
     if not source.qa_request_id or not source.qa_request:
         return
     selected = {value.strip().upper() for value in (source.qa_request.request_types or '').split(',')}
@@ -75,11 +76,18 @@ def require_linked_security_closed(db, source):
         if label in selected and not siblings:
             pending.append(f'{label} child request missing')
         pending.extend(f'{label} {item.request_id or "(no ID)"} ({item.status or "no status"})'
-                       for item in siblings if item.status != 'CLOSED')
+                       for item in siblings
+                       if item.status not in SAST_DAST_CLEARANCE_RESOLVED_STATUSES)
     if pending:
         raise HTTPException(409,
-            'QA Clearance cannot be raised until every linked SAST/DAST request is Closed: '
+            'QA Clearance cannot be raised until every linked SAST/DAST request is '
+            'Closed or terminally rejected by the Department Head: '
             + ', '.join(pending))
+
+
+def require_linked_security_closed(db, source):
+    """Backward-compatible alias for the resolved security prerequisite."""
+    return require_linked_security_resolved(db, source)
 
 
 def security_scan_counts(results):
@@ -132,7 +140,7 @@ def capture(db, obj):
     source = db.query(models.FunctionalRequest).filter_by(request_id=obj.testing_request_id).first()
     if not source or not source.qa_request or source.qa_request.qa_workspace_id != obj.qa_workspace_id:
         raise HTTPException(400, 'The certificate must link to a Functional Request in its workspace')
-    require_linked_security_closed(db, source)
+    require_linked_security_resolved(db, source)
     cycles = db.query(models.TestCycle.id).join(models.TestCycleChildRequestLink).filter(
         models.TestCycleChildRequestLink.child_type == 'Functional', models.TestCycleChildRequestLink.child_id == source.id)
     # A certificate is scoped to the declared tested environment/build. Both

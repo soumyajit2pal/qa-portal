@@ -19,6 +19,7 @@ import ConfirmModal from '../../components/ConfirmModal'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import { isKeyboardActivationKey } from '../../keyboard'
+import { linkedSecurityClearanceBlockers } from '../../clearanceEligibility'
 import './SignOff.css'
 
 function userName(users: UserOption[], id?: number | null): string | null {
@@ -50,20 +51,6 @@ function recordedSignature(item: ApprovalActionOut): RecordedElectronicSignature
 // certificate -- raising sign-off for a request still mid-execution
 // wouldn't make sense.
 const SIGNOFF_ELIGIBLE_STATUSES = ['QA_COMPLETED', 'QA_SIGNOFF_PENDING', 'QA_SIGNED_OFF', 'REQUESTER_VERIFICATION', 'CLOSED']
-
-function linkedSecurityNotClosed(parent: QARequestOut): string[] {
-  const selected = new Set((parent.request_types || '').split(',').map(value => value.trim().toUpperCase()))
-  const pending: string[] = []
-  for (const [kind, siblings] of [
-    ['SAST', parent.linked_sast_requests], ['DAST', parent.linked_dast_requests],
-  ] as const) {
-    if (selected.has(kind) && siblings.length === 0) pending.push(`${kind} child request missing`)
-    for (const sibling of siblings) {
-      if (sibling.status !== 'CLOSED') pending.push(`${kind} ${sibling.request_id || '(no ID)'} (${sibling.status || 'no status'})`)
-    }
-  }
-  return pending
-}
 
 const EMPTY = {
   certificate_type: 'Full Clearance', testing_type: 'Functional', testing_request_id: '',
@@ -272,7 +259,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
 
   const testingTypes = [...new Set((parentRequest?.request_types || '').split(',').map(t => t.trim()).filter(Boolean))]
   const certificateRequestId = testingTypes.length > 1 ? parentRequest!.request_id : selectedRequest?.request_id
-  const securityPending = parentRequest ? linkedSecurityNotClosed(parentRequest) : []
+  const securityBlockers = parentRequest ? linkedSecurityClearanceBlockers(parentRequest) : []
 
   // PAG-006 -- `eligibleRequests` only ever holds the lightweight
   // FunctionalListOut shape; picking one fetches the full FunctionalOut
@@ -305,8 +292,8 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     // ever filled in via picking a Testing Request above.
     if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name, Owner and CR Number/EPIC Number are derived from it.'); return }
     if (checkingSecurity) { setError('Checking the linked SAST/DAST requests. Please wait.'); return }
-    if (securityPending.length) {
-      setError(`QA Clearance requires all linked SAST/DAST requests to be Closed: ${securityPending.join(', ')}`)
+    if (securityBlockers.length) {
+      setError(`QA Clearance is waiting for active linked SAST/DAST requests to finish: ${securityBlockers.join(', ')}. A final Department Head rejection does not block clearance.`)
       return
     }
     if (!hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')) {
@@ -355,7 +342,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   return (
     <Modal title="New QA Clearance Certificate" onClose={onClose} wide>
       <form className="clearance-form" onSubmit={submit}>
-        <div className="clearance-form-intro"><span>01 · Linked scope</span><h3>Choose the completed Functional request</h3><p>The linked request supplies the application, department, and CR / EPIC identity. Security child requests must be Closed before clearance can be raised.</p></div>
+        <div className="clearance-form-intro"><span>01 · Linked scope</span><h3>Choose the completed Functional request</h3><p>The linked request supplies the application, department, and CR / EPIC identity. Active security child requests must finish before clearance can be raised; a final Department Head rejection does not block clearance.</p></div>
         <Field label="Testing Request ID *">
           {presetRequest ? (
             <div className="searchable-select">
@@ -367,8 +354,8 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
             <TestingRequestIdSearch displayRequestId={certificateRequestId} requests={eligibleRequests} selected={selectedRequest} onSelect={selectEligibleRequest} onClear={clearSelection} />
           )}
         </Field>
-        {securityPending.length > 0 && <div className="alert alert-warning" role="status">
-          QA Clearance is waiting for linked security requests to be Closed: {securityPending.join(', ')}.
+        {securityBlockers.length > 0 && <div className="alert alert-warning" role="status">
+          QA Clearance is waiting for active linked security requests to finish: {securityBlockers.join(', ')}. A Department Head Rejected request is final and does not block clearance.
         </div>}
         <div className="clearance-form-intro"><span>02 · Certificate details</span><h3>Define the clearance and promotion</h3><p>Confirm the tested build, environment, risk tier, and validity before saving the draft.</p></div>
         <div className="form-row clearance-form-grid">
@@ -453,7 +440,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
         </Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
-          <button className="btn btn-primary" disabled={busy || selecting || checkingSecurity || securityPending.length > 0}>{busy ? 'Saving...' : 'Save Draft Certificate'}</button>
+          <button className="btn btn-primary" disabled={busy || selecting || checkingSecurity || securityBlockers.length > 0}>{busy ? 'Saving...' : 'Save Draft Certificate'}</button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
         </div>
       </form>

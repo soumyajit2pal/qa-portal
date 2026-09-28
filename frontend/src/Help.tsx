@@ -414,7 +414,7 @@ export default function Help() {
               </Callout>
               <h3 className="help-subheading">QA Clearance Certificate SOP</h3>
               <SopSteps items={[
-                { title: 'Confirm linked security closure', text: 'If the parent QA Request also raised SAST or DAST, every linked security request must be Closed before Functional QA Clearance can be raised. A report-ready scan alone does not meet this gate.' },
+                { title: 'Confirm linked security resolution', text: 'If the parent QA Request also raised SAST or DAST, every linked security request must be Closed or finally rejected by the Department Head before Functional QA Clearance can be raised. Report Ready and reopenable rejection states do not meet this gate.' },
                 { title: 'Review the captured lifecycle evidence', text: 'The certificate freezes QA Test Case Execution Summary, QA Defect Status Summary, and Defect Severity-wise Breakdown from linked lifecycle records. The summaries identify the CR/EPIC number and Change Description; assigned tester names are also captured.' },
                 { title: 'Complete Section E remarks', text: 'Enter Testing Scope Completed and Remarks, plus Open Risks (if any), Known Limitations, Business Acceptance Status, Security Testing Status, and Deployment Recommendation as applicable.' },
                 { title: 'Use Section F only for Conditional Clearance', text: 'Conditional Clearance Observations appear only when Certificate Type is Conditional Clearance. Enter your own observations to use only that content; leave the field blank to generate observations from linked open-defect evidence.' },
