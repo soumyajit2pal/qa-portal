@@ -8,7 +8,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import ProjectSelect from '../../components/ProjectSelect'
-import { ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
+import { ENVIRONMENTS, defectBlocksExecution, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
 import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOption, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
@@ -501,8 +501,10 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
           ? [{ label: 'Resume Execution', status: 'In Progress' }]
           : []
   const unresolvedStatuses = new Set(['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Not a Defect Review', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification'])
-  const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !defect.verified_builds?.some(v => v.environment === cycle.environment && v.build === cycle.build))
-  const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !defect.verified_builds?.some(v => v.environment === cycle.environment && v.build === cycle.build))
+  const verifiedForCycleContext = (defect: DefectListOut) => !!defect.verified_builds?.some(v =>
+    v.environment === cycle.environment && (defect.status === 'Closed' || v.build === cycle.build))
+  const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect))
+  const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect))
   const deferredDefects = completionDefects.filter((defect) => defect.status === 'Deferred')
   const residualMissingTarget = residualDefects.filter((defect) => !defect.target_release)
   const deferredMissingTarget = deferredDefects.filter((defect) => !defect.target_release)
@@ -511,7 +513,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
   const severitySummary = ['Critical', 'High', 'Medium', 'Low'].map((severity) => ({ severity, count: completionDefects.filter((defect) => defect.severity === severity).length }))
   const targetReleaseMissing = completionDefects.filter((defect) =>
     !defect.target_release && (
-      (['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !defect.verified_builds?.some(v => v.environment === cycle.environment && v.build === cycle.build)) || defect.status === 'Deferred'
+      (['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect)) || defect.status === 'Deferred'
     ))
   const completionBlockers = new Set(severeBlockers.map((defect) => defect.id))
   const missingTargetDefects = new Set(targetReleaseMissing.map((defect) => defect.id))
@@ -1263,13 +1265,15 @@ function ImageGallery({ basePath, readOnly, emptyText }: { basePath: string; rea
 // the last one -- so a Fail logged with evidence stays on the record even
 // after a later run comes back Pass. This lists every attempt (newest
 // first), each expandable to its own actual result and its own screenshots.
-function DefectLinks({ executionId, run, readOnly, onChanged }: {
+function DefectLinks({ executionId, run, readOnly, onChanged, onExecutionChanged }: {
   executionId: number
   run: TestExecutionRunOut
   readOnly: boolean
   onChanged: (defects: TestRunDefectOut[]) => void
+  onExecutionChanged: (execution: TestExecutionOut) => void
 }) {
   const navigate = useInternalNavigate()
+  const { user } = useAuth()
   const [adding, setAdding] = useState(false)
   const [linkMode, setLinkMode] = useState<'internal' | 'external' | null>(null)
   const [internalDefects, setInternalDefects] = useState<DefectListOut[]>([])
@@ -1326,9 +1330,10 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
     setBusy(true); setError(null)
     try {
       await api.post(`/api/defects/${internalDefectId}/link-execution`, { execution_id: executionId })
-      const runs = await api.get<TestExecutionRunOut[]>(`/api/test-execution/executions/${executionId}/runs`)
-      const refreshedRun = runs.find((item) => item.id === run.id)
+      const refreshed = await api.get<TestExecutionOut>(`/api/test-execution/executions/${executionId}`)
+      const refreshedRun = refreshed.runs?.find((item) => item.id === run.id)
       onChanged(refreshedRun?.defects || run.defects || [])
+      onExecutionChanged(refreshed)
       setInternalDefectId(''); setAdding(false); setLinkMode(null)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -1344,10 +1349,19 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
     if (!pendingRemove) return
     setBusy(true); setError(null)
     try {
-      await api.del(`/api/test-execution/executions/${executionId}/runs/${run.id}/defects/${pendingRemove.id}`)
-      onChanged((run.defects || []).filter((defect) => defect.id !== pendingRemove.id))
+      const refreshed = await api.del<TestExecutionOut>(`/api/test-execution/executions/${executionId}/runs/${run.id}/defects/${pendingRemove.id}`)
+      const refreshedRun = refreshed.runs?.find((item) => item.id === run.id)
+      onChanged(refreshedRun?.defects || [])
+      onExecutionChanged(refreshed)
       setPendingRemove(null)
     } catch (err) { setError(err); setPendingRemove(null) } finally { setBusy(false) }
+  }
+
+  function canUnlink(defect: TestRunDefectOut) {
+    return !readOnly && !!user && (
+      defect.linked_by_id === user.id
+      || user.roles.some((role) => ['ADMIN', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA'].includes(role))
+    )
   }
 
   return (
@@ -1376,7 +1390,7 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
             {defect.notes && <small>{defect.notes}</small>}
           </div>
           {defect.defect_status && <Badge status={defect.defect_status} />}
-          {!readOnly && <button type="button" className="tm-defect-unlink" title="Unlink defect" onClick={() => setPendingRemove(defect)}>×</button>}
+          {canUnlink(defect) && <button type="button" className="tm-defect-unlink" title="Unlink defect" aria-label={`Unlink ${defect.defect_key}`} onClick={() => setPendingRemove(defect)}>×</button>}
         </div>
       ))}
       {adding && !linkMode && <div className="tm-defect-form tm-defect-link-choice">
@@ -1403,12 +1417,19 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
         <div className="tm-defect-form-actions"><button className="btn btn-primary btn-sm" disabled={busy}>{busy ? 'Linking…' : 'Link external reference'}</button><button type="button" className="btn btn-sm" onClick={closeLinker}>Cancel</button></div>
       </form>}
       <ErrorText error={error} title="Defect linking failed" />
-      {pendingRemove && <ConfirmModal title="Unlink defect?" message={<p>Remove the link to <strong>{pendingRemove.defect_key}</strong> from Attempt #{run.attempt_no}? The defect itself will not be deleted.</p>} confirmLabel="Unlink defect" cancelLabel="Keep link" destructive busy={busy} onConfirm={unlink} onCancel={() => setPendingRemove(null)} />}
+      {pendingRemove && <ConfirmModal title="Unlink defect?" message={pendingRemove.defect_url?.startsWith('/defects')
+        ? <p>Unlink governed defect <strong>{pendingRemove.defect_key}</strong> from this testcase execution? The defect and failed attempt remain in history, but this defect will no longer block a new attempt. A successful retry must be recorded as <strong>Retest Passed</strong>.</p>
+        : <p>Remove external defect reference <strong>{pendingRemove.defect_key}</strong> from Attempt #{run.attempt_no}? The external defect itself will not be deleted.</p>}
+        confirmLabel="Unlink defect" cancelLabel="Keep link" destructive busy={busy} onConfirm={unlink} onCancel={() => setPendingRemove(null)} />}
     </div>
   )
 }
 
-function AttemptHistory({ executionId, readOnly }: { executionId: number; readOnly: boolean }) {
+function AttemptHistory({ executionId, readOnly, onExecutionChanged }: {
+  executionId: number
+  readOnly: boolean
+  onExecutionChanged: (execution: TestExecutionOut) => void
+}) {
   const [runs, setRuns] = useState<TestExecutionRunOut[]>([])
   const [expandedId, setExpandedId] = useState<number | null>(null)
   const [error, setError] = useState<unknown>(null)
@@ -1449,7 +1470,10 @@ function AttemptHistory({ executionId, readOnly }: { executionId: number; readOn
             <div style={{ padding: '0 12px 12px' }}>
               {run.actual_result ? <AuthenticatedMarkdown value={run.actual_result} basePath={`/api/test-execution/executions/${executionId}/runs/${run.id}/images`} /> : <p className="muted small">No actual result recorded.</p>}
               {run.test_run_artifacts && <p className="small"><strong>Test Run Artifacts:</strong> {run.test_run_artifacts}</p>}
-              <DefectLinks executionId={executionId} run={run} readOnly={readOnly || run.id !== runs[runs.length - 1].id || !['Fail', 'Blocked'].includes(run.status)} onChanged={(defects) => setRuns((current) => current.map((item) => item.id === run.id ? { ...item, defects } : item))} />
+              <DefectLinks executionId={executionId} run={run} readOnly={readOnly || run.id !== runs[runs.length - 1].id || !['Fail', 'Blocked'].includes(run.status)} onChanged={(defects) => setRuns((current) => current.map((item) => item.id === run.id ? { ...item, defects } : item))} onExecutionChanged={(updated) => {
+                setRuns(updated.runs || [])
+                onExecutionChanged(updated)
+              }} />
               <ImageGallery
                 basePath={`/api/test-execution/executions/${executionId}/runs/${run.id}/images`}
                 readOnly={readOnly}
@@ -1497,7 +1521,7 @@ function VersionUpgradeAction({ execution, onUpgraded }: {
   )
 }
 
-function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRemove, removeBlockedReason, runnerCandidates, onAssigned, onClose, onSaved, onRemoved }: {
+function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRemove, removeBlockedReason, runnerCandidates, onAssigned, onExecutionChanged, onClose, onSaved, onRemoved }: {
   execution: TestExecutionOut
   readOnly: boolean
   canAssign: boolean
@@ -1506,6 +1530,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   removeBlockedReason?: string
   runnerCandidates: UserOption[]
   onAssigned: (execution: TestExecutionOut) => void
+  onExecutionChanged: (execution: TestExecutionOut) => void
   onClose: () => void
   onSaved: (e: TestExecutionOut) => void
   onRemoved: (id: number) => void
@@ -1603,7 +1628,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   // not just a disabled option buried in the Result dropdown below. See
   // constants.ts's executionStatusGate / backend's matching
   // _execution_status_gate for where this is actually enforced.
-  const activeLinkedDefects = (execution.linked_defects || []).filter((d) => !['Deferred', 'Not a Defect', 'Change Request Raised'].includes(d.status) && (d.modern_workflow || d.status !== 'Closed') && !d.verified_execution_ids?.includes(execution.id))
+  const activeLinkedDefects = (execution.linked_defects || []).filter((defect) => defectBlocksExecution(defect, execution.id))
   const hasPriorFailedOrBlocked = hasRetestEligibleHistory(execution.runs, execution.status)
   const validChangeRequestDisposition = (execution.linked_defects || []).some((defect) => defect.status === 'Change Request Raised' && !!defect.related_cr_number?.trim())
   return (
@@ -1701,7 +1726,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
         <div className="info-banner warning">
           <strong>Verification required:</strong> Linked defect verification does not cover this execution
           {' '}({activeLinkedDefects.map((d) => `${d.defect_key} · ${d.status}`).join(', ')}). The execution
-          status cannot be changed until verification requirements are met. Check the environment and build in Edit Cycle; a closed workflow defect still needs matching verification.
+          status cannot be changed until verification requirements are met. Check the environment in Edit Cycle; a closed workflow defect needs verification in that same environment, regardless of build number.
         </div>
       )}
       {activeLinkedDefects.length === 0 && hasPriorFailedOrBlocked && (
@@ -1714,7 +1739,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
         <Badge status={execution.status} />
         {execution.executed_at && <span className="muted small">as of {formatDateTimeIST(execution.executed_at)}</span>}
       </div>
-      <AttemptHistory executionId={execution.id} readOnly={readOnly} />
+      <AttemptHistory executionId={execution.id} readOnly={readOnly} onExecutionChanged={onExecutionChanged} />
       {!readOnly && (
         <form onSubmit={submit} style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #e2e2e2' }}>
           <h4>Log New Attempt</h4>
@@ -3008,6 +3033,11 @@ export default function TestExecution() {
           removeBlockedReason={removeFromCycleEligibility(editingExecution).reason}
           runnerCandidates={runnerCandidates}
           onAssigned={(saved) => {
+            refreshExecutions()
+            setEditingExecution(saved)
+            if (cycleId) api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
+          }}
+          onExecutionChanged={(saved) => {
             refreshExecutions()
             setEditingExecution(saved)
             if (cycleId) api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)

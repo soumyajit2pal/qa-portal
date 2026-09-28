@@ -3731,11 +3731,8 @@ class Defect(Base):
 
     @property
     def verified_builds(self):
-        from .defect_workflow import state, verified_for
-        if not self.workflow_json:
-            return []
-        pairs = {(e.get('environment'), e.get('build')) for e in state(self).get('history', []) if e.get('kind') == 'verification'}
-        return [{"environment": env, "build": build} for env, build in sorted(pairs) if verified_for(self, env, build)]
+        from .defect_workflow import verified_records
+        return verified_records(self)
 
     @property
     def verified_execution_ids(self):

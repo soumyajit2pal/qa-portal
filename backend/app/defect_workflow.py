@@ -1,4 +1,4 @@
-"""Versioned workspace defect policies and build-specific verification rules.
+"""Versioned workspace defect policies and verification coverage rules.
 
 Published policies are snapshotted on each new defect. Existing defects with no
 snapshot retain their historical workflow. History entries are append-only.
@@ -73,15 +73,61 @@ def environment_for(obj, stage):
             'Production Verification': 'Production'}.get(stage)
 
 
+_NON_VERIFIABLE_STATUSES = ('New', 'Triaged', 'In Progress', 'Ready for QA', 'Reopened')
+
+
+def _verification_state_is_usable(obj, workflow_state):
+    return not (
+        workflow_state.get('verification_invalidated')
+        or (obj.status == 'Closed' and getattr(obj, 'resolution_type', None) not in (None, 'Fixed'))
+        or obj.status in _NON_VERIFIABLE_STATUSES
+    )
+
+
 def verified_for(obj, environment, build):
+    """Return whether verification covers an execution context.
+
+    While a modern defect is still moving through verification stages, build
+    matching remains exact. Once the defect is Closed/Fixed, the verification
+    applies to every non-empty build in the same environment. Builds remain
+    recorded as audit evidence, but no longer partition closed-defect coverage.
+    """
     if not getattr(obj, 'workflow_json', None) or not environment or not build:
         return False
     s = state(obj)
-    if s.get('verification_invalidated') or (obj.status == 'Closed' and getattr(obj, 'resolution_type', None) not in (None, 'Fixed')):
-        return False
-    if obj.status in ('New', 'Triaged', 'In Progress', 'Ready for QA', 'Reopened'):
+    if not _verification_state_is_usable(obj, s):
         return False
     results = [e for e in s.get('history', []) if e.get('kind') == 'verification'
                and e.get('iteration') == s.get('iteration', 0)
-               and e.get('environment') == environment and e.get('build') == build]
+               and e.get('environment') == environment
+               and (obj.status == 'Closed' or e.get('build') == build)]
     return bool(results and results[-1]['result'] == 'Passed')
+
+
+def verified_records(obj):
+    """Return real verification events currently counted as passed.
+
+    The public list field retains its historical ``verified_builds`` shape for
+    API compatibility. For Closed defects, one latest event per environment is
+    returned so an older/failed build is never fabricated as verified merely
+    because closed-defect coverage is now environment-scoped.
+    """
+    if not getattr(obj, 'workflow_json', None):
+        return []
+    s = state(obj)
+    if not _verification_state_is_usable(obj, s):
+        return []
+    latest = {}
+    for event in s.get('history', []):
+        if (event.get('kind') != 'verification'
+                or event.get('iteration') != s.get('iteration', 0)
+                or not event.get('environment')
+                or not event.get('build')):
+            continue
+        key = event['environment'] if obj.status == 'Closed' else (event['environment'], event['build'])
+        latest[key] = event
+    records = [
+        {'environment': event['environment'], 'build': event['build']}
+        for event in latest.values() if event.get('result') == 'Passed'
+    ]
+    return sorted(records, key=lambda item: (item['environment'], item['build']))

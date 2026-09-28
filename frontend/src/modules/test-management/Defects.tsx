@@ -831,8 +831,8 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
   </Modal>
 }
 
-function DefectDetail({ defect, users, departments, requestDepartment, defects, contexts, closeBeforeNavigate = false, onClose, onChanged }: {
-  defect: DefectOut; users: UserOption[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]; contexts: ExecutionContext[]; closeBeforeNavigate?: boolean; onClose: () => void; onChanged: (defect: DefectOut) => void
+function DefectDetail({ defect, users, departments, requestDepartment, defects, contexts, closeBeforeNavigate = false, onClose, onChanged, onOpenDefect }: {
+  defect: DefectOut; users: UserOption[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]; contexts: ExecutionContext[]; closeBeforeNavigate?: boolean; onClose: () => void; onChanged: (defect: DefectOut) => void; onOpenDefect: (defect: DefectOut) => void
 }) {
   const navigate = useRequestNavigation()
   const { user } = useAuth()
@@ -848,6 +848,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const [actionsOpen, setActionsOpen] = useState(false)
   const [workflowAction, setWorkflowAction] = useState('')
   const [detailTab, setDetailTab] = useState('overview')
+  const [openingCanonical, setOpeningCanonical] = useState(false)
   const detailTabs = [['overview', 'Overview'], ['resolution', 'Resolution'], ['trace', 'Linked work'], ['evidence', 'Evidence'], ['activity', 'Activity']]
   useEffect(() => { setDetailTab('overview'); setWorkflowAction('') }, [defect.id])
   const actionsRef = useRef<HTMLDivElement>(null)
@@ -984,6 +985,21 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     if (closeBeforeNavigate) onClose()
     navigate(path)
   }
+  async function openCanonicalDefect() {
+    if (!defect.duplicate_of_id && !defect.duplicate_of_key) return
+    setOpeningCanonical(true)
+    setError(null)
+    try {
+      const path = defect.duplicate_of_id
+        ? `/api/defects/${defect.duplicate_of_id}`
+        : `/api/defects/by-key/${encodeURIComponent(defect.duplicate_of_key || '')}`
+      onOpenDefect(await api.get<DefectOut>(path))
+    } catch (err) {
+      setError(err)
+    } finally {
+      setOpeningCanonical(false)
+    }
+  }
   return <>
     <Modal title={`${defect.defect_key} · ${defect.title}`} onClose={onClose} wide>
       <div className="defect-review">
@@ -1014,6 +1030,10 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
         </div>}
       </div>
       </div>
+      {defect.status === 'Duplicate' && <section className={`defect-duplicate-reference ${defect.duplicate_of_id || defect.duplicate_of_key ? '' : 'missing'}`} aria-label="Duplicate defect reference">
+        <div><span>DUPLICATE DISPOSITION</span><strong>{defect.duplicate_of_key ? `Tracked by ${defect.duplicate_of_key}` : 'Canonical defect was not recorded'}</strong><small>{defect.duplicate_of_key ? 'This report is retained for audit history. Continue investigation, execution, and resolution on the canonical defect.' : 'This legacy duplicate has no surviving defect reference. Ask a QA administrator to repair the link.'}</small></div>
+        {(defect.duplicate_of_id || defect.duplicate_of_key) && <button type="button" className="btn btn-primary btn-sm" disabled={openingCanonical} onClick={openCanonicalDefect}>{openingCanonical ? 'Opening…' : 'Open canonical defect'}</button>}
+      </section>}
       <section className="defect-overview-grid" aria-label="Defect at a glance">
         <div className="defect-overview-fact"><span>Current stage</span><strong>{defect.status}</strong><small>{defect.workflow ? `Workflow version ${defect.workflow.version}` : 'Legacy defect workflow'}</small></div>
         <div className={`defect-overview-fact impact-${productionImpact.toLowerCase().replace(/\s+/g, '-')}`}><span>Production impact</span><strong>{productionImpact === 'Affected' ? 'Production affected' : productionImpact === 'Unaffected' ? 'Production unaffected' : productionImpact}</strong><small>{productionImpact === 'Affected' ? 'Production verification required' : productionImpact === 'Unaffected' ? 'Issue limited to test environments' : 'Review the observation and assessment'}</small></div>
@@ -1184,6 +1204,7 @@ export function EmbeddedDefectDetail({ defectKey, onClose }: { defectKey: string
     closeBeforeNavigate
     onClose={onClose}
     onChanged={setDefect}
+    onOpenDefect={setDefect}
   />
 }
 
@@ -1354,14 +1375,14 @@ export default function Defects() {
         columns={[
         { key: 'title', header: 'Defect', render: (defect) => <span className="defect-title-cell"><span><button className="link-btn" onClick={(event) => { event.stopPropagation(); openDefect(defect.id) }}>{openingDefectId === defect.id ? 'Opening…' : defect.defect_key}</button><small>{defect.application_name}</small></span><strong>{defect.title}</strong><small>{defect.module_feature}</small></span> },
         { key: 'severity', header: 'Risk', render: (defect) => <span className="defect-risk-cell"><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><small>{defect.priority}</small></span> },
-        { key: 'status', header: 'Workflow', render: (defect) => <span className="defect-workflow-cell"><Badge status={defect.status} /><small>{defect.assignee_name || 'Unassigned'}</small><small className="defect-workflow-department">{defect.assigned_team || 'Department not assigned'}</small></span> },
+        { key: 'status', header: 'Workflow', render: (defect) => <span className="defect-workflow-cell"><Badge status={defect.status} />{defect.status === 'Duplicate' && <small className="defect-canonical-reference">Canonical: {defect.duplicate_of_key || (defect.duplicate_of_id ? `Defect #${defect.duplicate_of_id}` : 'Not recorded')}</small>}<small>{defect.assignee_name || 'Unassigned'}</small><small className="defect-workflow-department">{defect.assigned_team || 'Department not assigned'}</small></span> },
         { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${!defect.execution_id ? 'incomplete' : ''}`}><strong>{defect.qa_request_key || (defect.qa_request_id ? `Request #${defect.qa_request_id}` : 'No QA request linked')}</strong><small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small></span> },
         { key: 'reported_at', header: 'Reported / Age', render: (defect) => <span className="defect-age-cell"><strong>{formatDateIST(defect.reported_at)}</strong><small>{ageInDays(defect.reported_at)}d since reported · {defect.reporter_name}</small></span> },
       ]} />
       {!defects.length && <div className="tm-empty"><strong>{dashboard?.total ? 'No defects match this view' : 'No governed defects yet'}</strong><span>{dashboard?.total ? 'Change the queue or clear filters to see more records.' : 'Open a defect now, or report one directly from a Failed/Blocked execution.'}</span></div>}
     </section>
     {createMode && <CreateDefectModal standalone={createMode === 'standalone'} contexts={contexts} requests={requests} initialExecutionId={initialExecutionId} onClose={() => { setCreateMode(''); setSearchParams({}) }} onCreated={(created) => { refreshDefects(); setCreateMode(''); setSelected(created); setSearchParams({ open: created.defect_key }) }} />}
-    {selected && <DefectDetail defect={selected} users={users} departments={departments} requestDepartment={requests.find((request) => request.id === selected.qa_request_id)?.department} defects={duplicateCandidates} contexts={contexts} onClose={() => {
+    {selected && <DefectDetail defect={selected} users={users} departments={departments} requestDepartment={requests.find((request) => request.id === selected.qa_request_id)?.department} defects={duplicateCandidates} contexts={contexts} onOpenDefect={(opened) => { setSelected(opened); setSearchParams({ open: opened.defect_key }) }} onClose={() => {
       // 2026-08 -- reported directly: closing a defect opened via a
       // cross-module deep link (e.g. Test Execution's "Cycle Defects"
       // panel, see LinkedDefects.tsx's `returnTo`) used to just clear the

@@ -2107,6 +2107,12 @@ export interface DefectListOut {
   assignee_id?: number | null
   assignee_name?: string | null
   assigned_team?: string | null
+  // A Duplicate is only useful in the register when its surviving record is
+  // visible alongside the terminal status. These values are deliberately
+  // kept in the lightweight list response so users do not have to open every
+  // duplicate just to discover where the issue is now tracked.
+  duplicate_of_id?: number | null
+  duplicate_of_key?: string | null
   target_release?: string | null
   expected_resolution_date?: string | null
   reopen_count: number

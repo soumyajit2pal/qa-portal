@@ -2076,6 +2076,12 @@ class DefectListOut(ORMModel):
     target_release: Optional[str] = None
     expected_resolution_date: Optional[datetime.date] = None
     reopen_count: int = 0
+    # A Duplicate is terminal and delegates remediation to this canonical
+    # defect. Keep the relationship in the paginated register response as
+    # well as DefectOut so the UI can identify the canonical record without
+    # opening/fetching every duplicate one-by-one.
+    duplicate_of_id: Optional[int] = None
+    duplicate_of_key: Optional[str] = None
     closed_at: Optional[datetime.datetime] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime

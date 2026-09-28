@@ -37,6 +37,15 @@
 .defect-review .defect-detail-kicker { font-size:10px; letter-spacing:.03em; color:#536f7c; line-height:1.5; }
 .defect-review .defect-review-tools { display:flex; flex-wrap:wrap; align-items:center; gap:7px; flex-shrink:0; }
 .defect-review .defect-review-tools .btn { min-height:32px; font-size:11px; }
+.defect-review .defect-duplicate-reference { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:13px 15px; border:1px solid #d8c7ee; border-left:4px solid #7254a8; border-radius:9px; background:#faf7ff; }
+.defect-review .defect-duplicate-reference > div { display:grid; gap:3px; min-width:0; }
+.defect-review .defect-duplicate-reference span { color:#7254a8; font-size:9px; font-weight:850; letter-spacing:.08em; }
+.defect-review .defect-duplicate-reference strong { color:#3d2d61; font-size:13px; overflow-wrap:anywhere; }
+.defect-review .defect-duplicate-reference small { color:#6f6380; font-size:10px; line-height:1.45; }
+.defect-review .defect-duplicate-reference .btn { flex:none; }
+.defect-review .defect-duplicate-reference.missing { border-color:#ecd5aa; border-left-color:#b87919; background:#fffaf0; }
+.defect-review .defect-duplicate-reference.missing span,.defect-review .defect-duplicate-reference.missing strong { color:#855c19; }
+.defect-module .defect-canonical-reference { padding:4px 7px; border:1px solid #ddd1ef; border-radius:6px; color:#60458f; background:#faf7ff; font-weight:750; overflow-wrap:anywhere; }
 .defect-review .defect-overview-grid { margin:0; gap:0; border:1px solid #dce6e9; border-radius:9px; overflow:hidden; }
 .defect-review .defect-overview-fact { padding:11px 13px; border:0; border-right:1px solid #dce6e9; border-radius:0; min-height:0; background:#fafcfd; gap:4px; }
 .defect-review .defect-overview-fact:last-child { border-right:0; }
@@ -89,6 +98,7 @@
   .defect-module .defect-toolbar select { flex:1 1 125px; }
   .defect-review .defect-detail-grid { grid-template-columns:1fr; }
   .defect-review .defect-detail-hero { flex-direction:column; align-items:flex-start; }
+  .defect-review .defect-duplicate-reference { align-items:flex-start; flex-direction:column; }
   .defect-review .defect-linked-work-head { align-items:flex-start; flex-direction:column; }
 }
 @media(max-width:480px) {

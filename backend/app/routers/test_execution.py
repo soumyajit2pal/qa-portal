@@ -52,7 +52,7 @@ _LIST_EXECUTION_EAGER_LOADS = [
     # extra SELECT for this one relationship. Found while chasing the
     # "3500 testcases, add to cycle, timeout" report below.
     joinedload(models.TestExecution.added_by),
-    selectinload(models.TestExecution.runs),
+    selectinload(models.TestExecution.runs).selectinload(models.TestExecutionRun.defects),
     selectinload(models.TestExecution.primary_linked_defects),
     selectinload(models.TestExecution.additional_linked_defects),
 ]
@@ -535,8 +535,22 @@ def _require_assigned_runner(obj: models.TestExecution, current_user: models.Use
 # Governed statuses (defects.py) that no longer represent unresolved
 # development work. "Not a Defect Review" remains active and blocks further
 # execution; final "Not a Defect" is included only because the revised flow
-# requires an independent QA reviewer to confirm that outcome first.
-_DEFECT_RETEST_CLEAR_STATUSES = ("Deferred", "Closed", "Not a Defect", "Change Request Raised")
+# requires an independent QA reviewer to confirm that outcome first. A
+# Duplicate delegates remediation to its canonical defect, so the duplicate
+# record itself must not keep every execution/testcase linked to it locked.
+# The canonical defect still blocks any execution to which it is itself
+# linked while that canonical record remains active.
+_DEFECT_RETEST_CLEAR_STATUSES = (
+    "Deferred", "Closed", "Duplicate", "Not a Defect", "Change Request Raised",
+)
+# These dispositions do not represent a delivered fix and therefore do not
+# need environment verification, including for modern workflows.
+# ``Closed`` is deliberately absent: a modern Closed defect clears only when
+# its verification covers this execution's environment. The recorded build is
+# retained for traceability but does not have to match the cycle build.
+_DEFECT_UNCONDITIONAL_CLEAR_STATUSES = (
+    "Deferred", "Duplicate", "Not a Defect", "Change Request Raised",
+)
 _DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES = (
     "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened",
     "Not a Defect Review",
@@ -548,8 +562,8 @@ def _execution_lock_state(db: Session, execution_id: int):
     """Returns (active_defects, has_prior_failed_or_blocked, defects) for the status gate.
     active_defects -- every governed Defect (defects.py) linked to this slot
     through its primary execution or an additional execution trace, whose
-    own status is not yet Deferred/QA-confirmed Not a Defect, or a properly
-    verified Closed status; a
+    own status is not yet Deferred/Duplicate/QA-confirmed Not a Defect/
+    Change Request Raised, or a properly verified Closed status; a
     non-empty list here is what drives the full lock. The second value is True
     if any attempt ever recorded on this slot (TestExecutionRun.status) was
     'Fail' or 'Blocked'. It enables Retest Passed and drives the permanent
@@ -563,16 +577,7 @@ def _execution_lock_state(db: Session, execution_id: int):
     from ..defect_workflow import verified_for
     execution = db.get(models.TestExecution, execution_id) if any(getattr(d, 'workflow_json', None) for d in defects) else None
     cycle = execution.cycle if execution else None
-    active_defects = [
-        d for d in defects
-        if d.status not in {"Deferred", "Not a Defect", "Change Request Raised"}
-        and (
-            not getattr(d, "workflow_json", None)
-            and d.status not in _DEFECT_RETEST_CLEAR_STATUSES
-            or getattr(d, "workflow_json", None)
-            and not (cycle and verified_for(d, cycle.environment, cycle.build))
-        )
-    ]
+    active_defects = [d for d in defects if _defect_blocks_execution(d, cycle, verified_for)]
     has_prior_failed_or_blocked = db.query(models.TestExecutionRun.id).filter(
         models.TestExecutionRun.execution_id == execution_id,
         models.TestExecutionRun.status.in_(("Fail", "Blocked")),
@@ -585,14 +590,38 @@ def _execution_lock_state(db: Session, execution_id: int):
     return active_defects, has_prior_failed_or_blocked, defects
 
 
+def _defect_blocks_execution(defect, cycle, verification_check=None) -> bool:
+    """Return whether one governed defect still locks a linked execution.
+
+    Non-remediation outcomes short-circuit before build verification. This is
+    particularly important for Duplicate: a duplicate has no fix or
+    verification of its own, so ``verified_for`` can never clear it. Legacy
+    Closed defects retain their historic clear behavior, while modern Closed
+    defects still need verification for the execution's environment.
+    Any active canonical defect remains independently authoritative when
+    linked.
+    """
+    if defect.status in _DEFECT_UNCONDITIONAL_CLEAR_STATUSES:
+        return False
+    if not getattr(defect, "workflow_json", None):
+        return defect.status not in _DEFECT_RETEST_CLEAR_STATUSES
+    if verification_check is None:
+        from ..defect_workflow import verified_for as verification_check
+    return not (
+        cycle
+        and verification_check(defect, cycle.environment, cycle.build)
+    )
+
+
 def _execution_status_gate(db: Session, execution_id: int, status_value: str,
                            defect_key: str = "") -> "str | None":
     """Reported directly, in two parts, in this order:
 
     1. "testcase already failed, and defect also linked, then why again
        allowing to marked failed" -- clarified into a full spec: while ANY
-       governed Defect linked to this slot is still active (not Deferred/
-       Closed), the execution is completely locked -- no new attempt of any
+       governed Defect linked to this slot is still active (not Deferred,
+       Duplicate, another terminal disposition, or verified Closed), the
+       execution is completely locked -- no new attempt of any
        status (Pass/Fail/Blocked/NA/Retest Passed) may be recorded through
        any endpoint, matching the earlier-reported "keep the execution
        status as Fail... prevent status modification through the UI/APIs/
@@ -628,8 +657,9 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
         names = ", ".join(f"{d.defect_key} ({d.status})" for d in active_defects)
         return (
             f"Linked defect verification does not cover this execution ({names}). "
-            "Check the environment and build in Edit Cycle and verify the fix against that same environment/build. "
-            "Closed status alone does not establish matching verification for a workflow defect."
+            "Check the environment in Edit Cycle. A Closed workflow defect needs verification in that same "
+            "environment, regardless of build number; defects still moving through verification retain their "
+            "stage build checks."
         )
     if status_value == "Retest Passed" and not has_prior_failed_or_blocked:
         return (
@@ -666,6 +696,17 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
             return (
                 f"'{defect_key}' is not a known governed defect -- create it in Defect Management first, "
                 "then reference its Defect Key here."
+            )
+        if governed.status == "Duplicate":
+            canonical = getattr(governed, "duplicate_of", None)
+            canonical_hint = (
+                f"its canonical defect '{canonical.defect_key}'"
+                if canonical else "its canonical defect"
+            )
+            return (
+                f"defect '{defect_key}' is marked Duplicate and cannot own a repeat failure -- "
+                f"reference/link {canonical_hint} if it is active (reopen the canonical defect first if needed), "
+                "or link/create another active defect."
             )
         if governed.status in _DEFECT_RETEST_CLEAR_STATUSES:
             return (
@@ -2790,7 +2831,182 @@ def add_run_defect(execution_id: int, run_id: int, payload: schemas.TestRunDefec
     return defect
 
 
-@router.delete("/executions/{execution_id}/runs/{run_id}/defects/{defect_id}")
+def _governed_defect_linked_to_execution(
+    db: Session,
+    execution_id: int,
+    defect_key: str,
+) -> "models.Defect | None":
+    """Return the governed defect behind one internal attempt link.
+
+    ``TestRunDefect`` also stores genuinely external references, so matching
+    by key alone is not enough.  An attempt link is internal only when the
+    governed defect is still linked to this exact execution through either
+    its primary FK or the additional-execution trace table.
+    """
+    return (
+        db.query(models.Defect)
+        .filter(models.Defect.defect_key == defect_key)
+        .filter(or_(
+            models.Defect.execution_id == execution_id,
+            models.Defect.execution_links.any(
+                models.DefectExecutionLink.execution_id == execution_id,
+            ),
+        ))
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+
+
+def _detach_governed_defect_execution(
+    db: Session,
+    defect: models.Defect,
+    execution: models.TestExecution,
+    current_user: models.User,
+) -> None:
+    """Detach one execution while preserving the governed defect itself.
+
+    Additional traces are independent rows and can simply be removed.  If
+    the execution is the primary trace, the oldest additional trace (lowest
+    link id) is promoted so a still-linked defect never loses the primary
+    cycle/project context used by visibility, ownership, and workflow.
+    ``DefectTestCaseLink`` is deliberately retained: it can be an explicit
+    testcase-level trace rather than one derived solely from this execution.
+    """
+    old_cycle_id = defect.cycle_id
+    old_test_case_id = defect.primary_test_case_id
+    promoted_execution_id = None
+
+    if defect.execution_id == execution.id:
+        promoted_link = (
+            db.query(models.DefectExecutionLink)
+            .filter(
+                models.DefectExecutionLink.defect_id == defect.id,
+                models.DefectExecutionLink.execution_id != execution.id,
+            )
+            .order_by(models.DefectExecutionLink.id.asc())
+            .with_for_update()
+            .first()
+        )
+        if promoted_link:
+            promoted = (
+                db.query(models.TestExecution)
+                .filter_by(id=promoted_link.execution_id)
+                .populate_existing()
+                .with_for_update()
+                .one_or_none()
+            )
+            if not promoted:
+                raise HTTPException(
+                    409,
+                    "The defect's remaining execution link is no longer valid. Refresh and try again.",
+                )
+            defect.execution_id = promoted.id
+            defect.cycle_id = promoted.cycle_id
+            defect.primary_test_case_id = promoted.test_case_id
+            promoted_execution_id = promoted.id
+            db.delete(promoted_link)
+        else:
+            defect.execution_id = None
+            defect.cycle_id = None
+            defect.primary_test_case_id = None
+    else:
+        additional_link = (
+            db.query(models.DefectExecutionLink)
+            .filter_by(defect_id=defect.id, execution_id=execution.id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if not additional_link:
+            raise HTTPException(409, "The governed defect link changed. Refresh and try again.")
+        db.delete(additional_link)
+
+    promotion_note = (
+        f" Promoted execution #{promoted_execution_id} as the primary trace."
+        if promoted_execution_id else ""
+    )
+    db.add(models.ApprovalAction(
+        entity_type="DEFECT", entity_id=defect.id,
+        step_name="Traceability",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision="Execution Unlinked",
+        comments=(
+            f"Unlinked {defect.defect_key} from execution #{execution.id} "
+            f"(cycle #{execution.cycle_id}, testcase #{execution.test_case_id}; "
+            f"previous primary cycle/testcase #{old_cycle_id or '—'}/#{old_test_case_id or '—'})."
+            f"{promotion_note}"
+        ),
+    ))
+
+
+def _unlink_attempt_defect(
+    db: Session,
+    execution: models.TestExecution,
+    run: models.TestExecutionRun,
+    attempt_defect: models.TestRunDefect,
+    current_user: models.User,
+) -> "models.Defect | None":
+    """Remove one attempt link and, when internal, its governed trace."""
+    # Internal links are written by defects.py with a portal-relative URL.
+    # External-link validation accepts only absolute http(s) URLs, so this
+    # marker prevents a coincidentally identical external key from detaching
+    # a governed defect that is also linked to this execution.
+    internal_reference = (attempt_defect.defect_url or "").startswith("/defects")
+    governed = (
+        _governed_defect_linked_to_execution(
+            db, execution.id, attempt_defect.defect_key,
+        )
+        if internal_reference else None
+    )
+    if governed:
+        _detach_governed_defect_execution(db, governed, execution, current_user)
+
+    # ``defect_id`` predates structured TestRunDefect rows and mirrors only
+    # a free-text key.  Keep it in sync when it represents the selected link.
+    if run.defect_id == attempt_defect.defect_key:
+        run.defect_id = None
+    latest_run_id = (
+        db.query(models.TestExecutionRun.id)
+        .filter(models.TestExecutionRun.execution_id == execution.id)
+        .order_by(
+            models.TestExecutionRun.attempt_no.desc(),
+            models.TestExecutionRun.id.desc(),
+        )
+        .limit(1)
+        .scalar()
+    )
+    if latest_run_id == run.id and execution.defect_id == attempt_defect.defect_key:
+        execution.defect_id = None
+
+    db.add(models.ApprovalAction(
+        entity_type="TEST_CASE", entity_id=execution.test_case_id,
+        step_name=f"Attempt #{run.attempt_no} Defect",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision="Defect Unlinked",
+        comments=(
+            f"Unlinked defect {attempt_defect.defect_key} from execution "
+            f"attempt #{run.attempt_no}."
+        ),
+    ))
+    db.delete(attempt_defect)
+    return governed
+
+
+def _reload_execution_for_response(db: Session, execution_id: int) -> models.TestExecution:
+    """Reload every TestExecutionOut relationship after a link mutation."""
+    return (
+        db.query(models.TestExecution)
+        .options(*_LIST_EXECUTION_EAGER_LOADS)
+        .filter(models.TestExecution.id == execution_id)
+        .populate_existing()
+        .one()
+    )
+
+
+@router.delete(
+    "/executions/{execution_id}/runs/{run_id}/defects/{defect_id}",
+    response_model=schemas.TestExecutionOut,
+)
 def remove_run_defect(execution_id: int, run_id: int, defect_id: int,
                       db: Session = Depends(get_db),
     current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
@@ -2801,21 +3017,25 @@ def remove_run_defect(execution_id: int, run_id: int, defect_id: int,
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
     run = _run_or_404(db, obj, run_id)
-    defect = db.query(models.TestRunDefect).filter_by(id=defect_id, run_id=run.id).first()
-    if not defect:
+    attempt_defect = (
+        db.query(models.TestRunDefect)
+        .filter_by(id=defect_id, run_id=run.id)
+        .with_for_update()
+        .one_or_none()
+    )
+    if not attempt_defect:
         raise HTTPException(404, "Defect link not found")
-    if not (current_user.has_role(Role.QA_LEAD) or defect.linked_by_id == current_user.id):
-        raise HTTPException(403, "Only the person who linked this defect, a QA Lead, or an Administrator can remove it")
-    db.add(models.ApprovalAction(
-        entity_type="TEST_CASE", entity_id=obj.test_case_id,
-        step_name=f"Attempt #{run.attempt_no} Defect",
-        actor_id=current_user.id, actor_role=current_user.roles_csv,
-        decision="Defect Unlinked",
-        comments=f"Unlinked defect {defect.defect_key} from execution attempt #{run.attempt_no}.",
-    ))
-    db.delete(defect)
+    if not (
+        current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
+        or attempt_defect.linked_by_id == current_user.id
+    ):
+        raise HTTPException(
+            403,
+            "Only the person who linked this defect, a QA Lead Group member, or an Administrator can remove it",
+        )
+    _unlink_attempt_defect(db, obj, run, attempt_defect, current_user)
     db.commit()
-    return {"ok": True}
+    return _reload_execution_for_response(db, obj.id)
 
 
 @router.get("/executions/{execution_id}/runs/{run_id}/images", response_model=List[schemas.RequestDocumentOut])

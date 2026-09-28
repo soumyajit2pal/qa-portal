@@ -1031,9 +1031,27 @@ export const TEST_EXECUTION_TERMINAL_STATUSES: string[] = ['Pass', 'Fail', 'NA',
 export const TEST_EXECUTION_DEFECT_ELIGIBLE_STATUSES: string[] = ['Fail', 'Blocked']
 // Governed statuses (defects.py) that count as "resolved enough to retest
 // against" -- mirrors the backend's own _DEFECT_RETEST_CLEAR_STATUSES
-// (test_execution.py) exactly. Rejected/Duplicate deliberately excluded --
-// reported directly as "Deferred or Closed" only.
-const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed', 'Not a Defect', 'Change Request Raised']
+// (test_execution.py) exactly. A Duplicate is a terminal pointer to the
+// canonical defect and must never keep every execution linked to the retired
+// report locked.
+const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed', 'Duplicate', 'Not a Defect', 'Change Request Raised']
+
+type ExecutionLinkedDefect = {
+  defect_key: string
+  status: string
+  related_cr_number?: string | null
+  modern_workflow?: boolean
+  verified_execution_ids?: number[]
+}
+
+// Shared by every execution surface. Keeping the banner and option-level
+// gate on one predicate prevents one UI from continuing to treat a Duplicate
+// as active after the other has been corrected.
+export function defectBlocksExecution(defect: ExecutionLinkedDefect, executionId?: number): boolean {
+  if (['Deferred', 'Duplicate', 'Not a Defect', 'Change Request Raised'].includes(defect.status)) return false
+  if (executionId && defect.verified_execution_ids?.includes(executionId)) return false
+  return !!defect.modern_workflow || !DEFECT_RETEST_CLEAR_STATUSES.includes(defect.status)
+}
 
 // Mirrors the backend's own _execution_status_gate (test_execution.py)
 // exactly -- see that function's docstring for the full reasoning. Purely
@@ -1054,7 +1072,7 @@ const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed', 'Not a Defect', 'Cha
 //    resolves to an existing, currently-active governed Defect, which this
 //    client-side check can't do without a round trip.
 export function executionStatusGate(
-  linkedDefects: { defect_key: string; status: string; related_cr_number?: string | null; modern_workflow?: boolean; verified_execution_ids?: number[] }[] | undefined,
+  linkedDefects: ExecutionLinkedDefect[] | undefined,
   runs: { status: string }[] | undefined,
   status: string,
   defectKeyInput?: string,
@@ -1062,10 +1080,10 @@ export function executionStatusGate(
   executionId?: number,
 ): string | null {
   if (!['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed'].includes(status)) return null
-  const activeDefects = (linkedDefects || []).filter((d) => !['Deferred', 'Not a Defect', 'Change Request Raised'].includes(d.status) && (d.modern_workflow || !DEFECT_RETEST_CLEAR_STATUSES.includes(d.status)) && !(executionId && d.verified_execution_ids?.includes(executionId)))
+  const activeDefects = (linkedDefects || []).filter((defect) => defectBlocksExecution(defect, executionId))
   if (activeDefects.length) {
     const names = activeDefects.map((d) => `${d.defect_key} (${d.status})`).join(', ')
-    return `Linked defect verification does not cover this execution (${names}). Check the environment and build in Edit Cycle and verify the fix against that same environment/build. Closed status alone does not establish matching verification for a workflow defect.`
+    return `Linked defect verification does not cover this execution (${names}). Check the environment in Edit Cycle. A Closed workflow defect needs verification in that same environment, regardless of build number; defects still moving through verification retain their stage build checks.`
   }
   // currentStatus is a compatibility fallback for executions recorded
   // before immutable attempt history existed. A genuinely new slot is

@@ -409,6 +409,17 @@ def _link_run_defect(db: Session, obj: models.Defect, execution: models.TestExec
             defect_url=f"/defects?open={obj.defect_key}", title=obj.title,
             defect_status=obj.status, linked_by_id=user.id, notes="Governed portal defect",
         ))
+    else:
+        # The same key may already be present as a free-text/external
+        # reference. Selecting the governed portal defect is an explicit
+        # conversion of that row into an internal link; normalize every
+        # source marker so the execution unlink endpoint can later detach
+        # the governed relationship instead of mistaking it for external.
+        existing_run_link.defect_url = f"/defects?open={obj.defect_key}"
+        existing_run_link.title = obj.title
+        existing_run_link.defect_status = obj.status
+        existing_run_link.notes = "Governed portal defect"
+        existing_run_link.linked_by_id = user.id
 
 
 def _link_to_execution(db: Session, obj: models.Defect, execution: models.TestExecution,
@@ -458,6 +469,9 @@ _LIST_DEFECT_EAGER_LOADS = [
     joinedload(models.Defect.qa_request), joinedload(models.Defect.cycle),
     joinedload(models.Defect.primary_test_case), joinedload(models.Defect.reporter),
     joinedload(models.Defect.assignee), joinedload(models.Defect.execution),
+    # DefectListOut exposes duplicate_of_key. Eager-load the canonical row so
+    # a page of Duplicate defects does not add one lazy SELECT per result.
+    joinedload(models.Defect.duplicate_of),
     selectinload(models.Defect.execution_links)
         .joinedload(models.DefectExecutionLink.execution)
         .joinedload(models.TestExecution.test_case),
@@ -640,7 +654,7 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
         "Project", "Module", "Status", "Severity", "Priority", "Environment", "Assignee",
         "Reporter", "Created", "Target Release", "Expected Resolution", "Ageing (Days)",
         "Reopen Count", "External Defect ID", "Resolution Type", "Resolution Summary",
-        "Workflow Version", "Production Impact", "Affected Environments", "Verified Builds",
+        "Workflow Version", "Production Impact", "Affected Environments", "Verified Environments / Evidence Builds",
     ]
     today = models.now().date()
     rows = []
