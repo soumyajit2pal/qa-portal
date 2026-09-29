@@ -36,9 +36,31 @@ def _require_project_owned_by_active_workspace(
     project: models.TestProject, current_user: models.User,
 ) -> None:
     """Keep project-record mutations out of read-only shared workspaces."""
+    if current_user.has_role(Role.ADMIN):
+        return
     workspace_ids = active_qa_workspace_scope_ids(current_user)
     if workspace_ids and project.qa_workspace_id not in workspace_ids:
         raise HTTPException(403, "This Test Project belongs to another workspace and is read-only.")
+
+
+_PROJECT_OWNER_ROLES = {
+    Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.ADMIN,
+}
+
+
+def _validated_project_owner(db: Session, user_id: int, workspace_id: int) -> models.User:
+    """Return an active QA owner who can work in the owning workspace."""
+    owner = get_or_404(db, models.User, user_id, "Selected owner")
+    if not owner.is_active or not owner.show_in_user_dropdowns:
+        raise HTTPException(400, "Select an active owner who is available for assignment")
+    if not set(owner.roles).intersection(_PROJECT_OWNER_ROLES):
+        raise HTTPException(400, "Project owner must belong to the QA Group, QA Lead Group, or System Administration")
+    if (
+        workspace_id not in selectable_workspace_ids(db, owner)
+        or inherited_workspace_access_mode(db, owner, workspace_id) == "PARENT_VIEWER"
+    ):
+        raise HTTPException(400, "Selected owner does not have working access to the project's owning workspace")
+    return owner
 
 
 # Reported directly: "while creating project with same project name you can
@@ -347,6 +369,8 @@ def list_test_projects(include_inactive: bool = Query(False), params: pagination
         shared_project_ids = {project_id for (project_id,) in grant_query.all()}
     for row in result.items:
         cross_workspace = bool(
+            not current_user.has_role(Role.ADMIN)
+            and
             getattr(current_user, "active_qa_workspace_id", None) is not None
             and row.qa_workspace_id != getattr(current_user, "active_qa_workspace_id", None)
         )
@@ -473,12 +497,15 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
         raise HTTPException(400, "The selected department is not active in the system department list")
     department_unit_id = _validated_department_unit_id(db, payload.department_unit_id, department)
 
-    owner_id = payload.owner_id or current_user.id
-    if payload.owner_id:
-        owner = get_or_404(db, models.User, payload.owner_id, "Selected owner")
-        if not owner.show_in_user_dropdowns:
-            raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
     workspace_id = require_active_workspace(current_user)
+    owner_id = payload.owner_id or current_user.id
+    # The authenticated creator has already passed the project-management
+    # role and active-workspace guards. Apply the stricter directory/member
+    # validation only when somebody explicitly selects another owner; this
+    # preserves creation for legacy QA accounts whose membership is repaired
+    # during authentication, while preventing invalid delegated ownership.
+    if payload.owner_id is not None:
+        _validated_project_owner(db, owner_id, workspace_id)
 
     obj = models.TestProject(
         name=name, application_master_id=application_master_id, department=department,
@@ -577,9 +604,9 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
     if "owner_id" in data:
         new_owner_id = data.pop("owner_id")
         if new_owner_id is not None:
-            new_owner = get_or_404(db, models.User, new_owner_id, "Selected owner")
-            if not new_owner.show_in_user_dropdowns:
-                raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
+            old_owner_id = obj.owner_id
+            old_owner_name = obj.owner_name or "Unassigned"
+            new_owner = _validated_project_owner(db, new_owner_id, obj.qa_workspace_id)
             obj.owner_id = new_owner_id
             # Reassigning ownership always ensures the new owner is at least
             # a member with the Owner project role, mirroring create's own
@@ -593,6 +620,13 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
                 db.add(models.TestProjectMember(
                     project_id=obj.id, user_id=new_owner_id, project_role="Owner",
                     added_by_id=current_user.id,
+                ))
+            if old_owner_id != new_owner_id:
+                db.add(models.ApprovalAction(
+                    entity_type="TEST_PROJECT", entity_id=obj.id,
+                    step_name="Project governance", actor_id=current_user.id,
+                    actor_role=current_user.roles_csv, decision="Owner changed",
+                    comments=f"Owner changed from {old_owner_name} to {new_owner.full_name}",
                 ))
     if "application_master_id" in data:
         new_app_id = data.pop("application_master_id")
@@ -778,6 +812,12 @@ def create_project_view_grant(project_id: int, payload: schemas.TestProjectViewG
         workspace_id=workspace_id, granted_by_id=current_user.id,
     )
     db.add(grant)
+    db.add(models.ApprovalAction(
+        entity_type="TEST_PROJECT", entity_id=obj.id,
+        step_name="Project governance", actor_id=current_user.id,
+        actor_role=current_user.roles_csv, decision="Access granted",
+        comments=f"Project access granted to {who} ({'department' if department else 'user' if user_id is not None else 'workspace'})",
+    ))
     try:
         db.commit()
     except IntegrityError:
@@ -800,7 +840,18 @@ def delete_project_view_grant(project_id: int, grant_id: int, db: Session = Depe
     grant = db.query(models.TestProjectViewGrant).filter_by(id=grant_id, project_id=obj.id).first()
     if not grant:
         raise HTTPException(404, "View-access grant not found")
+    recipient = (
+        f"{grant.department} (department)" if grant.department
+        else f"{grant.user_name or 'User #' + str(grant.user_id)} (user)" if grant.user_id is not None
+        else f"{grant.workspace_name or 'Workspace #' + str(grant.workspace_id)} (workspace)"
+    )
     db.delete(grant)
+    db.add(models.ApprovalAction(
+        entity_type="TEST_PROJECT", entity_id=obj.id,
+        step_name="Project governance", actor_id=current_user.id,
+        actor_role=current_user.roles_csv, decision="Access revoked",
+        comments=f"Project access revoked from {recipient}",
+    ))
     db.commit()
 
 

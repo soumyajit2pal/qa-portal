@@ -361,6 +361,17 @@ export default function Help() {
               <Callout tone="warning" title="Rename before renaming a department, not after">
                 Renaming an application only changes the application’s own name. If a department itself needs a new name or must be retired, use the Departments section’s own rename/active-inactive toggle instead.
               </Callout>
+              <h3 className="help-subheading">SOP: govern Test Projects</h3>
+              <p>System Administrators can use Admin → Test projects to govern projects across every workspace without changing the workspace selected in the page header.</p>
+              <SopSteps items={[
+                { title: 'Find the project', text: 'Search by project, application, owner, team/department, or workspace. Status and owning-workspace filters narrow large project directories.' },
+                { title: 'Change the accountable owner', text: 'Choose Change owner and select an active QA or Administrator account with working access to the project’s owning workspace. The project and its existing test assets stay in that workspace.' },
+                { title: 'Share at the correct scope', text: 'Use Manage sharing to grant an individual or team/department view-only access. A workspace share also lets eligible QA users create workspace-owned test cases and cycles; it does not let one workspace edit another workspace’s records.' },
+                { title: 'Verify the audit trail', text: 'Owner changes and sharing grants or revocations are recorded as Test Project governance actions.' },
+              ]} />
+              <Callout tone="warning" title="Sharing does not transfer ownership">
+                Changing the project owner changes accountability, not the owning workspace. Existing test cases, cycles, executions, and their creation-workspace protections are not moved or weakened.
+              </Callout>
               <Callout title="Email diagnostics for Administrators">
                 Admin → Email diagnostics can send a test message to a chosen mailbox to check the configured SMTP relay, sender, authentication, and TLS. Workflow emails and SLA breach alerts depend on SMTP enablement and valid recipient addresses; use the user permission profile to correct a missing notification email.
               </Callout>

@@ -625,6 +625,11 @@ def viewable_project_ids(db: Session, current_user: models.User) -> Optional[lis
     sites this widens; routers/defects.py::_scoped_defects also calls this
     directly for the "grant recipients also see the project's Defects"
     parity decision."""
+    # System Administrators govern the complete project directory from the
+    # Admin section, independent of whichever workspace happens to be active
+    # in their current portal header.
+    if current_user.has_role(Role.ADMIN):
+        return None
     workspace_scope = active_qa_workspace_scope_ids(current_user)
     if workspace_scope:
         owned_workspace_ids = [row[0] for row in db.query(models.TestProject.id).filter(
@@ -1106,6 +1111,10 @@ def can_manage_project(project: models.TestProject, current_user: models.User) -
     # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
     # gated action, same as ADMIN -- see ORACLE_MIGRATION_2026-07.md
     # section 59. has_role() already bypasses for ADMIN too.
+    # Explicit System Admin governance is global. Other project managers
+    # remain constrained to the active owning workspace.
+    if current_user.has_role(Role.ADMIN):
+        return True
     workspace_ids = active_qa_workspace_scope_ids(current_user)
     if workspace_ids and project.qa_workspace_id not in workspace_ids:
         return False

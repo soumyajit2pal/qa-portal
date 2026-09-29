@@ -88,6 +88,13 @@ def assert_owned(db, root, user):
 
 def assert_project_owned(db, project, user):
     """Protect project metadata; sharing grants content collaboration only."""
+    from . import models
+    # System Administrators may govern project metadata, owner and sharing
+    # from the Admin section across workspace boundaries. This exception is
+    # intentionally limited to the TestProject record; testcase/cycle roots
+    # still pass through assert_owned and retain permanent workspace ownership.
+    if isinstance(user, models.User) and user.has_role('ADMIN'):
+        return
     workspace_id = getattr(user, 'active_qa_workspace_id', None)
     if (
         workspace_id is None

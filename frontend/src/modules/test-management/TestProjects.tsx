@@ -231,9 +231,10 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
 // scope for it -- see backend models.TestProjectViewGrant's own docstring.
 // Gated the same as EditProjectModal (canEditProjectDetails -- Owner, QA
 // Lead Group, or Admin), not a separate permission tier.
-function ManageViewAccessModal({ project, departments, onClose }: {
+export function ManageViewAccessModal({ project, departments, directoryUsers, onClose }: {
   project: TestProjectOut
   departments: DepartmentOut[]
+  directoryUsers?: UserOption[]
   onClose: () => void
 }) {
   const [grants, setGrants] = useState<TestProjectViewGrantOut[]>([])
@@ -253,10 +254,10 @@ function ManageViewAccessModal({ project, departments, onClose }: {
       // Full active directory, deliberately NOT the QA-only eligible-users
       // list this page otherwise uses -- the whole point of a view grant is
       // reaching someone OUTSIDE the project's own department.
-      api.get<UserOption[]>('/api/auth/user-options'),
+      directoryUsers ? Promise.resolve(directoryUsers) : api.get<UserOption[]>('/api/auth/user-options'),
       api.get<TestProjectWorkspaceOptionOut[]>(`/api/test-projects/${project.id}/view-access-workspaces`),
     ]).then(([g, u, w]) => { setGrants(g); setAllUsers(u); setWorkspaces(w); setLoaded(true) }).catch((err) => { setError(err); setLoaded(true) })
-  }, [project.id])
+  }, [project.id, directoryUsers])
 
   async function addGrant(e: React.FormEvent) {
     e.preventDefault()
@@ -319,13 +320,13 @@ function ManageViewAccessModal({ project, departments, onClose }: {
       )}
       <form onSubmit={addGrant} style={{ marginTop: 14 }}>
         <div className="pill-tabs" style={{ marginBottom: 10 }}>
-          <button type="button" className={grantType === 'department' ? 'active' : ''} onClick={() => setGrantType('department')}>Department</button>
+          <button type="button" className={grantType === 'department' ? 'active' : ''} onClick={() => setGrantType('department')}>Team / department</button>
           <button type="button" className={grantType === 'user' ? 'active' : ''} onClick={() => setGrantType('user')}>Particular user</button>
           <button type="button" className={grantType === 'workspace' ? 'active' : ''} onClick={() => setGrantType('workspace')}>Workspace</button>
         </div>
         {grantType === 'department' ? (
-          <Field label="Department">
-            <SearchableSelect value={department} onChange={setDepartment} placeholder="Select department…" options={departmentOptions.map((d) => ({ value: d.name, label: d.name }))} />
+          <Field label="Team / department">
+            <SearchableSelect value={department} onChange={setDepartment} placeholder="Select team or department…" options={departmentOptions.map((d) => ({ value: d.name, label: d.name }))} />
           </Field>
         ) : grantType === 'user' ? (
           <Field label="User">

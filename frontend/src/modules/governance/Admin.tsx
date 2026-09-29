@@ -12,6 +12,7 @@ import { usePaginatedList } from '../../hooks/usePaginatedList'
 import SearchableSelect from '../../components/SearchableSelect'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
+import TestProjectAdmin from './TestProjectAdmin'
 
 function adminInitials(value: string, fallback = '?') {
   return (value.match(/[a-z0-9]+/gi) || [])
@@ -59,10 +60,10 @@ function CoordinatorRolePolicy() {
   </section>
 }
 
-type AdminSection = 'users' | 'departments' | 'workspaces' | 'applications' | 'email' | 'ldap'
+type AdminSection = 'users' | 'departments' | 'workspaces' | 'projects' | 'applications' | 'email' | 'ldap'
 type WorkspacePanel = 'members' | 'administrators' | 'settings'
 type WorkspaceMemberView = 'current' | 'add'
-const ADMIN_SECTIONS: AdminSection[] = ['users', 'departments', 'workspaces', 'applications', 'email', 'ldap']
+const ADMIN_SECTIONS: AdminSection[] = ['users', 'departments', 'workspaces', 'projects', 'applications', 'email', 'ldap']
 
 // Shared by every page that needs a department picker -- departments are
 // DB-backed now (see backend app/models.py Department / routers/departments.py)
@@ -1724,6 +1725,7 @@ export default function Admin() {
     users: { title: 'People', subtitle: 'Create accounts and update roles, department scope, login method, and account status.', count: summary?.total || 0 },
     departments: { title: 'Organization', subtitle: 'Maintain department names used for identity, ownership, and approvals.', count: departments.length },
     workspaces: { title: 'Workspaces', subtitle: 'Control membership, local administration, and where new requests are routed.' },
+    projects: { title: 'Test projects', subtitle: 'Govern project ownership and cross-team or cross-workspace sharing.' },
     applications: { title: 'Application directory', subtitle: 'Maintain approved application names and their owning departments.' },
     email: { title: 'Email diagnostics', subtitle: 'Send a test message to verify the configured email service.' },
     ldap: { title: 'LDAP configuration', subtitle: 'Manage the directory connection used for LDAP authentication.' },
@@ -1782,6 +1784,7 @@ export default function Admin() {
           <button type="button" className={section === 'users' ? 'active' : ''} aria-current={section === 'users' ? 'page' : undefined} onClick={() => setSection('users')}><IconLock /><span><strong>People</strong><small>Accounts and permissions</small></span><em>{summary?.total || 0}</em></button>
           <button type="button" className={section === 'departments' ? 'active' : ''} aria-current={section === 'departments' ? 'page' : undefined} onClick={() => setSection('departments')}><IconPlus /><span><strong>Organization</strong><small>Department directory</small></span><em>{departments.length}</em></button>
           <button type="button" className={section === 'workspaces' ? 'active' : ''} aria-current={section === 'workspaces' ? 'page' : undefined} onClick={() => setSection('workspaces')}><IconUsers /><span><strong>Workspaces</strong><small>Hierarchy and data access</small></span></button>
+          <button type="button" className={section === 'projects' ? 'active' : ''} aria-current={section === 'projects' ? 'page' : undefined} onClick={() => setSection('projects')}><IconShield /><span><strong>Test projects</strong><small>Ownership and sharing</small></span></button>
         </nav>
         <div className="admin-system-tools">
           <span><strong>System tools</strong><small>Occasional setup and checks</small></span>
@@ -1881,6 +1884,10 @@ export default function Admin() {
 
       {section === 'workspaces' && <div className="access-workspace-panel access-departments-section">
         <QAWorkspaceManager key={workspaceRevision} onManageUser={setAccessTarget} departments={departments} />
+      </div>}
+
+      {section === 'projects' && <div className="access-workspace-panel access-departments-section">
+        <TestProjectAdmin />
       </div>}
 
       {section === 'applications' && <div className="access-workspace-panel access-departments-section">
