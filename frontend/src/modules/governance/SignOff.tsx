@@ -69,7 +69,6 @@ const EMPTY = {
   known_limitations: '',
   business_acceptance_status: '',
   security_testing_status: '',
-  deployment_recommendation: '',
   conditional_observations: '',
   conditional_mitigation: '',
   conditional_owner: '',
@@ -456,7 +455,6 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
           ['known_limitations', 'Known Limitations'],
           ['business_acceptance_status', 'Business Acceptance Status'],
           ['security_testing_status', 'Security Testing Status'],
-          ['deployment_recommendation', 'Deployment Recommendation'],
         ] as const).map(([key, label]) => <Field key={key} label={label}><JiraRichTextField value={form[key]} onChange={value => set(key, value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, [key]: images }))} ariaLabel={label} placeholder={`Enter ${label.toLowerCase()}…`} /></Field>)}
         <Field label={form.certificate_type === 'Conditional Clearance' ? 'Remarks / residual risk (required before submission)' : 'Remarks *'}><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Remarks" placeholder={form.certificate_type === 'Conditional Clearance' ? 'Describe the residual risk being accepted with these conditions…' : 'Add remarks…'} /></Field>
         {form.certificate_type === 'Conditional Clearance' && <ConditionalClearanceFields form={form} onChange={set} onImagesChange={(key, images) => setAdditionalImages(current => ({ ...current, [key]: images }))} />}
@@ -499,7 +497,6 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
     known_limitations: item.known_limitations || '',
     business_acceptance_status: item.business_acceptance_status || '',
     security_testing_status: item.security_testing_status || '',
-    deployment_recommendation: item.deployment_recommendation || '',
     conditional_observations: item.conditional_observations || '',
     conditional_mitigation: item.conditional_mitigation || '',
     conditional_owner: item.conditional_owner || '',
@@ -611,7 +608,6 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
           ['known_limitations', 'Known Limitations'],
           ['business_acceptance_status', 'Business Acceptance Status'],
           ['security_testing_status', 'Security Testing Status'],
-          ['deployment_recommendation', 'Deployment Recommendation'],
         ] as const).map(([key, label]) => <Field key={key} label={label}><JiraRichTextField value={form[key]} onChange={value => set(key, value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, [key]: images }))} ariaLabel={label} placeholder={`Enter ${label.toLowerCase()}…`} /></Field>)}
         <Field label={form.certificate_type === 'Conditional Clearance' ? 'Remarks / residual risk (required before submission)' : 'Remarks *'}><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Remarks" placeholder={form.certificate_type === 'Conditional Clearance' ? 'Describe the residual risk being accepted with these conditions…' : 'Add remarks…'} /></Field>
         {form.certificate_type === 'Conditional Clearance' && <ConditionalClearanceFields form={form} onChange={set} onImagesChange={(key, images) => setAdditionalImages(current => ({ ...current, [key]: images }))} />}
@@ -870,11 +866,11 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
       </div></details>
       </div>
       <div className="clearance-tab-panel" role="tabpanel" id="clearance-panel-remarks" aria-labelledby="clearance-tab-remarks" hidden={detailTab !== 'remarks'} tabIndex={0}>
-      <section className="clearance-remarks" id="clearance-remarks"><div className="clearance-section-heading"><div><span>Clearance assessment</span><h3>Remarks & risks</h3><p>Scope, risks, acceptance, security, and deployment decision</p></div></div><div className="clearance-remark-grid">
+      <section className="clearance-remarks" id="clearance-remarks"><div className="clearance-section-heading"><div><span>Clearance assessment</span><h3>Remarks & risks</h3><p>Scope, risks, business acceptance, and security status</p></div></div><div className="clearance-remark-grid">
         {([
           ['exit_criteria_notes', 'Testing Scope Completed'], ['open_defect_summary', 'Open Risks (if any)'],
           ['known_limitations', 'Known Limitations'], ['business_acceptance_status', 'Business Acceptance Status'],
-          ['security_testing_status', 'Security Testing Status'], ['deployment_recommendation', 'Deployment Recommendation'],
+          ['security_testing_status', 'Security Testing Status'],
           ['residual_risk_notes', 'Remarks'],
         ] as const).map(([key, label]) => <article key={key}><h4>{label}</h4>{item[key] ? <AuthenticatedMarkdown value={item[key]!} basePath={`/api/signoffs/${item.id}/documents`} /> : <span className="muted">Not recorded</span>}</article>)}
       </div></section>

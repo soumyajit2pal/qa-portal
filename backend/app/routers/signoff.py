@@ -144,7 +144,6 @@ def _validate_rich_text_before_progress(obj: models.QASignOff) -> None:
         ("Known Limitations", obj.known_limitations),
         ("Business Acceptance Status", obj.business_acceptance_status),
         ("Security Testing Status", obj.security_testing_status),
-        ("Deployment Recommendation", obj.deployment_recommendation),
         ("Conditional Clearance Observations", obj.conditional_observations),
         ("Conditional Clearance Mitigation", obj.conditional_mitigation),
     )
@@ -564,6 +563,32 @@ def signoff_history(signoff_id: int, db: Session = Depends(get_db), current_user
             .order_by(models.ApprovalAction.created_at).all())
 
 
+def _certificate_lineage_export_fields(db: Session, obj: models.QASignOff) -> list[tuple[str, object]]:
+    """Return only lineage rows that apply to this certificate.
+
+    Resolve the business certificate number directly from the persisted
+    foreign key rather than relying on relationship-loading state. A current
+    lineage head has no successor, so it must not render a misleading blank
+    "Superseded By" row. Conversely, a row already marked SUPERSEDED should
+    never hide a corrupt/missing successor link behind an em dash.
+    """
+    fields: list[tuple[str, object]] = []
+
+    def certificate_number(linked_id: int) -> str:
+        linked = db.get(models.QASignOff, linked_id)
+        return linked.certificate_id if linked else f"Lineage record unavailable (#{linked_id})"
+
+    if obj.supersedes_id is not None:
+        fields.append(("Supersedes", certificate_number(obj.supersedes_id)))
+    if obj.superseded_by_id is not None:
+        fields.append(("Superseded By", certificate_number(obj.superseded_by_id)))
+    elif obj.status == "SUPERSEDED":
+        fields.append(("Superseded By", "Lineage link unavailable — contact System Administrator"))
+    if obj.revision_reason:
+        fields.append(("Revision Reason", obj.revision_reason))
+    return fields
+
+
 @router.get("/{signoff_id}/export")
 def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Every field on this QA Clearance Certificate, plus who requested,
@@ -597,20 +622,20 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     signatures = list(signatures_by_stage.values())
     digitally_signed = bool(signatures) and obj.status in {"ISSUED", "SUPERSEDED"}
 
-    sections = [
-        ("Status", [
+    status_fields = [
             ("Status", qa_clearance_export_status(obj.status)),
             ("Workflow Status", obj.status),
             ("Certificate Type", obj.certificate_type),
             ("Revision", obj.revision_number or 1),
-            ("Supersedes", obj.supersedes_certificate_id or "—"),
-            ("Superseded By", obj.superseded_by_certificate_id or "—"),
-            ("Revision Reason", obj.revision_reason or "—"),
+            *_certificate_lineage_export_fields(db, obj),
             ("Testing Type", obj.certificate_testing_type),
             ("Certificate Date", obj.certificate_date),
             ("Clearance Signature Type", QA_CLEARANCE_SIGNED_TYPE if digitally_signed else "Not digitally signed"),
             ("Signature Method", DIGITAL_SIGNATURE_METHOD if digitally_signed else "—"),
-        ]),
+    ]
+
+    sections = [
+        ("Status", status_fields),
         ("Application & Change", [
             ("Application Name", obj.application_name),
             ("Application Owner", obj.application_owner),
@@ -636,7 +661,6 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
             ("Known Limitations", RichTextValue(obj.known_limitations or "")),
             ("Business Acceptance Status", RichTextValue(obj.business_acceptance_status or "")),
             ("Security Testing Status", RichTextValue(obj.security_testing_status or "")),
-            ("Deployment Recommendation", RichTextValue(obj.deployment_recommendation or "")),
             ("Remarks", RichTextValue(obj.residual_risk_notes or "")),
         ]),
         # Mandatory on a fully-Issued certificate -- one name per approval

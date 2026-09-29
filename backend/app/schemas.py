@@ -2125,7 +2125,6 @@ class SignOffCreate(BaseModel):
     known_limitations: Optional[str] = None
     business_acceptance_status: Optional[str] = None
     security_testing_status: Optional[str] = None
-    deployment_recommendation: Optional[str] = None
     conditional_observations: Optional[str] = None
     conditional_mitigation: Optional[str] = None
     conditional_owner: Optional[str] = Field(default=None, max_length=150)
@@ -2152,7 +2151,7 @@ class SignOffCreate(BaseModel):
     residual_risk_notes: Optional[str] = None
 
     _limit_rich_text = field_validator(
-        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "deployment_recommendation", "conditional_observations", "conditional_mitigation"
+        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "conditional_observations", "conditional_mitigation"
     )(_limited_rich_text)
 
 
@@ -2160,7 +2159,6 @@ class SignOffUpdate(BaseModel):
     known_limitations: Optional[str] = None
     business_acceptance_status: Optional[str] = None
     security_testing_status: Optional[str] = None
-    deployment_recommendation: Optional[str] = None
     conditional_observations: Optional[str] = None
     conditional_mitigation: Optional[str] = None
     conditional_owner: Optional[str] = Field(default=None, max_length=150)
@@ -2189,7 +2187,7 @@ class SignOffUpdate(BaseModel):
     residual_risk_notes: Optional[str] = None
 
     _limit_rich_text = field_validator(
-        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "deployment_recommendation", "conditional_observations", "conditional_mitigation"
+        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "conditional_observations", "conditional_mitigation"
     )(_limited_rich_text)
 
 
@@ -2229,7 +2227,6 @@ class SignOffOut(ORMModel):
     known_limitations: Optional[str] = None
     business_acceptance_status: Optional[str] = None
     security_testing_status: Optional[str] = None
-    deployment_recommendation: Optional[str] = None
     conditional_observations: Optional[str] = None
     conditional_mitigation: Optional[str] = None
     conditional_owner: Optional[str] = None

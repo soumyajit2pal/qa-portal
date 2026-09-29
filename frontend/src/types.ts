@@ -998,7 +998,6 @@ export interface SignOffOut {
   known_limitations?: string | null
   business_acceptance_status?: string | null
   security_testing_status?: string | null
-  deployment_recommendation?: string | null
   conditional_observations?: string | null
   conditional_mitigation?: string | null
   conditional_owner?: string | null

@@ -2410,6 +2410,10 @@ class QASignOff(Base):
     known_limitations = Column(Text)
     business_acceptance_status = Column(Text)
     security_testing_status = Column(Text)
+    # Legacy retention only. Deployment Recommendation was removed from the
+    # active QA Clearance form/API/export because it did not drive any gate
+    # or workflow transition. Keep the column so historical values are not
+    # destructively erased from existing immutable certificate records.
     deployment_recommendation = Column(Text)
     conditional_observations = Column(Text)
     conditional_mitigation = Column(Text)

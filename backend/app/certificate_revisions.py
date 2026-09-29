@@ -28,7 +28,6 @@ _COPIED_FIELDS = (
     "known_limitations",
     "business_acceptance_status",
     "security_testing_status",
-    "deployment_recommendation",
     "conditional_observations",
     "conditional_mitigation",
     "conditional_owner",
