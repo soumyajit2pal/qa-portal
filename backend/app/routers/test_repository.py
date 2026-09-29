@@ -1220,26 +1220,35 @@ def update_test_case(case_id: int, payload: schemas.TestCaseUpdate, db: Session 
     return obj
 
 
+def _require_case_removal_allowed(db: Session, cases: List[models.TestCase], *, permanent: bool = False) -> None:
+    """Rejected cases may be recycled even with an approved baseline, never purged."""
+    protected_statuses = ("Approved", "Archived", "Rejected") if permanent else ("Approved", "Archived")
+    protected_ids = {
+        case_id for (case_id,) in db.query(models.TestCaseVersion.test_case_id).filter(
+            models.TestCaseVersion.test_case_id.in_([case.id for case in cases]),
+            models.TestCaseVersion.status.in_(protected_statuses),
+        ).all()
+    }
+    blocked = [case.test_case_key for case in cases
+               if (permanent or case.status != "Rejected")
+               and (case.id in protected_ids or case.current_approved_version_id or case.status in protected_statuses)]
+    if blocked:
+        labels = ", ".join(blocked[:5]) + ("…" if len(blocked) > 5 else "")
+        action = ("have approval/rejection history and cannot be permanently cleared"
+                  if permanent else "have approval history and cannot be moved to the Recycle Bin; archive them instead")
+        raise HTTPException(409, f"{len(blocked)} test case(s) {action}: {labels}")
+
+
 @router.delete("/test-cases/{case_id}", response_model=schemas.TestCaseOut)
 def delete_test_case(case_id: int, db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
-    """A testcase that has ever been approved OR rejected is governed
-    history -- Archive it instead (TC-006 preserves versions/cycle
-    membership/execution history while blocking new selection). Delete is
-    only allowed while it has never left Draft/Returned, i.e. it was never
-    actually decided on by anyone yet. Section 11 "Rejected and superseded
-    versions shall remain readable to authorized users for traceability" --
-    a Rejected version must never be able to vanish via delete, same as an
-    Approved one.
+    """Move a never-approved or currently Rejected testcase to the Recycle Bin.
 
-    2026-08 "Recycle Bin" requirement -- "any delete testcases before
-    approve will go to recycle bin. only QA lead can clear from recycle
-    bin." This no longer issues a real `db.delete()` -- it soft-deletes
-    (is_deleted=True) instead, excluding the case from every normal list/
-    summary query while keeping the row (and its full version/step history)
-    intact and recoverable via restore_test_case_from_recycle_bin. Only
-    purge_test_case/bulk_purge_test_cases (QA Lead Group only) still perform
-    a real, irreversible `db.delete()`."""
+    Preserve its status, versions, approvals and execution history for restoration.
+    Rejected cases may retain approved/archived baselines; other cases with
+    approval history must use Archive. Permanent clearing cannot remove
+    approved or rejected history.
+    """
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
     require_can_author_repository(db, obj.project_id, current_user)
@@ -1248,29 +1257,12 @@ def delete_test_case(case_id: int, db: Session = Depends(get_db),
     _require_returned_correction_owner(obj.current_draft_version, current_user, "delete it")
     if obj.is_deleted:
         raise HTTPException(400, "This test case is already in the Recycle Bin")
-    ever_decided = db.query(models.TestCaseVersion.id).filter(
-        models.TestCaseVersion.test_case_id == case_id,
-        models.TestCaseVersion.status.in_(("Approved", "Archived", "Rejected")),
-    ).first()
-    if ever_decided:
-        # 409 Conflict, not 400 -- this isn't a malformed request, it's a
-        # request that's individually well-formed but conflicts with the
-        # test case's own governed state (it's a controlled asset once
-        # decided on). `detail` stays a plain string per this app's own
-        # Section 8 API standard (main.py::http_exception_handler) --
-        # frontend error parsing depends on it -- rather than the nested
-        # {"message":..., "test_case_id":...} shape a pasted external spec
-        # asked for.
-        raise HTTPException(
-            409,
-            f"Test case {obj.test_case_key} has an approval/rejection history and cannot be permanently "
-            f"deleted -- archive it instead.",
-        )
+    _require_case_removal_allowed(db, [obj])
     obj.is_deleted = True
     obj.deleted_by_id = current_user.id
     obj.deleted_at = models.now()
     db.add(_case_workflow_action(obj.id, current_user, "Moved to Recycle Bin",
-                                 "Deleted before approval -- recoverable from the Recycle Bin until purged."))
+                                 "Moved to Recycle Bin; testcase status, versions and review history preserved."))
     db.commit()
     db.refresh(obj)
     return obj
@@ -1913,10 +1905,7 @@ def bulk_update_test_cases(project_id: int, payload: schemas.TestCaseBulkUpdate,
 def bulk_delete_test_cases(project_id: int, payload: schemas.TestCaseBulkDelete,
                            db: Session = Depends(get_db),
                            current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
-    """2026-08 "Recycle Bin" requirement -- see delete_test_case's own
-    docstring for the full background. Soft-deletes every selected row
-    (is_deleted=True) instead of a real `db.delete()`; still permanently
-    blocked (409) for any ever-Approved/Archived/Rejected row, unchanged."""
+    """Recycle atomically, allowing currently Rejected cases with approved history."""
     _require_active_project(_get_project_or_404(db, project_id))
     require_can_author_repository(db, project_id, current_user)
     rows = _selected_project_cases(db, project_id, payload.ids)
@@ -1937,34 +1926,14 @@ def bulk_delete_test_cases(project_id: int, payload: schemas.TestCaseBulkDelete,
             f"{len(wrong_correction_owner)} returned testcase(s) remain assigned to their original authors "
             f"and cannot be deleted by you: {preview}{suffix}",
         )
-    ever_decided_ids = {
-        row_id for (row_id,) in db.query(models.TestCaseVersion.test_case_id).filter(
-            models.TestCaseVersion.test_case_id.in_([r.id for r in rows]),
-            models.TestCaseVersion.status.in_(("Approved", "Archived", "Rejected")),
-        ).all()
-    }
-    blocked = [row.test_case_key for row in rows if row.id in ever_decided_ids]
-    if blocked:
-        preview = ", ".join(blocked[:5])
-        suffix = "…" if len(blocked) > 5 else ""
-        # 409, same reasoning as the single-case delete above -- the
-        # frontend's own bulk-delete selection (see returnRejectSelectedIds'
-        # sibling, deletableSelectedIds) is now built to never include an
-        # ever-decided test case in the first place, so reaching this is
-        # only ever a race (someone else approved/archived/rejected one of
-        # these between selection and submission), not an expected path.
-        raise HTTPException(
-            409,
-            f"{len(blocked)} selected test case(s) have an approval/rejection history and cannot be permanently "
-            f"deleted -- archive them instead: {preview}{suffix}",
-        )
+    _require_case_removal_allowed(db, rows)
     now = models.now()
     for row in rows:
         row.is_deleted = True
         row.deleted_by_id = current_user.id
         row.deleted_at = now
         db.add(_case_workflow_action(row.id, current_user, "Moved to Recycle Bin",
-                                     "Deleted before approval (bulk) -- recoverable from the Recycle Bin until purged."))
+                                     "Moved to Recycle Bin (bulk); testcase status, versions and review history preserved."))
     db.commit()
     for row in rows:
         db.refresh(row)
@@ -1978,9 +1947,9 @@ def list_recycle_bin(project_id: int, params: pagination.PageParams = Depends(),
     deleted for this project (delete_test_case/bulk_delete_test_cases),
     awaiting either restore_test_case_from_recycle_bin or a QA Lead Group
     purge. Deliberately a flat list, not folder/status-filtered like the
-    main list endpoint -- a case can only ever land here pre-approval, so
-    there's no meaningful "queue" to further split it by; search still
-    applies so a specific case can be found by key/scenario. Same read
+    main list endpoint. Rejected cases may have approved baselines and
+    execution history, which remain intact and cannot be purged. Search
+    still applies so a specific case can be found by key/scenario. Same read
     access as the main list (no extra role gate) -- restore/purge below are
     where the actual authorization differences live."""
     _get_project_or_404(db, project_id)
@@ -2023,7 +1992,7 @@ def restore_test_case_from_recycle_bin(case_id: int, db: Session = Depends(get_d
     obj.deleted_at = None
     obj.deleted_reason = None
     db.add(_case_workflow_action(obj.id, current_user, "Restored from Recycle Bin",
-                                 "Restored -- no re-approval required, it was never approved."))
+                                 "Restored with the original testcase status and review history unchanged."))
     db.commit()
     db.refresh(obj)
     return obj
@@ -2048,7 +2017,7 @@ def bulk_restore_test_cases_from_recycle_bin(project_id: int, payload: schemas.T
         row.deleted_at = None
         row.deleted_reason = None
         db.add(_case_workflow_action(row.id, current_user, "Restored from Recycle Bin",
-                                     "Restored (bulk) -- no re-approval required, it was never approved."))
+                                     "Restored (bulk) with the original testcase status and review history unchanged."))
     db.commit()
     for row in rows:
         db.refresh(row)
@@ -2070,6 +2039,8 @@ def purge_test_case(case_id: int, db: Session = Depends(get_db),
     require_can_manage_repository_governance(current_user, db, obj.project_id)
     if not obj.is_deleted:
         raise HTTPException(400, "This test case is not in the Recycle Bin -- delete it first")
+    _lock_case_version_state(db, obj)
+    _require_case_removal_allowed(db, [obj], permanent=True)
     # Logged before the delete -- entity_id on ApprovalAction is a plain
     # (unconstrained) integer column, deliberately so an audit row can
     # outlive the entity it refers to for exactly this kind of terminal
@@ -2096,6 +2067,8 @@ def bulk_purge_test_cases(project_id: int, payload: schemas.TestCaseBulkPurge,
         preview = ", ".join(not_deleted[:5])
         suffix = "…" if len(not_deleted) > 5 else ""
         raise HTTPException(400, f"{len(not_deleted)} selected test case(s) are not in the Recycle Bin: {preview}{suffix}")
+    _lock_case_version_states(db, rows)
+    _require_case_removal_allowed(db, rows, permanent=True)
     purged_ids = [row.id for row in rows]
     for row in rows:
         db.add(_case_workflow_action(row.id, current_user, "Purged from Recycle Bin",

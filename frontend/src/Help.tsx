@@ -417,12 +417,15 @@ export default function Help() {
                 { title: 'Confirm linked security resolution', text: 'If the parent QA Request also raised SAST or DAST, every linked security request must be Closed or finally rejected by the Department Head before Functional QA Clearance can be raised. Report Ready and reopenable rejection states do not meet this gate.' },
                 { title: 'Review the captured lifecycle evidence', text: 'The certificate freezes QA Test Case Execution Summary, QA Defect Status Summary, and Defect Severity-wise Breakdown from linked lifecycle records. The summaries identify the CR/EPIC number and Change Description; assigned tester names are also captured.' },
                 { title: 'Complete Section E remarks', text: 'Enter Testing Scope Completed and Remarks, plus Open Risks (if any), Known Limitations, Business Acceptance Status, Security Testing Status, and Deployment Recommendation as applicable.' },
-                { title: 'Use Section F only for Conditional Clearance', text: 'Conditional Clearance Observations appear only when Certificate Type is Conditional Clearance. Enter your own observations to use only that content; leave the field blank to generate observations from linked open-defect evidence.' },
+                { title: 'Check clearance prerequisites', text: 'Full and Conditional Clearance both require a Functional Request in QA Completed or QA Clearance Pending, a valid tested environment, completed matching Test Cycles, and execution evidence. Full Clearance also requires every applicable test to Pass or Retest Passed (NA is allowed), with no open Critical or High defects.' },
+                { title: 'Document Conditional Clearance', text: 'Conditional Clearance can include failed, blocked, or unexecuted tests and open defects. Before submission or approval, record conditions, residual-risk remarks, and mitigation. Responsible owner and target date are optional. Enter observations in Section F or leave them blank to use linked open defects; if there are no open defects, manual conditions are required. These details are frozen with the evidence, and edits require full reapproval.' },
+                { title: 'Complete testing for conditional review', text: 'A QA Lead Group member can use Complete for Conditional Clearance on an In Progress cycle with a required reason. This permits failed, blocked, or unexecuted tests and open Critical/High defects to reach conditional review. At least one test result must be recorded, and existing Target Release requirements for deferred and remaining Medium/Low defects still apply. The cycle becomes Completed and read-only; the certificate must then pass both approval stages.' },
                 { title: 'Submit and obtain independent approvals', text: 'Submit for QA Lead approval, then QA executive approval. The requester cannot approve their own certificate; the QA Lead approver cannot also approve the executive stage.' },
-                { title: 'Refresh only with reapproval', text: 'Refresh summaries & restart approval captures current linked evidence, returns the certificate to Draft, and invalidates prior approvals and clearance. A rejected certificate must be reopened before this control is available.' },
+                { title: 'Refresh only before a terminal decision', text: 'For a Draft, returned, or pending certificate, Refresh evidence & restart approval captures current linked evidence and resets approvals. Issued and Rejected certificates are immutable; use Create Revised Certificate instead.' },
+                { title: 'Revise terminal certificates without overwriting history', text: 'Enter a required reason to create one linked Draft successor. An issued predecessor becomes Superseded and retains its evidence and signatures. A rejected predecessor retains its exact rejection status and decision. The successor captures current evidence and must complete QA Lead and executive approval again.' },
               ]} />
               <Callout tone="warning" title="Certificate evidence is frozen for each approval revision">
-                A refresh or material certificate edit requires the full approval sequence again. Download Certificate appears when the certificate is Issued; earlier revisions offer Export PDF for review.
+                A refresh or material pre-decision edit requires the full approval sequence again. Issued, Rejected, and Superseded certificates are immutable; each terminal lineage head can have only one governed successor.
               </Callout>
             </ManualSection>
           )}
@@ -485,6 +488,9 @@ export default function Help() {
               </Callout>
               <Callout title="Terminal workflow rows do not have a pending actor">
                 Approved, Rejected, and Archived test cases show only their final workflow status. “Pending with” and pending duration appear only while an actual recommendation or approval action is waiting for a person or group.
+              </Callout>
+              <Callout title="Move rejected testcases to the Recycle Bin">
+                Repository authors can move currently rejected testcases to the Recycle Bin from More actions or the selection toolbar, even when they have an approved or archived baseline. Restore keeps the Rejected status, versions, approvals, and execution history; use Clone to create an editable Draft. Other cases with approved or archived history still require Archive. Governed history cannot be permanently cleared.
               </Callout>
               <h3 className="help-subheading">Testcase versioning and comparison</h3>
               <div className="help-rule-grid">

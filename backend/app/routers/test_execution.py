@@ -1250,8 +1250,22 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     data = payload.model_dump(exclude_unset=True)
     blocking_reason = (data.pop("blocking_reason", None) or "").strip()
     remarks = (data.pop("remarks", None) or "").strip()
+    conditional_clearance = data.pop("conditional_clearance", False)
     if len(blocking_reason) > 5000 or len(remarks) > 5000:
         raise HTTPException(400, "Blocking reason and remarks cannot exceed 5,000 characters")
+    if conditional_clearance:
+        if data != {"status": "Completed"}:
+            raise HTTPException(400, "Conditional completion requires only a transition to Completed; edit other cycle fields separately")
+        if not current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+            raise HTTPException(403, "A QA Lead Group member must complete a cycle for Conditional Clearance")
+        from ..certificate_summary import has_documented_text
+        if not has_documented_text(remarks):
+            raise HTTPException(400, "A reason is required to complete a cycle for Conditional Clearance")
+        if not db.query(models.TestExecution.id).filter(
+            models.TestExecution.cycle_id == obj.id,
+            models.TestExecution.status.in_(("Pass", "Retest Passed", "NA", "Fail", "Blocked")),
+        ).first():
+            raise HTTPException(400, "Conditional completion requires at least one recorded test result")
     previous_status = obj.status
     previous_link_type = obj.linked_request_type
     previous_link_key = obj.linked_request_key
@@ -1275,7 +1289,10 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                 or_(models.TestExecution.status.is_(None),
                     models.TestExecution.status.notin_(("Pass", "Retest Passed", "NA"))),
             ).all()
-            if incomplete_executions:
+            if conditional_clearance and any(execution.status not in ("Fail", "Blocked", "Not Executed")
+                                             for execution in incomplete_executions):
+                raise HTTPException(400, "Conditional completion requires recognized test execution statuses")
+            if incomplete_executions and not conditional_clearance:
                 labels = ", ".join(
                     f"{execution.test_case.test_case_key if execution.test_case else f'Testcase #{execution.test_case_id}'} ({execution.status or 'Not Executed'})"
                     for execution in incomplete_executions[:8]
@@ -1297,7 +1314,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
             ).all()
             from ..defect_workflow import verified_for
             severe = [d for d in severe if not verified_for(d, obj.environment)]
-            if severe:
+            if severe and not conditional_clearance:
                 labels = ", ".join(defect.defect_key for defect in severe[:8])
                 raise HTTPException(
                     400,
@@ -1343,6 +1360,8 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                 missing_target = [defect.defect_key for defect in residual if not defect.target_release]
                 if missing_target:
                     raise HTTPException(400, "Set a Target Release on every remaining Medium or Low defect before completing the cycle: " + ", ".join(missing_target))
+            if conditional_clearance:
+                transition_action = "Complete for Conditional Clearance"
     elif blocking_reason or remarks:
         raise HTTPException(400, "Blocking reason or transition remarks require a status change")
     # A Blocked cycle is frozen except for its one valid lifecycle action:
@@ -2178,17 +2197,18 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
     # itself been Archived (TC-006) is excluded even though
     # current_approved_version_id is still set -- Archived is reachable only
     # from Approved, so this also naturally excludes a case that was never
-    # approved at all (current_approved_version stays None).
+    # approved at all (current_approved_version stays None). Recycled rejected
+    # cases can retain an Approved baseline but must not enter new cycles.
     not_selectable = [
         case.test_case_key for case in selected_cases
-        if not case.current_approved_version or case.current_approved_version.status != "Approved"
+        if case.is_deleted or not case.current_approved_version or case.current_approved_version.status != "Approved"
     ]
     if not_selectable:
         preview = ", ".join(not_selectable[:5])
         suffix = "…" if len(not_selectable) > 5 else ""
         raise HTTPException(
             400,
-            f"Cannot add {len(not_selectable)} test case(s) because they have no Approved, "
+            f"Cannot add {len(not_selectable)} test case(s) because they are in the Recycle Bin or have no Approved, "
             f"non-archived version: {preview}{suffix}",
         )
     created = []

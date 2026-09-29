@@ -1,16 +1,21 @@
 """Request-scoped certificate evidence captured independently of live records."""
 import json
+import re
 from collections import Counter
+from datetime import date
+from html import unescape
 from fastapi import HTTPException
 from sqlalchemy import func, or_
 from . import models
-from .constants import ENVIRONMENT_PIPELINE_ORDER, QAStatus, SAST_DAST_CLEARANCE_RESOLVED_STATUSES
+from .constants import CERTIFICATE_TYPES, ENVIRONMENT_PIPELINE_ORDER, QAStatus, SAST_DAST_CLEARANCE_RESOLVED_STATUSES
 
 TERMINAL = {'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'}
 EXECUTION_STATUSES = ['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed']
 FULL_CLEARANCE_EXECUTION_STATUSES = {'Pass', 'Retest Passed', 'NA'}
-FULL_CLEARANCE_SOURCE_STATUSES = {QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING}
-FULL_CLEARANCE_ENVIRONMENTS = {value.casefold() for value in ENVIRONMENT_PIPELINE_ORDER[:-1]}
+CLEARANCE_TYPES = {'Full Clearance', 'Conditional Clearance'}
+CLEARANCE_SOURCE_STATUSES = {QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING}
+CLEARANCE_ENVIRONMENTS = {value.casefold() for value in ENVIRONMENT_PIPELINE_ORDER[:-1]}
+CONDITIONAL_FIELDS = ('conditional_mitigation', 'conditional_owner', 'conditional_target_date')
 DEFECT_BUCKETS = ['Fix Pending', 'Not a Defect Review Pending', 'Retest Pending', 'Reopened / Retest Failed', 'Business Acceptance Pending', 'Release Pending', 'Production Verification Pending', 'Blocked', 'Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised']
 
 
@@ -168,7 +173,7 @@ def capture(db, obj):
     result = aggregate(executions, defects)
     result['testing_scope'] = obj.live_testing_scope
     result['assigned_testers'] = assigned_testers(db, source)
-    result['certificate_fields'] = {key: str(getattr(obj, key, None) or '') for key in ('certificate_type', 'testing_type', 'testing_request_id', 'application_name', 'application_owner', 'department', 'release_version', 'build_number', 'environment_tested', 'target_promotion_environment', 'exit_criteria_notes', 'open_defect_summary', 'residual_risk_notes', 'known_limitations', 'business_acceptance_status', 'security_testing_status', 'deployment_recommendation', 'conditional_observations')}
+    result['certificate_fields'] = {key: str(getattr(obj, key, None) or '') for key in ('certificate_type', 'testing_type', 'testing_request_id', 'application_name', 'application_owner', 'department', 'release_version', 'build_number', 'environment_tested', 'target_promotion_environment', 'exit_criteria_notes', 'open_defect_summary', 'residual_risk_notes', 'known_limitations', 'business_acceptance_status', 'security_testing_status', 'deployment_recommendation', 'conditional_observations', *CONDITIONAL_FIELDS)}
     result['execution_results'] = sorted([{'id': item.id, 'status': item.status, 'pinned_version_id': item.pinned_version_id, 'run_version': item.run_version, 'executed_at': str(item.executed_at)} for item in executions], key=lambda item: item['id'])
     result['cycle_results'] = [
         {'id': cycle.id, 'status': cycle.status, 'environment': cycle.environment}
@@ -216,6 +221,8 @@ def refresh(db, obj):
 
 
 def validate(obj, db=None):
+    if obj.certificate_type not in CERTIFICATE_TYPES:
+        raise HTTPException(400, 'Select a valid certificate type: ' + ', '.join(CERTIFICATE_TYPES))
     snapshot = obj.certificate_summary
     if not snapshot:
         raise HTTPException(400, 'Refresh certificate summaries before requesting approval')
@@ -228,31 +235,15 @@ def validate(obj, db=None):
         for field in ('assigned_testers', 'execution', 'defects', 'severity', 'execution_ids', 'defect_ids', 'observations', 'security', 'execution_results', 'cycle_results', 'defect_results', 'change_request_ids', 'change_description', 'conditional_observations'):
             if live.get(field) != snapshot.get(field):
                 raise HTTPException(409, 'Linked evidence changed since capture. Refresh the certificate and obtain full reapproval.')
+        previous_fields = snapshot.get('certificate_fields') or {}
+        current_fields = live.get('certificate_fields') or {}
+        if any(previous_fields.get(key, '') != current_fields.get(key, '')
+               for key in previous_fields.keys() | current_fields.keys()):
+            raise HTTPException(409, 'Certificate details changed since capture. Refresh the certificate and obtain full reapproval.')
+    evidence = live or snapshot
+    if obj.certificate_type in CLEARANCE_TYPES:
+        validate_common_clearance_requirements(evidence, obj.certificate_type)
     if obj.certificate_type == 'Full Clearance':
-        evidence = live or snapshot
-        environment = str(evidence.get('environment') or '').strip()
-        if not environment:
-            raise HTTPException(400, 'Full Clearance requires a non-blank tested environment')
-        if environment.casefold() not in FULL_CLEARANCE_ENVIRONMENTS:
-            raise HTTPException(
-                400,
-                'Full Clearance requires a valid tested environment: '
-                + ', '.join(ENVIRONMENT_PIPELINE_ORDER[:-1]),
-            )
-        if evidence.get('source_status') not in FULL_CLEARANCE_SOURCE_STATUSES:
-            raise HTTPException(
-                400,
-                'Full Clearance requires the linked Functional Request to have completed QA and be eligible for clearance',
-            )
-        cycles = evidence.get('cycle_results') or []
-        if not cycles:
-            raise HTTPException(400, 'Full Clearance requires a linked Test Cycle matching the selected environment')
-        incomplete_cycles = [cycle for cycle in cycles if cycle.get('status') != 'Completed']
-        if incomplete_cycles:
-            labels = ', '.join(str(cycle.get('id')) for cycle in incomplete_cycles)
-            raise HTTPException(400, f'Full Clearance requires every matching Test Cycle to be Completed (cycle IDs: {labels})')
-        if not evidence['execution']['total']:
-            raise HTTPException(400, 'Full Clearance requires linked test execution evidence for the selected environment')
         invalid_results = {
             status: count
             for status, count in evidence['execution']['counts'].items()
@@ -267,6 +258,67 @@ def validate(obj, db=None):
             )
         if evidence['open_critical_high']:
             raise HTTPException(400, 'Full Clearance cannot be issued while linked Critical or High defects remain open, including Deferred defects')
+    elif obj.certificate_type == 'Conditional Clearance':
+        validate_conditional_clearance_requirements(evidence)
+
+
+def validate_common_clearance_requirements(evidence, certificate_type):
+    environment = str(evidence.get('environment') or '').strip()
+    if not environment:
+        raise HTTPException(400, f'{certificate_type} requires a non-blank tested environment')
+    if environment.casefold() not in CLEARANCE_ENVIRONMENTS:
+        raise HTTPException(400, f'{certificate_type} requires a valid tested environment: '
+                            + ', '.join(ENVIRONMENT_PIPELINE_ORDER[:-1]))
+    if evidence.get('source_status') not in CLEARANCE_SOURCE_STATUSES:
+        raise HTTPException(400, f'{certificate_type} requires the linked Functional Request '
+                            'to have completed QA and be eligible for clearance')
+    cycles = evidence.get('cycle_results') or []
+    if not cycles or any(str(cycle.get('environment') or '').strip().casefold() != environment.casefold()
+                         for cycle in cycles):
+        raise HTTPException(400, f'{certificate_type} requires a linked Test Cycle matching the selected environment')
+    incomplete_cycles = [cycle for cycle in cycles if cycle.get('status') != 'Completed']
+    if incomplete_cycles:
+        labels = ', '.join(str(cycle.get('id')) for cycle in incomplete_cycles)
+        raise HTTPException(400, f'{certificate_type} requires every matching Test Cycle to be Completed (cycle IDs: {labels})')
+    if not (evidence.get('execution') or {}).get('total'):
+        raise HTTPException(400, f'{certificate_type} requires linked test execution evidence for the selected environment')
+    counts = evidence['execution'].get('counts') or {}
+    if not any(count for status, count in counts.items() if status in set(EXECUTION_STATUSES) - {'Not Executed'}):
+        raise HTTPException(400, f'{certificate_type} requires at least one recorded test result; Not Executed alone is not evidence')
+
+
+def has_documented_text(value):
+    """Empty rich-text markup or an image alone is not a written condition."""
+    text = re.sub(r'<!--.*?-->|<[^>]*>', '', str(value or ''), flags=re.S)
+    text = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', text)
+    text = unescape(text).replace('\u200b', '').replace('\ufeff', '')
+    return any(char.isalnum() for char in text)
+
+
+def validate_conditional_clearance_requirements(evidence):
+    if any(count and status not in EXECUTION_STATUSES
+           for status, count in evidence['execution']['counts'].items()):
+        raise HTTPException(400, 'Conditional Clearance requires recognized test execution statuses')
+    fields = evidence.get('certificate_fields') or {}
+    missing = []
+    manual = evidence.get('conditional_observations') or ''
+    # Manual observations replace the generated section, so markup-only manual
+    # content must not silently hide the linked conditions from approvers.
+    if not (has_documented_text(manual) if manual.strip() else
+            any(has_documented_text(row.get('observation')) for row in evidence.get('observations', []))):
+        missing.append('conditions / observations (enter them or capture linked open defects)')
+    for key, label in [('residual_risk_notes', 'residual-risk remarks'),
+                       ('conditional_mitigation', 'mitigation')]:
+        if not has_documented_text(fields.get(key)):
+            missing.append(label)
+    target_date = str(fields.get('conditional_target_date') or '').strip()
+    if target_date:
+        try:
+            date.fromisoformat(target_date)
+        except ValueError:
+            missing.append('valid target date when provided')
+    if missing:
+        raise HTTPException(400, 'Conditional Clearance requires documented ' + ', '.join(missing) + ' before submission or approval')
 
 
 def markdown_tables(snapshot):

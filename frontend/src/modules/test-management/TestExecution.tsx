@@ -442,6 +442,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
   const [busy, setBusy] = useState(false)
   const [showBlock, setShowBlock] = useState(false)
   const [showComplete, setShowComplete] = useState(false)
+  const [conditionalCompletion, setConditionalCompletion] = useState(false)
   const [blockingReason, setBlockingReason] = useState('')
   const [remarks, setRemarks] = useState('')
   const [dialogError, setDialogError] = useState<unknown>(null)
@@ -480,6 +481,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
         status,
         blocking_reason: reason || null,
         remarks: transitionRemarks || null,
+        conditional_clearance: status === 'Completed' && conditionalCompletion,
       })
       onChanged(saved)
       setShowBlock(false); setShowComplete(false)
@@ -507,9 +509,6 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
     v.environment === cycle.environment)
   const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect))
   const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect))
-  const deferredDefects = completionDefects.filter((defect) => defect.status === 'Deferred')
-  const residualMissingTarget = residualDefects.filter((defect) => !defect.target_release)
-  const deferredMissingTarget = deferredDefects.filter((defect) => !defect.target_release)
   const canCompleteWithResidualRisk = hasRole(user, ...QA_LEAD_GROUP_ROLES)
   const notExecutedCount = Math.max(0, executionTotal - executedCount)
   const severitySummary = ['Critical', 'High', 'Medium', 'Low'].map((severity) => ({ severity, count: completionDefects.filter((defect) => defect.severity === severity).length }))
@@ -531,8 +530,11 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
   const visibleCompletionDefects = filteredCompletionDefects.slice((safeCompletionPage - 1) * completionPageSize, safeCompletionPage * completionPageSize)
   const firstVisibleDefect = filteredCompletionDefects.length ? (safeCompletionPage - 1) * completionPageSize + 1 : 0
   const lastVisibleDefect = Math.min(safeCompletionPage * completionPageSize, filteredCompletionDefects.length)
-  const hasCompletionBlockers = failedCount > 0 || blockedCount > 0 || notExecutedCount > 0 || severeBlockers.length > 0 || targetReleaseMissing.length > 0 || (residualDefects.length > 0 && !canCompleteWithResidualRisk)
-  const needsResidualJustification = residualDefects.length > 0 && canCompleteWithResidualRisk && !remarks.trim()
+  const hasCompletionBlockers = (conditionalCompletion
+    ? executedCount === 0 || !canCompleteWithResidualRisk
+    : failedCount > 0 || blockedCount > 0 || notExecutedCount > 0 || severeBlockers.length > 0)
+    || targetReleaseMissing.length > 0 || (residualDefects.length > 0 && !canCompleteWithResidualRisk)
+  const needsResidualJustification = (conditionalCompletion || residualDefects.length > 0) && canCompleteWithResidualRisk && !remarks.trim()
   const completionState = hasCompletionBlockers ? 'blocked' : needsResidualJustification ? 'pending' : 'ready'
 
   function setDefectFilter(filter: 'all' | 'blocker' | 'target') {
@@ -541,7 +543,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
   }
 
   function requiredDefectAction(defect: DefectListOut) {
-    if (completionBlockers.has(defect.id)) return 'Resolve, reject, defer, or close'
+    if (completionBlockers.has(defect.id)) return conditionalCompletion ? 'Document condition and mitigation in the clearance certificate' : 'Resolve, reject, defer, or close'
     if (missingTargetDefects.has(defect.id)) return 'Set Target Release or resolve'
     if (residualDefects.some((item) => item.id === defect.id)) return 'QA Lead Group residual-risk review'
     return 'No action required'
@@ -585,13 +587,14 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
             disabled={busy}
             onClick={() => {
               if (action.status === 'Blocked') setShowBlock(true)
-              else if (action.status === 'Completed') setShowComplete(true)
+              else if (action.status === 'Completed') { setConditionalCompletion(false); setShowComplete(true) }
               else transition(action.status)
             }}
           >
             {busy ? 'Updating…' : action.label}
           </button>
         ))}
+        {cycle.status === 'In Progress' && canCompleteWithResidualRisk && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { setConditionalCompletion(true); setShowComplete(true) }}>Complete for Conditional Clearance</button>}
         {cycle.status === 'Ready' && cycle.linked_request_key && (
           <small className="muted">Start execution on {cycle.linked_request_key} first. The linked request must be Execution In Progress before this cycle can start.</small>
         )}
@@ -618,15 +621,20 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
         </Modal>
       )}
       {showComplete && !selectedCompletionDefect && (
-        <Modal title={`Review before completing ${cycle.cycle_key}`} onClose={() => setShowComplete(false)} closeDisabled={busy} variant="dialog" preventBackdropClose wide>
+        <Modal title={conditionalCompletion ? `Conditional completion of ${cycle.cycle_key}` : `Review before completing ${cycle.cycle_key}`} onClose={() => setShowComplete(false)} closeDisabled={busy} variant="dialog" preventBackdropClose wide>
           <div className="tm-cycle-completion-review">
+            {conditionalCompletion && <p>Complete this cycle with recorded exceptions for Conditional Clearance review. A QA Lead must record the reason below. At least one test result and all required defect Target Releases are needed. Completion freezes the cycle; the clearance certificate still needs conditions, residual-risk remarks, mitigation, and both approvals. Responsible owner and target date on the certificate are optional.</p>}
             {loadingCompletion ? <p className="muted">Loading defect validation…</p> : <>
               <section className={`tm-completion-state ${completionState}`}>
                 <span aria-hidden="true">{completionState === 'ready' ? '✓' : '!'}</span>
                 <div>
                   <strong>{hasCompletionBlockers ? 'This cycle is not ready to complete' : needsResidualJustification ? 'Residual-risk approval details required' : 'This cycle satisfies the completion checks'}</strong>
                   <p>
-                    {failedCount > 0 || blockedCount > 0
+                    {conditionalCompletion
+                      ? executedCount === 0 ? 'Record at least one test result before conditional completion.'
+                        : targetReleaseMissing.length > 0 ? `Add Target Releases to ${targetReleaseMissing.length} residual defect(s).`
+                        : 'Review the failed, blocked, and unexecuted tests and open defects, then record why conditional review is appropriate.'
+                      : failedCount > 0 || blockedCount > 0
                       ? `${failedCount} failed and ${blockedCount} blocked testcase(s) must be resolved and retested before completion.`
                       : notExecutedCount > 0
                       ? `Record results for ${notExecutedCount} remaining testcase(s).`
@@ -643,7 +651,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
                 </div>
               </section>
               <div className="tm-cycle-defect-counts">
-                {severitySummary.map((item) => <div key={item.severity} data-severity={item.severity.toLowerCase()}><small>{item.severity}</small><strong>{item.count}</strong><span>{['Critical', 'High'].includes(item.severity) ? 'Blocks completion when open' : 'Residual risk when open'}</span></div>)}
+                {severitySummary.map((item) => <div key={item.severity} data-severity={item.severity.toLowerCase()}><small>{item.severity}</small><strong>{item.count}</strong><span>{conditionalCompletion ? 'Requires conditional review when open' : ['Critical', 'High'].includes(item.severity) ? 'Blocks completion when open' : 'Residual risk when open'}</span></div>)}
               </div>
               <section className="tm-completion-readiness" aria-label="Completion readiness">
                 <div className={notExecutedCount || failedCount || blockedCount ? 'failed' : 'passed'}><i>{notExecutedCount || failedCount || blockedCount ? '×' : '✓'}</i><span><strong>Execution results</strong><small>{executedCount} of {executionTotal} recorded · {failedCount} failed · {blockedCount} blocked</small></span></div>
@@ -687,8 +695,8 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
               </section>
             </>}
             {(residualDefects.length === 0 || canCompleteWithResidualRisk) && (
-              <Field label={residualDefects.length ? 'Residual Risk Justification *' : 'Completion Remarks (optional)'}>
-                <textarea rows={3} required={residualDefects.length > 0} value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder={residualDefects.length ? 'Explain why completion is accepted with the remaining Medium/Low defects.' : 'Record any completion remarks.'} />
+              <Field label={conditionalCompletion ? 'Conditional Completion Reason *' : residualDefects.length ? 'Residual Risk Justification *' : 'Completion Remarks (optional)'}>
+                <textarea rows={3} maxLength={5000} required={conditionalCompletion || residualDefects.length > 0} value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder={conditionalCompletion ? 'Explain why testing is being completed with these exceptions and why Conditional Clearance review is appropriate.' : residualDefects.length ? 'Explain why completion is accepted with the remaining Medium/Low defects.' : 'Record any completion remarks.'} />
               </Field>
             )}
             <ErrorText error={dialogError} />
@@ -699,10 +707,10 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={busy || loadingCompletion || Boolean(dialogError) || failedCount > 0 || blockedCount > 0 || notExecutedCount > 0 || severeBlockers.length > 0 || deferredMissingTarget.length > 0 || residualMissingTarget.length > 0 || (residualDefects.length > 0 && (!canCompleteWithResidualRisk || !remarks.trim()))}
+                disabled={busy || loadingCompletion || Boolean(dialogError) || hasCompletionBlockers || needsResidualJustification}
                 onClick={() => transition('Completed', '', remarks.trim())}
               >
-                {busy ? 'Completing…' : 'Complete cycle'}
+                {busy ? 'Completing…' : conditionalCompletion ? 'Complete for Conditional Clearance' : 'Complete cycle'}
               </button>
               </div>
             </div>

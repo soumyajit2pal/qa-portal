@@ -789,29 +789,23 @@ export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
   RETURNED_BY_DEPT_HEAD_COE: 'Returned by Executive',
   DEPT_HEAD_COE_REJECTED: 'Rejected by Executive',
   ISSUED: 'Issued',
-  // 2026-08, reported directly: "on changes required it is starting the
-  // whole workflow again, and for same request generating multiple
-  // certificate." A Requester rejecting an ISSUED certificate at Functional
-  // Testing's own Requester Verification step (routers/functional.py::
-  // requester_decision) now returns THAT SAME certificate here instead of
-  // the Functional Request restarting its whole lifecycle to raise a new
-  // one -- see SIGNOFF_EDITABLE_STATUSES below, and that backend function's
-  // own comment for the full reasoning.
+  // Compatibility status for certificates returned before immutable
+  // successor revisions were introduced. New requester change decisions
+  // preserve the issued row as SUPERSEDED and create a linked Draft instead.
   RETURNED_BY_REQUESTER: 'Returned by Requester',
+  SUPERSEDED: 'Superseded',
+  VOIDED: 'Voided duplicate',
   // No entries for the old pre-rollout literal "Draft"/"Issued" values --
   // those keys would collide with SUPPRESSION_STATUS_LABELS.Draft in the
   // shared ALL_STATUS_LABELS merge (see components/Common.tsx). The Oracle
   // migration includes a one-time UPDATE moving any existing certificate off
   // those old values onto DRAFT/ISSUED instead (see ORACLE_MIGRATION_2026-07.md).
 }
-// SM_REJECTED ("Rejected by QA Lead" -- see SIGNOFF_STATUS_LABELS above)
-// included alongside RETURNED_BY_SM/RETURNED_BY_DEPT_HEAD_COE -- reopenable
-// by the requester (edit + resubmit) rather than a dead end.
-// RETURNED_BY_REQUESTER (see SIGNOFF_STATUS_LABELS above) is editable the
-// same way -- resubmit sends it back to SM_APPROVAL_PENDING (QA Lead first,
-// then Executive), same as RETURNED_BY_SM/SM_REJECTED.
-export const SIGNOFF_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER']
-export const SIGNOFF_TERMINAL_STATUSES: string[] = ['ISSUED', 'DEPT_HEAD_COE_REJECTED']
+// A rejection ends that certificate's workflow. It remains frozen in its
+// rejected status and can only be continued by creating a linked Draft
+// successor. RETURNED_BY_REQUESTER remains editable for legacy rows only.
+export const SIGNOFF_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER']
+export const SIGNOFF_TERMINAL_STATUSES: string[] = ['SM_REJECTED', 'DEPT_HEAD_COE_REJECTED', 'ISSUED', 'SUPERSEDED', 'VOIDED']
 // "Pending With" -- who needs to act next, for the list table column of the
 // same name. Derived from each transition's require_roles() gate in
 // routers/signoff.py -- "Tester" (not "Requester") for the originator here,
@@ -821,7 +815,7 @@ export const SIGNOFF_PENDING_WITH: Record<string, string> = {
   DRAFT: 'Tester', SUBMITTED: 'QA Lead',
   SM_APPROVAL_PENDING: 'QA Lead', RETURNED_BY_SM: 'Tester', SM_REJECTED: '—',
   DEPT_HEAD_QA_APPROVAL_PENDING: 'Executive', RETURNED_BY_DEPT_HEAD_COE: 'Tester', DEPT_HEAD_COE_REJECTED: '—',
-  ISSUED: '—', RETURNED_BY_REQUESTER: 'Tester',
+  ISSUED: '—', RETURNED_BY_REQUESTER: 'Tester', SUPERSEDED: '—', VOIDED: '—',
 }
 
 // Admin section: account authentication type (must mirror backend LoginType).

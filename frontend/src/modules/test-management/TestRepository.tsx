@@ -25,6 +25,7 @@ import RoleGroupLink from '../../components/RoleGroupLink'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconArchive, IconFolder, IconGrid, IconInbox, IconTrash } from '../../components/Icons'
 import { testCaseRejectionNote } from '../../testCaseRejectionNote'
+import { canRecycleTestCase, canPurgeTestCase, requiresTestCaseArchive } from '../../testCaseRecycleEligibility'
 import { createLatestRequestGate } from '../../latestRequest'
 import { resolvePreferredProjectId } from '../../projectPreferences'
 
@@ -2151,20 +2152,14 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
               && (!savedInThisSession || hasUnsavedChanges) && (
               <span className="muted small">Save the testcase before submitting it for review.</span>
             )}
-            {/* 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement": Delete must stay hidden
-                for any governed test case, not just an Approved/Archived one (current_approved_version_id is
-                set for both, since archiving never clears the pointer) -- also hides it for a Rejected case
-                that's never been approved, which the plain current_approved_version_id check alone missed
-                (backend delete_test_case blocks it either way; this just keeps the button consistent with
-                what the backend will actually allow). */}
-            {existing && !existing.current_approved_version_id && existing.status !== 'Rejected' && <button type="button" className="btn btn-danger" onClick={() => setConfirmDelete(true)} disabled={busy}>Delete</button>}
           </div>
         )}
       </form>
       {existing && canAuthor && (
         <div className="tm-review-actions">
-          <div><strong>More actions</strong><span>Clone into a new testcase, or archive the approved baseline.</span></div>
+          <div><strong>More actions</strong><span>Clone a testcase, move rejected or never-approved cases to the Recycle Bin, or archive an approved baseline.</span></div>
           <button className="btn" onClick={() => setShowClone(true)}>Clone…</button>
+          {canRecycleTestCase(existing, user?.id, isAdministrator) && <button type="button" className="btn btn-danger" onClick={() => setConfirmDelete(true)} disabled={busy}>Move to Recycle Bin</button>}
           {canManageRepoGovernance && existing.current_approved_version_id && existing.status !== 'Archived' && (
             <button className="btn btn-danger" onClick={() => setShowArchive(true)}>Archive</button>
           )}
@@ -2220,9 +2215,9 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
       />}
       {confirmDelete && existing && (
         <ConfirmModal
-          title="Delete test case?"
-          message={<p>Delete <strong>{existing.test_case_key}</strong>? It will move to the Recycle Bin, where it can be restored, or permanently cleared by an authorized QA Lead.</p>}
-          confirmLabel="Delete test case" cancelLabel="Keep test case" destructive busy={busy}
+          title="Move test case to Recycle Bin?"
+          message={<p>Move <strong>{existing.test_case_key}</strong> to the Recycle Bin? It can be restored with its current status, versions, approvals, and execution history preserved.</p>}
+          confirmLabel="Move to Recycle Bin" cancelLabel="Keep test case" destructive busy={busy}
           onConfirm={remove} onCancel={() => setConfirmDelete(false)}
         />
       )}
@@ -2568,6 +2563,7 @@ function RecycleBinPanel({
     })
   }
   const allSelected = items.length > 0 && items.every((tc) => selectedIds.has(tc.id))
+  const purgeableSelectedIds = items.filter(tc => selectedIds.has(tc.id) && canPurgeTestCase(tc)).map(tc => tc.id)
   function toggleAll() {
     setSelectedIds((prev) => {
       if (allSelected) return new Set()
@@ -2602,10 +2598,10 @@ function RecycleBinPanel({
   }
 
   async function purgeSelected() {
-    if (selectedIds.size === 0) return
+    if (purgeableSelectedIds.length === 0) return
     setBulkBusy(true); setError(null)
     try {
-      await api.post(`/api/test-repository/projects/${projectId}/test-cases/bulk-purge`, { ids: Array.from(selectedIds) })
+      await api.post(`/api/test-repository/projects/${projectId}/test-cases/bulk-purge`, { ids: purgeableSelectedIds })
       setSelectedIds(new Set())
       onChanged()
     } catch (err) { setError(err) } finally { setBulkBusy(false); setConfirmBulkPurge(false) }
@@ -2617,7 +2613,7 @@ function RecycleBinPanel({
         <div>
           <small>Current view</small>
           <h3>Recycle Bin</h3>
-          <p>Test cases deleted before ever being approved. Restorable by any author, or permanently cleared by an authorized QA Lead.</p>
+          <p>Rejected and never-approved test cases. Rejected cases may retain approved baselines. Restore preserves their status, versions, approvals, and execution history; governed history cannot be permanently cleared.</p>
         </div>
         <span>{total} test case{total !== 1 ? 's' : ''}</span>
       </div>
@@ -2629,7 +2625,8 @@ function RecycleBinPanel({
         <div className="tm-bulk-bar" role="region" aria-label={selectedIds.size > 1 ? 'Recycle Bin bulk actions' : 'Recycle Bin testcase actions'}>
           <strong>{selectedIds.size} test case{selectedIds.size !== 1 ? 's' : ''} selected</strong>
           {canRestore && <button className="btn btn-sm btn-primary" disabled={bulkBusy} onClick={restoreSelected}>Restore selected ({selectedIds.size})</button>}
-          {canPurge && <button className="btn btn-sm btn-danger" disabled={bulkBusy} onClick={() => setConfirmBulkPurge(true)}>Empty selected ({selectedIds.size})</button>}
+          {canPurge && purgeableSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" disabled={bulkBusy} onClick={() => setConfirmBulkPurge(true)}>Empty selected ({purgeableSelectedIds.length})</button>}
+          {canPurge && purgeableSelectedIds.length < selectedIds.size && <span className="muted small">Protected review history will be retained.</span>}
           <button className="btn btn-sm" onClick={() => setSelectedIds(new Set())}>Clear selection</button>
         </div>
       )}
@@ -2656,7 +2653,7 @@ function RecycleBinPanel({
             render: (c) => (
               <span className="tm-recycle-actions">
                 {canRestore && <button className="btn btn-sm btn-primary" disabled={busyId === c.id} onClick={() => restoreOne(c.id)}>Restore</button>}
-                {canPurge && <button className="btn btn-sm btn-danger" disabled={busyId === c.id} onClick={() => setConfirmSingle({ id: c.id, key: c.test_case_key })}>Clear permanently</button>}
+                {canPurge && canPurgeTestCase(c) && <button className="btn btn-sm btn-danger" disabled={busyId === c.id} onClick={() => setConfirmSingle({ id: c.id, key: c.test_case_key })}>Clear permanently</button>}
                 {!canRestore && !canPurge && <small>No permitted actions</small>}
               </span>
             ),
@@ -2676,11 +2673,11 @@ function RecycleBinPanel({
           onCancel={() => setConfirmSingle(null)}
         />
       )}
-      {confirmBulkPurge && (
+      {confirmBulkPurge && purgeableSelectedIds.length > 0 && (
         <ConfirmModal
-          title={`Permanently delete ${selectedIds.size} test case${selectedIds.size !== 1 ? 's' : ''}?`}
-          message={<div><p>This permanently removes the selected test cases and their steps. This action cannot be undone.</p></div>}
-          confirmLabel={`Clear ${selectedIds.size} permanently`}
+          title={`Permanently delete ${purgeableSelectedIds.length} test case${purgeableSelectedIds.length !== 1 ? 's' : ''}?`}
+          message={<div><p>This permanently removes the eligible selected test cases and their steps. Rejected cases are retained. This action cannot be undone.</p></div>}
+          confirmLabel={`Clear ${purgeableSelectedIds.length} permanently`}
           cancelLabel="Cancel"
           destructive
           busy={bulkBusy}
@@ -3070,26 +3067,11 @@ export default function TestRepository() {
         && (isAdministrator || (testCase.current_draft_submitted_by_id !== user?.id
           && testCase.current_draft_reviewed_by_id !== user?.id)))
     )).map((testCase) => testCase.id)
-  // 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement":
-  // a test case that has ever been approved/archived/rejected is governed
-  // history and can never be hard-deleted (backend delete_test_case/
-  // bulk_delete_test_cases -- see their own docstrings). `current_
-  // approved_version_id` is set the moment a case is ever approved and is
-  // never cleared again (archiving only flips the version's own status, it
-  // doesn't unlink the pointer), so its presence alone reliably captures
-  // "approved or archived." `status === 'Rejected'` catches the common
-  // rejected-and-not-yet-revised case too; a case rejected long ago and
-  // since revised again (current status back to Draft) is a rarer edge the
-  // list view can't detect without a dedicated backend flag -- the
-  // backend's own check (which scans full version history) remains the
-  // authoritative guard for that case, same as every other bulk action here.
-  const governedSelectedIds = writableSelectedCases.filter((testCase) =>
-    !!testCase.current_approved_version_id || testCase.status === 'Rejected').map((testCase) => testCase.id)
-  const deletableSelectedIds = writableSelectedCases.filter((testCase) =>
-    !testCase.current_approved_version_id
-    && testCase.status !== 'Rejected'
-    && (!RETURNED_CORRECTION_STATUSES.includes(testCase.status)
-      || testCase.current_draft_author_id === user?.id)).map((testCase) => testCase.id)
+  // Currently rejected cases can be recycled even with an approved baseline.
+  // Other cases with approval history must use Archive; the backend also checks all versions.
+  const governedSelectedIds = writableSelectedCases.filter(requiresTestCaseArchive).map(testCase => testCase.id)
+  const deletableSelectedIds = writableSelectedCases.filter(testCase =>
+    canRecycleTestCase(testCase, user?.id, isAdministrator)).map(testCase => testCase.id)
   // "Archive Selected" -- only a live Approved baseline is archivable (an
   // already-Archived row has nothing further to do, a Draft/In Review/etc
   // row has no approved baseline to archive yet).
@@ -3127,7 +3109,7 @@ export default function TestRepository() {
       : selectedFolder === ARCHIVE_VIEW
         ? 'Every archived test case across the whole project, regardless of its original folder. Restorable by an authorized QA Lead.'
         : selectedFolder === RECYCLE_BIN
-          ? 'Test cases deleted before ever being approved. Restorable by any author, or permanently cleared by an authorized QA Lead.'
+          ? 'Rejected and never-approved test cases. Restore preserves status, versions, approvals, and execution history; rejected cases cannot be permanently cleared.'
           : 'Complete repository coverage across every folder and sub-folder.'
 
   const syncVisibleCases = useCallback((visibleCases: TestCaseListOut[]) => {
@@ -3249,10 +3231,8 @@ export default function TestRepository() {
   }, [cases])
 
   async function bulkDelete() {
-    // 2026-08 -- only ever sends deletableSelectedIds (never-governed cases),
-    // never the raw selection -- an Approved/Archived/Rejected case must
-    // never even be attempted for hard delete, let alone silently dropped
-    // from a mixed batch server-side.
+    // Only send recyclable cases, never the raw mixed selection. Cases with
+    // approval history must be archived unless their current status is Rejected.
     if (!projectId || deletableSelectedIds.length === 0) return
     setBulkDeleteBusy(true); setError(null)
     try {
@@ -3494,11 +3474,8 @@ export default function TestRepository() {
                 {returnRejectSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkReturn(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Return For Correction')} ({returnRejectSelectedIds.length})</button>}
                 {returnRejectSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkReject(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Reject')} ({returnRejectSelectedIds.length})</button>}
                 {canOpenBulkUpdate && <button className="btn btn-sm" onClick={() => setShowBulkUpdate(true)}>{selectionActionLabel(selectedCount, 'update')}</button>}
-                {/* 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement": Delete only ever
-                    targets deletableSelectedIds (never-governed cases) -- an Approved/Archived/Rejected case in
-                    the same selection is silently excluded from the delete count/payload rather than blocking
-                    the whole batch, and is instead offered "Archive Selected" alongside it. */}
-                {canAuthor && deletableSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkDelete(true)}>{selectionActionLabel(deletableSelectedIds.length, 'Delete')} ({deletableSelectedIds.length})</button>}
+                {/* Recycling includes rejected cases while preserving approved/archived history. */}
+                {canAuthor && deletableSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkDelete(true)}>Move to Recycle Bin ({deletableSelectedIds.length})</button>}
                 {archivableSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkArchive(true)}>Archive selected ({archivableSelectedIds.length})</button>}
                 {restorableSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkRestore(true)}>Restore selected ({restorableSelectedIds.length})</button>}
                 {governedSelectedIds.length > 0 && deletableSelectedIds.length === 0 && archivableSelectedIds.length === 0 && (
@@ -3766,15 +3743,15 @@ export default function TestRepository() {
       )}
       {showBulkDelete && deletableSelectedIds.length > 0 && (
         <ConfirmModal
-          title={`Delete ${deletableSelectedIds.length} test case${deletableSelectedIds.length !== 1 ? 's' : ''}?`}
+          title={`Move ${deletableSelectedIds.length} test case${deletableSelectedIds.length !== 1 ? 's' : ''} to Recycle Bin?`}
           message={<div>
             <p>This will move {deletableSelectedIds.length} test case{deletableSelectedIds.length !== 1 ? 's' : ''} to the Recycle Bin.</p>
-            <p className="muted small">They can be restored from the Recycle Bin, or permanently cleared by an authorized QA Lead.</p>
+            <p className="muted small">They can be restored with their current status, versions, approvals, and execution history preserved.</p>
             {governedSelectedIds.length > 0 && (
-              <p className="muted small">{governedSelectedIds.length} other selected test case{governedSelectedIds.length !== 1 ? 's are' : ' is'} approval-governed history (approved, archived, or rejected) and will be skipped -- archive {governedSelectedIds.length !== 1 ? 'them' : 'it'} instead.</p>
+              <p className="muted small">{governedSelectedIds.length} other selected test case{governedSelectedIds.length !== 1 ? 's have' : ' has'} approved or archived history without a current Rejected status and will be skipped. Use Archive for those cases.</p>
             )}
           </div>}
-          confirmLabel={`Delete ${deletableSelectedIds.length} test case${deletableSelectedIds.length !== 1 ? 's' : ''}`}
+          confirmLabel={`Move ${deletableSelectedIds.length} to Recycle Bin`}
           cancelLabel="Keep test cases"
           destructive
           busy={bulkDeleteBusy}

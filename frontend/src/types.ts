@@ -976,6 +976,7 @@ export interface SuppressionOut {
 
 // ---------------- QA Clearance ----------------
 export interface CertificateSummary {
+  certificate_fields?: Record<string, string>
   security?: { type: string; request_id: string; status: string; initial_findings?: number | null; current_findings?: number | null; suppression_count?: number | null; suppression_request_ids?: string[] }[]
   assigned_testers?: { id: number; name: string }[]
   conditional_observations?: string
@@ -999,6 +1000,9 @@ export interface SignOffOut {
   security_testing_status?: string | null
   deployment_recommendation?: string | null
   conditional_observations?: string | null
+  conditional_mitigation?: string | null
+  conditional_owner?: string | null
+  conditional_target_date?: string | null
 
   certificate_summary?: CertificateSummary | null
   id: number
@@ -1037,6 +1041,13 @@ export interface SignOffOut {
   // Vestigial -- see backend models.QASignOff.
   issued_by_id?: number | null
   signed_by_id?: number | null
+  revision_number: number
+  revision_reason?: string | null
+  supersedes_id?: number | null
+  supersedes_certificate_id?: string | null
+  superseded_by_id?: number | null
+  superseded_by_certificate_id?: string | null
+  superseded_at?: string | null
   created_at: string
   updated_at: string
 }

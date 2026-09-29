@@ -827,12 +827,22 @@ RISK_TIERS = ["Tier 1 (Critical)", "Tier 2 (High)", "Tier 3 (Medium)", "Tier 4 (
 SIGNOFF_STATUSES = [
     "DRAFT", "SUBMITTED", "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
     "DEPT_HEAD_QA_APPROVAL_PENDING", "RETURNED_BY_DEPT_HEAD_COE", "DEPT_HEAD_COE_REJECTED",
-    "ISSUED", "RETURNED_BY_REQUESTER",
+    "ISSUED", "RETURNED_BY_REQUESTER", "SUPERSEDED", "VOIDED",
 ]
 
-SIGNOFF_TERMINAL_STATUSES = ["ISSUED", "DEPT_HEAD_COE_REJECTED"]
+# A request may have exactly one certificate in one of these non-terminal
+# states. Issued and rejected certificates are immutable lineage records:
+# continuing either outcome creates a new Draft successor. Only an issued
+# predecessor moves to SUPERSEDED; rejected predecessors retain their exact
+# terminal decision for audit history.
+ACTIVE_SIGNOFF_STATUSES = [
+    "DRAFT", "SUBMITTED", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+    "DEPT_HEAD_QA_APPROVAL_PENDING", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER",
+]
 
-SIGNOFF_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"]
+SIGNOFF_TERMINAL_STATUSES = ["SM_REJECTED", "DEPT_HEAD_COE_REJECTED", "ISSUED", "SUPERSEDED", "VOIDED"]
+
+SIGNOFF_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"]
 SIGNOFF_STATUS_LABELS = {
     "DRAFT": "Draft",
     "SUBMITTED": "Submitted",
@@ -844,6 +854,8 @@ SIGNOFF_STATUS_LABELS = {
     "DEPT_HEAD_COE_REJECTED": "Rejected by Executive",
     "ISSUED": "Issued",
     "RETURNED_BY_REQUESTER": "Returned by Requester",
+    "SUPERSEDED": "Superseded",
+    "VOIDED": "Voided duplicate",
 }
 
 TEST_CASE_TYPES = [

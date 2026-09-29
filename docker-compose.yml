@@ -48,7 +48,7 @@ services:
       DOCUMENT_PORTAL_EMBEDDED: "false"
       DOCUMENT_PORTAL_STORAGE_HOST_PATH: /data/qualityops/document-storage/repository
       LOGIN_ENCRYPTION_PRIVATE_KEY_FILE: /run/secrets/qualityops/login-private.pem
-      REDIS_URL: ${REDIS_URL:?Set REDIS_URL in the selected environment file}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
 
     # Read the trust list from the selected service env_file at runtime.
     # Uvicorn must trust only nginx's source IP for forwarding metadata.

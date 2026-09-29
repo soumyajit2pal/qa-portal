@@ -88,7 +88,9 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     SM_APPROVAL_PENDING: "badge-yellow",
     RETURNED_BY_SM: "badge-red",
     SM_REJECTED: "badge-red",
-    RETURNED_BY_REQUESTER: "badge-red",  // 2026-08 -- QASignOff status, reopened via Requester's "Changes Required"
+    RETURNED_BY_REQUESTER: "badge-red",  // Legacy pre-immutable-revision QASignOff state.
+    SUPERSEDED: "badge-gray",
+    VOIDED: "badge-gray",
     DEPARTMENT_HEAD_APPROVAL_PENDING: "badge-yellow",
     RETURNED_BY_DEPARTMENT_HEAD: "badge-red",
     DEPARTMENT_HEAD_REJECTED: "badge-red",

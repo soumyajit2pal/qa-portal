@@ -7,7 +7,7 @@ from sqlalchemy import and_, func, literal, or_
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 
-from .. import models, pagination, schemas, certificate_summary
+from .. import models, pagination, schemas, certificate_summary, certificate_revisions
 from ..database import get_db
 from ..deps import (
     get_workflow_user as get_current_user, require_workflow_roles as require_roles, require_same_department, require_not_requester,
@@ -1108,49 +1108,22 @@ def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Se
     if payload.decision == "Accepted":
         obj.status = QAStatus.CLOSED
     elif payload.decision == "ChangesRequired":
-        # 2026-08 -- reported directly: "on changes required it is starting
-        # the whole workflow again, and for same request generating multiple
-        # certificate. this should not be. it should enable generated QA
-        # certificate editing mode, and once QA update the changes as per
-        # request, it will go for QA lead approval, then AGM approval." This
-        # used to send the request all the way back to QA_LEAD_ASSIGNED --
-        # re-running planning/tester assignment/test design/execution from
-        # scratch just to fix wording on a certificate -- and "Request
-        # Sign-off" at QA_COMPLETED always raises a brand NEW QASignOff row
-        # (routers/signoff.py::create_signoff), so every rejected round trip
-        # left an abandoned certificate behind and the request pointing at
-        # yet another new one.
-        #
-        # Testing itself already happened and isn't in question here -- only
-        # the certificate is. Send the request back to QA_SIGNOFF_PENDING
-        # (the status right before Request Sign-off, one step short of
-        # QA_COMPLETED so "Request Sign-off" -- which always creates a new
-        # certificate -- can't be clicked again) and reopen the SAME
-        # certificate already linked via signoff_id for editing, instead of
-        # abandoning it. Mirrors SIGNOFF_EDITABLE_STATUSES' own
-        # RETURNED_BY_SM/SM_REJECTED pattern: the QA Engineer edits the
-        # certificate, then calls signoff.py::resubmit_signoff, which sends
-        # RETURNED_BY_REQUESTER back through SM_APPROVAL_PENDING (QA Lead)
-        # and then DEPT_HEAD_QA_APPROVAL_PENDING (Executive/AGM) -- the full
-        # chain again, matching "QA lead approval, then AGM approval"
-        # exactly. Once re-Issued, signoff.py's existing
-        # _sync_linked_functional_request auto-sync (it queries by
-        # `signoff_id=obj.id, status=QA_SIGNOFF_PENDING`, which is exactly
-        # the state this leaves the request in) carries it straight back to
-        # QA_SIGNED_OFF -> REQUESTER_VERIFICATION on its own, same as the
-        # very first time -- no further manual step needed.
+        # Issued certificates are immutable audit records. Requesting changes
+        # therefore creates a new Draft successor, marks the issued row
+        # SUPERSEDED, and moves this Functional Request's link to the
+        # successor. The QA certificate requester edits/submits that Draft,
+        # which then follows the complete QA Lead -> Executive chain again.
         if not (payload.comments or "").strip():
             raise HTTPException(400, "A reason is required when requesting changes")
-        obj.status = QAStatus.QA_SIGNOFF_PENDING
         cert = db.get(models.QASignOff, obj.signoff_id) if obj.signoff_id else None
-        if cert and cert.status == "ISSUED":
-            cert.status = "RETURNED_BY_REQUESTER"
-            db.add(models.ApprovalAction(
-                entity_type="SIGNOFF", entity_id=cert.id, step_name="Requester Verification",
-                actor_id=current_user.id, actor_role=current_user.roles_csv,
-                decision="Returned by Requester",
-                comments=f"{payload.comments} (via {obj.request_id}'s Requester Verification)",
-            ))
+        if not cert:
+            raise HTTPException(409, "Requester changes require the currently linked issued certificate")
+        certificate_revisions.create_certificate_revision(
+            db,
+            cert,
+            current_user,
+            payload.comments.strip(),
+        )
     else:
         raise HTTPException(400, "decision must be one of: Accepted, ChangesRequired")
     _log(db, obj.id, "Requester Verification", current_user, payload.decision, payload.comments)

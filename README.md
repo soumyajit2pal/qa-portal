@@ -147,8 +147,8 @@ export DATABASE_URL="oracle+oracledb://QA_PORTAL:your_password@oracle.example.co
 ```
 
 The `QA_PORTAL` user needs `CREATE TABLE`/`CREATE SEQUENCE` privileges the first time you run
-`alembic upgrade head`. Existing environments that predate Alembic may need to adopt the baseline once; see
-[`backend/MIGRATIONS.md`](backend/MIGRATIONS.md) before applying or generating migrations.
+`alembic upgrade head`. Existing environments that predate Alembic must review and adopt the
+appropriate baseline before applying migrations.
 
 All tables are prefixed `qap_` (e.g. `qap_users`, `qap_requests`, `qap_module_documents`) so
 this app's schema won't collide with any other application's tables (like a generic `users`
@@ -236,7 +236,7 @@ set `TLS_CERT_HOST_PATH` in the selected environment file to the directory conta
 frontend. Relative certificate directories resolve from the repository root,
 matching Compose. Vite builds do not require certificate files. Open `https://localhost:5173`
 using a certificate that includes localhost. Vite derives forwarded scheme from
-the actual TLS socket. See `UAT_HTTPS_Recovery.md` for direct and Compose cases.
+the actual TLS socket.
 
 Audit records store the client address visible at the trusted HTTPS edge. A
 browser opened at `https://localhost:5173` is genuinely connected over loopback,
@@ -471,15 +471,6 @@ The required-variable check in `docker-compose.yml` stops early when `TLS_CERT_H
 omitted. The same frontend image can therefore be promoted unchanged; the certificate and private
 key are mounted at runtime and excluded from both source control and Docker build contexts.
 
-For local localhost UAT only, the repository contains certificate helpers:
-
-```bash
-python3 scripts/generate-local-uat-tls.py
-```
-
-It creates or reuses `certs/qualityops-uat-ca.crt` and its private CA key, backs up an existing
-leaf pair, and generates `qualityops.crt`/`qualityops.key` for `localhost`, `127.0.0.1`, and `::1`.
-Trust only `qualityops-uat-ca.crt` on the local test device; never distribute either `.key` file.
 For a real DNS name or network IP, obtain a certificate with the correct subject alternative name
 from the organization's certificate process and place the resulting files under the configured
 host directory using the two required filenames.
@@ -604,7 +595,21 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
 ## Production notes
 
 - Apply versioned Oracle schema changes with **Alembic** before starting API
-  containers; see `backend/MIGRATIONS.md`.
+  containers.
+- Conditional Clearance requires the `a6d9c2e4f801` migration (included in
+  `alembic upgrade head`) for mitigation, responsible owner, and target date.
+  Full and Conditional Clearance both require an eligible Functional Request,
+  completed cycles in the tested environment, and recorded execution evidence.
+  Conditional certificates additionally require conditions (manual observations
+  or captured open defects), residual-risk remarks, and mitigation
+  before submission and each approval. Responsible owner and target date are optional.
+  Existing incomplete conditional drafts
+  must be edited and recaptured; issued certificates are not automatically revoked.
+- QA Lead Group members can use **Complete for Conditional Clearance** with a
+  reason to complete cycles containing failed, blocked, or unexecuted tests and
+  unresolved Critical/High defects. At least one result must be recorded. Existing
+  defect Target Release requirements remain in force. This action is audited,
+  freezes the cycle, and does not issue a certificate or bypass its approvals.
 - Testcase/repository and execution lists use primary-key cursor pagination;
   cycle candidates are evaluated with SQL `NOT EXISTS` and are loaded only
   when the Add Test Cases dialog opens. Apply every versioned schema/index

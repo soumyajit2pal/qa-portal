@@ -4,9 +4,10 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from .. import models, schemas, certificate_summary
+from .. import models, schemas, certificate_summary, certificate_revisions
 from ..database import get_db
 from ..pagination import Page, PageParams, apply_search, apply_status_filter, apply_sort, paginate, to_page_response
 from ..deps import (get_workflow_user as get_current_user, require_workflow_roles as require_roles, require_not_requester,
@@ -145,6 +146,7 @@ def _validate_rich_text_before_progress(obj: models.QASignOff) -> None:
         ("Security Testing Status", obj.security_testing_status),
         ("Deployment Recommendation", obj.deployment_recommendation),
         ("Conditional Clearance Observations", obj.conditional_observations),
+        ("Conditional Clearance Mitigation", obj.conditional_mitigation),
     )
     oversized = [
         f"{label} ({len(value):,}/{schemas.RICH_TEXT_MAX_LENGTH:,})"
@@ -234,9 +236,15 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
     isn't available to raise it themselves. Starts as a Draft either way --
     no different downstream handling based on who created it."""
     data = payload.model_dump()
-    source = db.query(models.FunctionalRequest).filter(
-        models.FunctionalRequest.request_id == data.get("testing_request_id")
-    ).first()
+    # Serialize certificate creation per source request. The database's
+    # function-based unique index remains the final concurrency backstop.
+    source = (
+        db.query(models.FunctionalRequest)
+        .filter(models.FunctionalRequest.request_id == data.get("testing_request_id"))
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
     if not source or not source.qa_request:
         raise HTTPException(400, "Select a Functional Request in the active workspace")
     # Keep the source department for reporting. Approval ownership comes
@@ -246,6 +254,27 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
     selected_workspaces = active_qa_workspace_scope_ids(current_user)
     if selected_workspaces and data["qa_workspace_id"] not in selected_workspaces:
         raise HTTPException(404, "Functional Request not found in the active workspace")
+    existing_active = certificate_revisions.active_certificate(db, source.request_id)
+    if existing_active:
+        raise HTTPException(
+            409,
+            f"{existing_active.certificate_id} is already the active certificate for "
+            f"{source.request_id}; open and continue that certificate instead",
+        )
+    if source.signoff_id is not None:
+        linked = db.get(models.QASignOff, source.signoff_id)
+        if linked and linked.status in ("ISSUED", "SM_REJECTED", "DEPT_HEAD_COE_REJECTED"):
+            raise HTTPException(
+                409,
+                f"{linked.certificate_id} is the terminal certificate for {source.request_id}; "
+                "use Create Revised Certificate on that certificate",
+            )
+        if linked:
+            raise HTTPException(
+                409,
+                f"{linked.certificate_id} is already linked to {source.request_id}; "
+                "resolve that certificate instead of creating a parallel draft",
+            )
     # Same Environment Tested/Target Promotion Environment ordering rule as
     # routers/qa_requests.py::create_request/edit_request and
     # routers/functional.py::update_functional -- reuses the same shared
@@ -260,14 +289,20 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
     # Isolate the early INSERT in a savepoint. If evidence capture rejects
     # the request, only this new certificate is rolled back; other valid
     # changes already present in the request transaction are preserved.
-    with db.begin_nested():
-        db.add(obj)
-        # Attach and flush before capture so QASignOff.live_testing_scope can
-        # resolve its view-only Functional Request relationship. Capturing a
-        # transient object freezes the fallback "Functional" scope even when
-        # the parent request contains multiple testing types.
-        db.flush()
-        certificate_summary.refresh(db, obj)
+    try:
+        with db.begin_nested():
+            db.add(obj)
+            # Attach and flush before capture so QASignOff.live_testing_scope can
+            # resolve its view-only Functional Request relationship. Capturing a
+            # transient object freezes the fallback "Functional" scope even when
+            # the parent request contains multiple testing types.
+            db.flush()
+            certificate_summary.refresh(db, obj)
+    except IntegrityError as exc:
+        raise HTTPException(
+            409,
+            f"Another active certificate already exists for {source.request_id}; refresh and continue it",
+        ) from exc
     db.commit()
     db.refresh(obj)
     _log(db, obj.id, "Requester", current_user, "Drafted", "QA Clearance Certificate created as draft")
@@ -344,8 +379,11 @@ def refresh_certificate_summary(signoff_id: int, db: Session = Depends(get_db), 
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, 'Only the requester or System Admin can refresh and reopen a certificate')
     db.refresh(obj, with_for_update=True)
-    if obj.status in ('SM_REJECTED', 'DEPT_HEAD_COE_REJECTED'):
-        raise HTTPException(409, 'Reopen the rejected certificate before refreshing summaries and restarting approval')
+    if obj.status in ('ISSUED', 'SM_REJECTED', 'DEPT_HEAD_COE_REJECTED', 'SUPERSEDED', 'VOIDED'):
+        raise HTTPException(
+            409,
+            'Issued, rejected, and historical certificates are immutable. Use Create Revised Certificate on the current lineage head.',
+        )
     snapshot = certificate_summary.refresh(db, obj)
     obj.status = 'DRAFT'
     obj.reviewed_by_id = None
@@ -363,6 +401,32 @@ def refresh_certificate_summary(signoff_id: int, db: Session = Depends(get_db), 
     db.commit()
     db.refresh(obj)
     return obj
+
+
+@router.post('/{signoff_id}/revisions', response_model=schemas.SignOffOut, status_code=201)
+def create_signoff_revision(
+    signoff_id: int,
+    payload: schemas.SignOffRevisionCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Create one governed successor while preserving the terminal original."""
+    obj = _get_visible_or_404(db, signoff_id, current_user)
+    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, 'Only the certificate requester or System Admin can create a revision')
+    try:
+        successor = certificate_revisions.create_certificate_revision(
+            db, obj, current_user, payload.reason,
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            409,
+            'A certificate revision was created concurrently; refresh before continuing',
+        ) from exc
+    db.refresh(successor)
+    return successor
 
 
 @router.post("/{signoff_id}/submit", response_model=schemas.SignOffOut)
@@ -385,33 +449,27 @@ def submit_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
 
 @router.post("/{signoff_id}/resubmit", response_model=schemas.SignOffOut)
 def resubmit_signoff(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    """Re-submits a certificate returned by QA Lead or Executive  -- or
-    reopens one rejected by QA Lead (SM_REJECTED; see SIGNOFF_STATUS_LABELS
-    -- this checkpoint is labeled "QA Lead" here even though it reuses the
-    SM_* status names). Reported directly: a Rejected-by-QA-Lead certificate
-    used to be a dead end; it's now reopenable the same way a Return is:
-    edit details, then call this to send it straight back to
-    SM_APPROVAL_PENDING for a fresh decision. A return from Executive
+    """Re-submits a certificate returned by QA Lead or Executive. A rejection
+    is terminal for that certificate and must continue through the governed
+    revision endpoint, which preserves the rejection and creates a new Draft.
+    A return from Executive
     goes straight back to their own queue (QA Lead already approved it
     once) -- the direct return goes back to Executive  rather than
     repeating QA Lead approval.
 
-    RETURNED_BY_REQUESTER (2026-08) is the same idea from a third
-    direction: functional.py::requester_decision reopens an already-Issued
-    certificate into this status when the Requester picks "Changes
-    Required" at Requester Verification, instead of abandoning it and
-    letting a new one be created. Per the report -- "it will go for QA
-    lead approval, then AGM approval" -- it re-enters the SAME chain as a
-    QA-Lead return/reopen, one full pass through QA Lead then Executive."""
+    RETURNED_BY_REQUESTER is retained for certificates created before the
+    immutable-revision rollout. New Requester "Changes Required" decisions
+    create a Draft successor and mark the issued predecessor SUPERSEDED;
+    this branch only lets those legacy rows complete their existing path."""
     obj = _get_or_404(db, signoff_id)
     db.refresh(obj, with_for_update=True)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this certificate")
-    _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"], "Resubmit")
+    _require(obj, ["RETURNED_BY_SM", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"], "Resubmit")
     _validate_rich_text_before_progress(obj)
     certificate_summary.validate(obj, db)
-    if obj.status in ("RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_REQUESTER"):
-        reopening = obj.status in ("SM_REJECTED", "RETURNED_BY_REQUESTER")
+    if obj.status in ("RETURNED_BY_SM", "RETURNED_BY_REQUESTER"):
+        reopening = obj.status == "RETURNED_BY_REQUESTER"
         obj.status = "SM_APPROVAL_PENDING"
         _log(db, obj.id, "QA Lead Approval", current_user,
              "Reopened" if reopening else "Resubmitted",
@@ -537,13 +595,17 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         if signature:
             signatures_by_stage[signature.stage] = signature
     signatures = list(signatures_by_stage.values())
-    digitally_signed = bool(signatures) and obj.status == "ISSUED"
+    digitally_signed = bool(signatures) and obj.status in {"ISSUED", "SUPERSEDED"}
 
     sections = [
         ("Status", [
             ("Status", qa_clearance_export_status(obj.status)),
             ("Workflow Status", obj.status),
             ("Certificate Type", obj.certificate_type),
+            ("Revision", obj.revision_number or 1),
+            ("Supersedes", obj.supersedes_certificate_id or "—"),
+            ("Superseded By", obj.superseded_by_certificate_id or "—"),
+            ("Revision Reason", obj.revision_reason or "—"),
             ("Testing Type", obj.certificate_testing_type),
             ("Certificate Date", obj.certificate_date),
             ("Clearance Signature Type", QA_CLEARANCE_SIGNED_TYPE if digitally_signed else "Not digitally signed"),
@@ -612,6 +674,15 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         (row['defect_key'], f"{row['functionality']}: {row['observation']} | Severity: {row['severity']} | Status: {row['status']} | Owner: {row['owner']} | Target date: {row['target_date']}") for row in observations
     ] or [('Observations', 'No open linked defect observations in the captured evidence.' if snapshot else 'No captured evidence available.')]
     if obj.certificate_type == 'Conditional Clearance':
+        conditions = snapshot.get('certificate_fields', {}) if snapshot else {
+            key: getattr(obj, key) for key in (*certificate_summary.CONDITIONAL_FIELDS, 'residual_risk_notes')
+        }
+        observation_fields.extend([
+            ('Residual-risk remarks', RichTextValue(conditions.get('residual_risk_notes') or 'Not recorded')),
+            ('Mitigation', RichTextValue(conditions.get('conditional_mitigation') or 'Not recorded')),
+            ('Responsible owner', conditions.get('conditional_owner') or 'Not recorded'),
+            ('Target date', conditions.get('conditional_target_date') or 'Not recorded'),
+        ])
         sections.append(('Section F – Conditional Clearance Observations', observation_fields))
     sections.append(('Section G – Certificate Validity & Compliance Declaration', [('Declaration', 'This certificate applies to the tested environment. The recorded build/version/hash is retained as audit evidence and is not a matching gate. Code, configuration, infrastructure, dependency or requirement changes and production hotfixes require QA recertification. This certificate does not constitute Business Acceptance or Production readiness unless countersigned by the Application Owner.')]))
     sections.append(('Section H – Approval Matrix', approval_fields))
@@ -650,7 +721,7 @@ def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.Use
     actually currently sat with. Reworked to be exclusive, matching
     update_signoff's own editable-status window above: the requester only
     while the certificate is genuinely in their own hands (Draft or
-    Returned-by-*/Rejected -- see SIGNOFF_EDITABLE_STATUSES), and exclusively
+    Returned-by-* -- see SIGNOFF_EDITABLE_STATUSES), and exclusively
     whichever single actor the certificate's *current* status is actually
     sitting with otherwise -- QA Lead during QA Lead approval (legacy status
     SM_APPROVAL_PENDING) or Executive  during final approval. Admin always
@@ -658,7 +729,7 @@ def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.Use
     if user.has_role(Role.ADMIN):
         return True
     status = obj.status
-    if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"):
+    if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
         return user.has_qa_workspace_role(

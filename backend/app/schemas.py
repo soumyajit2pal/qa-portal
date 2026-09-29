@@ -2127,8 +2127,11 @@ class SignOffCreate(BaseModel):
     security_testing_status: Optional[str] = None
     deployment_recommendation: Optional[str] = None
     conditional_observations: Optional[str] = None
+    conditional_mitigation: Optional[str] = None
+    conditional_owner: Optional[str] = Field(default=None, max_length=150)
+    conditional_target_date: Optional[datetime.date] = None
 
-    certificate_type: str
+    certificate_type: Literal['Full Clearance', 'Conditional Clearance', 'Clearance Denied']
     testing_type: str
     testing_request_id: Optional[str] = None
     change_request_ids: Optional[str] = None
@@ -2149,7 +2152,7 @@ class SignOffCreate(BaseModel):
     residual_risk_notes: Optional[str] = None
 
     _limit_rich_text = field_validator(
-        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "deployment_recommendation", "conditional_observations"
+        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "deployment_recommendation", "conditional_observations", "conditional_mitigation"
     )(_limited_rich_text)
 
 
@@ -2159,6 +2162,9 @@ class SignOffUpdate(BaseModel):
     security_testing_status: Optional[str] = None
     deployment_recommendation: Optional[str] = None
     conditional_observations: Optional[str] = None
+    conditional_mitigation: Optional[str] = None
+    conditional_owner: Optional[str] = Field(default=None, max_length=150)
+    conditional_target_date: Optional[datetime.date] = None
 
     """Edits a certificate's own descriptive fields -- available to the
     QA requester while it's DRAFT/RETURNED_BY_*, and to the QA Lead directly
@@ -2166,7 +2172,7 @@ class SignOffUpdate(BaseModel):
     SM_APPROVAL_PENDING; see routers/signoff.py::update_signoff for the exact
     permission windows). Everything optional --
     only fields actually sent are changed."""
-    certificate_type: Optional[str] = None
+    certificate_type: Optional[Literal['Full Clearance', 'Conditional Clearance', 'Clearance Denied']] = None
     testing_type: Optional[str] = None
     change_request_ids: Optional[str] = None
     vendor_si_partner: Optional[str] = None
@@ -2183,8 +2189,20 @@ class SignOffUpdate(BaseModel):
     residual_risk_notes: Optional[str] = None
 
     _limit_rich_text = field_validator(
-        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "deployment_recommendation", "conditional_observations"
+        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "deployment_recommendation", "conditional_observations", "conditional_mitigation"
     )(_limited_rich_text)
+
+
+class SignOffRevisionCreate(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 3:
+            raise ValueError("A revision reason of at least 3 characters is required")
+        return normalized
 
 
 class SignOffListOut(ORMModel):
@@ -2201,6 +2219,9 @@ class SignOffListOut(ORMModel):
     requester_id: Optional[int] = None
     reviewed_by_id: Optional[int] = None
     approved_by_id: Optional[int] = None
+    revision_number: int = 1
+    supersedes_id: Optional[int] = None
+    superseded_by_id: Optional[int] = None
     created_at: datetime.datetime
 
 
@@ -2210,6 +2231,9 @@ class SignOffOut(ORMModel):
     security_testing_status: Optional[str] = None
     deployment_recommendation: Optional[str] = None
     conditional_observations: Optional[str] = None
+    conditional_mitigation: Optional[str] = None
+    conditional_owner: Optional[str] = None
+    conditional_target_date: Optional[datetime.date] = None
 
     certificate_summary: Optional[dict] = None
     id: int
@@ -2255,6 +2279,13 @@ class SignOffOut(ORMModel):
     # certificate's old data is still visible if ever needed.
     issued_by_id: Optional[int] = None
     signed_by_id: Optional[int] = None
+    revision_number: int = 1
+    revision_reason: Optional[str] = None
+    supersedes_id: Optional[int] = None
+    supersedes_certificate_id: Optional[str] = None
+    superseded_by_id: Optional[int] = None
+    superseded_by_certificate_id: Optional[str] = None
+    superseded_at: Optional[datetime.datetime] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -3351,6 +3382,7 @@ class TestCycleUpdate(BaseModel):
     owner_id: Optional[int] = None
     blocking_reason: Optional[str] = None
     remarks: Optional[str] = None
+    conditional_clearance: bool = False
     reason: Optional[str] = None  # 2026-08 Reassignment Requirement -- mandatory only when owner_id changes and a previous owner already existed
     # Lets an existing cycle be moved between folders (or back to Unfiled via
     # explicit null) after creation, same latitude TestCaseBulkUpdate/

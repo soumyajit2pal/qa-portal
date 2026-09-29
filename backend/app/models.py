@@ -2349,6 +2349,28 @@ class RequestDocument(Base):
 # ---------------------------------------------------------------------------
 class QASignOff(Base):
     __tablename__ = "qap_signoffs"
+    __table_args__ = (
+        UniqueConstraint("supersedes_id", name="uq_signoff_supersedes"),
+        UniqueConstraint("superseded_by_id", name="uq_signoff_superseded_by"),
+        CheckConstraint(
+            "supersedes_id IS NULL OR supersedes_id <> id",
+            name="ck_signoff_no_self_revision",
+        ),
+        # Oracle has no partial indexes. A function-based unique index gives
+        # active workflow rows their request ID as the key and terminal rows
+        # NULL (which Oracle permits repeatedly), closing the concurrent
+        # check-then-insert window at the database boundary.
+        Index(
+            "uq_qap_signoff_active_req",
+            text(
+                "CASE WHEN status IN ('DRAFT','SUBMITTED','SM_APPROVAL_PENDING',"
+                "'RETURNED_BY_SM','DEPT_HEAD_QA_APPROVAL_PENDING',"
+                "'RETURNED_BY_DEPT_HEAD_COE','RETURNED_BY_REQUESTER') "
+                "THEN testing_request_id END"
+            ),
+            unique=True,
+        ),
+    )
     id = pk_column()
     certificate_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["SIGNOFF"]))
     certificate_data_json = Column(Text, nullable=True)
@@ -2390,6 +2412,9 @@ class QASignOff(Base):
     security_testing_status = Column(Text)
     deployment_recommendation = Column(Text)
     conditional_observations = Column(Text)
+    conditional_mitigation = Column(Text)
+    conditional_owner = Column(String(150))
+    conditional_target_date = Column(Date)
 
     exit_criteria_notes = Column(Text)
     open_defect_summary = Column(Text)
@@ -2414,6 +2439,16 @@ class QASignOff(Base):
     issued_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     signed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
 
+    # Immutable certificate lineage. A successor points to the issued
+    # certificate it revises; the predecessor points back to that successor
+    # so the UI and exports can navigate both directions without guessing by
+    # dates or certificate numbers. Both are one-to-one by constraint.
+    supersedes_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)
+    superseded_by_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)
+    revision_number = Column(Integer, nullable=False, default=1, server_default="1")
+    revision_reason = Column(Text, nullable=True)
+    superseded_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
@@ -2428,6 +2463,22 @@ class QASignOff(Base):
         uselist=False,
     )
     qa_workspace = relationship("QAWorkspace", foreign_keys=[qa_workspace_id])
+    supersedes = relationship(
+        "QASignOff", foreign_keys=[supersedes_id], remote_side=[id],
+        uselist=False, post_update=True,
+    )
+    superseded_by = relationship(
+        "QASignOff", foreign_keys=[superseded_by_id], remote_side=[id],
+        uselist=False, post_update=True,
+    )
+
+    @property
+    def supersedes_certificate_id(self):
+        return self.supersedes.certificate_id if self.supersedes else None
+
+    @property
+    def superseded_by_certificate_id(self):
+        return self.superseded_by.certificate_id if self.superseded_by else None
 
     @property
     def live_testing_scope(self):
@@ -2962,9 +3013,8 @@ class TestCase(WorkspaceOwnedContent, Base):
     checked_out_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     checked_out_at = Column(DateTime, nullable=True)
     # 2026-08 "Recycle Bin" requirement -- delete_test_case/
-    # bulk_delete_test_cases (governed cases -- ever Approved/Archived/
-    # Rejected -- were already, and remain, permanently blocked from this
-    # entirely; only a still-pre-approval case can ever reach here) now soft-
+    # bulk_delete_test_cases (cases with approval history use Archive unless
+    # currently Rejected; rejected cases can be recycled/restored, never purged) soft-
     # delete instead of a real `db.delete()`: this flag set True, the row
     # otherwise untouched and excluded from every normal list/summary query,
     # recoverable via restore_test_case_from_recycle_bin until an authorized

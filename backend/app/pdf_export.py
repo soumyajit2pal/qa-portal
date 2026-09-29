@@ -58,7 +58,11 @@ DIGITAL_SIGNATURE_NOTICE = "This document does not require a physical signature.
 
 def qa_clearance_export_status(status: Optional[str]) -> Optional[str]:
     """Turn the internal terminal state into audit-friendly export wording."""
-    return QA_CLEARANCE_SIGNED_TYPE if status == "ISSUED" else status
+    if status == "ISSUED":
+        return QA_CLEARANCE_SIGNED_TYPE
+    if status == "SUPERSEDED":
+        return f"{QA_CLEARANCE_SIGNED_TYPE} — Superseded"
+    return status
 
 
 @dataclass(frozen=True)
