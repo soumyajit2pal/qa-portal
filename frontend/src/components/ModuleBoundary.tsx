@@ -1,4 +1,5 @@
-import React, { Component, ReactNode } from 'react'
+import React, { Component, ErrorInfo, ReactNode } from 'react'
+import { useLocation } from 'react-router-dom'
 import { LazyModuleRecoveryContext, nextLazyModuleRecoveryKey } from '../lazyModule'
 import { isLazyModuleLoadError, isLazyModuleTimeoutError } from '../lazyModuleLoader'
 import { Modal } from './Common'
@@ -15,6 +16,22 @@ interface Props {
 interface State {
   error: Error | null
   recoveryKey: number
+  automaticRecoveryAttempts: number
+  automaticRecoveryPending: boolean
+  errorReference: string | null
+}
+
+interface InternalProps extends Props {
+  routeKey: string
+}
+
+const AUTOMATIC_RECOVERY_DELAY_MS = 250
+const AUTOMATIC_RECOVERY_LIMIT = 1
+
+function newErrorReference(): string {
+  const time = Date.now().toString(36).toUpperCase()
+  const random = Math.random().toString(36).slice(2, 7).toUpperCase()
+  return `UI-${time}-${random}`
 }
 
 // A `React.lazy()` chunk can fail to load -- most commonly after a fresh
@@ -25,26 +42,102 @@ interface State {
 // white page with no clue why. This turns that into a visible, actionable
 // message instead.
 //
-// Declared once per Route (see App.tsx) rather than once globally, so
-// navigating to a *different* route/module creates a fresh instance instead
-// of staying stuck showing a stale error for a module that isn't even
-// mounted anymore.
-export default class ModuleBoundary extends Component<Props, State> {
-  state: State = { error: null, recoveryKey: 0 }
-
-  static getDerivedStateFromError(error: Error): Pick<State, 'error'> {
-    return { error }
+// Declared once per Route (see App.tsx) rather than once globally. The
+// location-aware wrapper below also resets a retained boundary whenever the
+// matched URL changes, so an error from one page cannot strand another page
+// behind a stale fallback.
+class ModuleBoundaryImpl extends Component<InternalProps, State> {
+  state: State = {
+    error: null,
+    recoveryKey: 0,
+    automaticRecoveryAttempts: 0,
+    automaticRecoveryPending: false,
+    errorReference: null,
   }
 
-  componentDidCatch(error: Error) {
+  private recoveryTimer: ReturnType<typeof window.setTimeout> | null = null
+
+  static getDerivedStateFromError(error: Error): Pick<State, 'error' | 'errorReference'> {
+    return { error, errorReference: newErrorReference() }
+  }
+
+  componentDidMount() {
+    window.addEventListener('online', this.handleOnline)
+    if (import.meta.hot) import.meta.hot.on('vite:afterUpdate', this.handleHotUpdate)
+  }
+
+  componentDidUpdate(previousProps: InternalProps) {
+    // React Router can retain a boundary instance while swapping matched
+    // route content. Never let an error from the previous location strand a
+    // healthy page behind a stale fallback.
+    if (previousProps.routeKey !== this.props.routeKey && this.state.error) {
+      this.recover(true)
+    }
+  }
+
+  componentWillUnmount() {
+    this.clearRecoveryTimer()
+    window.removeEventListener('online', this.handleOnline)
+    if (import.meta.hot) import.meta.hot.off('vite:afterUpdate', this.handleHotUpdate)
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
     // eslint-disable-next-line no-console
-    console.error(`[ModuleBoundary] Failed to load the ${this.props.moduleName} module:`, error)
+    console.error(
+      `[ModuleBoundary:${this.state.errorReference || 'unreferenced'}] ` +
+      `Failed to display ${this.props.moduleName} at ${this.props.routeKey}:`,
+      error,
+      info.componentStack,
+    )
+
+    // Many of these incidents are one-render races (or a transient chunk
+    // fetch) and the exact same page succeeds immediately on a fresh mount.
+    // Recover once automatically, then stop and retain the actionable
+    // fallback if the error is deterministic. The hard limit prevents an
+    // error/retry loop from hiding a real defect or hammering APIs.
+    if (this.state.automaticRecoveryAttempts < AUTOMATIC_RECOVERY_LIMIT) {
+      this.setState((current) => ({
+        automaticRecoveryAttempts: current.automaticRecoveryAttempts + 1,
+        automaticRecoveryPending: true,
+      }))
+      this.clearRecoveryTimer()
+      this.recoveryTimer = window.setTimeout(() => this.recover(false), AUTOMATIC_RECOVERY_DELAY_MS)
+    }
+  }
+
+  clearRecoveryTimer = () => {
+    if (this.recoveryTimer !== null) {
+      window.clearTimeout(this.recoveryTimer)
+      this.recoveryTimer = null
+    }
+  }
+
+  recover = (resetAutomaticAttempts: boolean) => {
+    this.clearRecoveryTimer()
+    this.setState((current) => ({
+      error: null,
+      recoveryKey: nextLazyModuleRecoveryKey(),
+      automaticRecoveryAttempts: resetAutomaticAttempts ? 0 : current.automaticRecoveryAttempts,
+      automaticRecoveryPending: false,
+      errorReference: null,
+    }))
+  }
+
+  handleOnline = () => {
+    if (this.state.error && isLazyModuleLoadError(this.state.error)) this.recover(false)
+  }
+
+  handleHotUpdate = () => {
+    // In development, React Fast Refresh can briefly render an invalidated
+    // module graph. A successful subsequent Vite update must release the
+    // boundary without requiring a manual page reload.
+    if (this.state.error) this.recover(true)
   }
 
   retry = () => {
     // React.lazy permanently caches a rejection. A new recovery key makes
     // lazyModule() create a fresh wrapper and invoke its importer again.
-    this.setState({ error: null, recoveryKey: nextLazyModuleRecoveryKey() })
+    this.recover(false)
   }
 
   render() {
@@ -66,8 +159,14 @@ export default class ModuleBoundary extends Component<Props, State> {
               ? 'The module files are temporarily unavailable or the application was updated while this page was open. Retry the download, or reload to use the latest version.'
               : 'An unexpected display error occurred. Retry this view; your saved request data is unchanged.'}
           </p>
+          {this.state.automaticRecoveryPending && (
+            <p className="muted small" role="status">Retrying this view automatically…</p>
+          )}
+          {!this.state.automaticRecoveryPending && this.state.errorReference && (
+            <p className="muted small">Display error reference: <code>{this.state.errorReference}</code></p>
+          )}
           <div style={{ display: 'flex', gap: 12 }}>
-            <button className="btn btn-primary" type="button" onClick={this.retry}>Retry</button>
+            <button className="btn btn-primary" type="button" onClick={this.retry} disabled={this.state.automaticRecoveryPending}>Retry</button>
             <button className="btn" type="button" onClick={() => window.location.reload()}>Reload page</button>
           </div>
         </div>
@@ -82,4 +181,13 @@ export default class ModuleBoundary extends Component<Props, State> {
       </LazyModuleRecoveryContext.Provider>
     )
   }
+}
+
+// Location awareness is intentionally kept outside the class boundary. It
+// lets every existing call site reset stale failures on navigation without
+// requiring dozens of routes and modal hosts to manufacture their own keys.
+export default function ModuleBoundary(props: Props) {
+  const location = useLocation()
+  const routeKey = `${location.pathname}${location.search}${location.hash}`
+  return <ModuleBoundaryImpl {...props} routeKey={routeKey} />
 }

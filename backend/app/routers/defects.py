@@ -154,12 +154,14 @@ def _can_touch_defect(db: Session, obj: models.Defect, user: models.User) -> boo
     tester, or a manager. Department Heads need this access because they can
     now decide or reopen Rejected/Not a Defect outcomes and may need to provide
     the supporting evidence required by those decisions."""
+    from ..defect_assignment import current_defect_responsibility
+    responsibility = current_defect_responsibility(obj)
     return (
         _is_manager(db, obj, user)
         or obj.reporter_id == user.id
         or obj.assignee_id == user.id
         or _is_assignee_department_head(db, obj, user)
-        or obj.retest_tester_id == user.id
+        or (responsibility.kind == "qa" and responsibility.owner_id == user.id)
         or user.id in {obj.workflow_state.get('business_owner_id'), obj.workflow_state.get('release_owner_id')}
         or _can_assign(db, obj, user)
         or _can_defer(db, obj, user)
@@ -250,8 +252,11 @@ def _valid_defect_reassignment_departments(obj: models.Defect, previous_assignee
 
 
 def _is_tester(obj: models.Defect, user: models.User) -> bool:
+    from ..defect_assignment import current_defect_responsibility
+    responsibility = current_defect_responsibility(obj)
     return user.id in {
-        obj.retest_tester_id, obj.reporter_id,
+        responsibility.owner_id if responsibility.kind == "qa" else obj.retest_tester_id,
+        obj.reporter_id,
         obj.execution.assigned_to_id if obj.execution else None,
     }
 
@@ -1112,16 +1117,17 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
 def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session = Depends(get_db),
                      current_user: models.User = Depends(get_current_user)):
     obj = _get_mutable(defect_id, db, current_user)
-    if not obj.assignee_id or obj.status not in DEFECT_REASSIGNABLE_STATUSES:
-        raise HTTPException(400, f"{obj.defect_key} does not currently have an assignee that can be reassigned.")
-    previous_assignee_id = obj.assignee_id
-    previous_assigned_at = obj.assigned_at
+    from ..defect_assignment import assignment_error, current_defect_responsibility
+    responsibility = current_defect_responsibility(obj)
+    if not responsibility.owner_id or obj.status not in DEFECT_REASSIGNABLE_STATUSES:
+        raise HTTPException(400, f"{obj.defect_key} does not currently have a responsible owner who can be reassigned.")
+    previous_assignee_id = responsibility.owner_id
+    previous_assigned_at = obj.assigned_at if responsibility.legacy_assignee_override else None
     previous_assignee = db.get(models.User, previous_assignee_id)
-    previous_is_qa = bool(previous_assignee and set(previous_assignee.roles) & _QA_DEFECT_ROLES)
     reassignment.require_can_reassign(
-        current_user, obj.assignee_id,
+        current_user, previous_assignee_id,
         previous_assignee.departments if previous_assignee else None,
-        qa_workspace_id=(obj.qa_workspace_id if previous_is_qa else None),
+        qa_workspace_id=(obj.qa_workspace_id if responsibility.kind == "qa" else None),
     )
     reason = reassignment.require_reason(payload.reason)
     new_assignee = db.get(models.User, payload.assignee_id)
@@ -1131,35 +1137,77 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
         raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
     if new_assignee.id == previous_assignee_id:
         raise HTTPException(400, "Select a different assignee for reassignment")
-    # Reassignment pool: teammates of the current assignee plus configured
-    # QA teams. A developer can therefore hand the defect to another member
-    # of their own team or directly to QA without browsing unrelated
-    # departments. Validate this server-side as well as filtering the UI so
-    # a crafted request cannot route the defect elsewhere or submit a team
-    # that the selected user does not actually belong to.
-    valid_destinations = _valid_defect_reassignment_departments(obj, previous_assignee, new_assignee)
-    if not valid_destinations:
-        raise HTTPException(
-            400,
-            "Select a teammate of the current assignee or a member of the QA team",
-        )
-    destination = payload.assigned_team if payload.assigned_team in valid_destinations else None
-    if not destination:
-        destination = sorted(valid_destinations)[0]
-    department = db.query(models.Department).filter(
-        models.Department.name == destination,
-        models.Department.is_active == True,  # noqa: E712
-    ).first()
-    if not department:
-        raise HTTPException(400, "The selected user's destination Department is not active")
-    obj.assigned_team = department.name
+    if responsibility.field == "assignee_id":
+        # Resolver reassignment remains constrained to the current resolver's
+        # teammates or an eligible QA team, and updates the triage ownership
+        # fields exactly as before.
+        valid_destinations = _valid_defect_reassignment_departments(obj, previous_assignee, new_assignee)
+        if not valid_destinations:
+            raise HTTPException(
+                400,
+                "Select a teammate of the current assignee or a member of the QA team",
+            )
+        destination = payload.assigned_team if payload.assigned_team in valid_destinations else None
+        if not destination:
+            destination = sorted(valid_destinations)[0]
+        candidate_error = assignment_error(db, obj, new_assignee, "assignee_id", destination)
+        if candidate_error:
+            raise HTTPException(400, candidate_error)
+        department = db.query(models.Department).filter(
+            models.Department.name == destination,
+            models.Department.is_active == True,  # noqa: E712
+        ).first()
+        if not department:
+            raise HTTPException(400, "The selected user's destination Department is not active")
+        obj.assigned_team = department.name
+        obj.assignee_id = new_assignee.id
+        obj.assigned_by_id = current_user.id
+        obj.assigned_at = models.now()
+    else:
+        # Once the developer hands off the fix, responsibility belongs to a
+        # dedicated QA/business/release owner field. Updating assignee_id here
+        # was the defect: the UI changed its Assignee label, but Responsible
+        # now and workflow authorization still pointed at the previous stage
+        # owner. Validate and update the field that owns the current stage.
+        candidate_error = assignment_error(db, obj, new_assignee, responsibility.field)
+        if candidate_error:
+            raise HTTPException(400, candidate_error)
+        workflow_state = obj.workflow_state if obj.workflow_json else {}
+        if responsibility.kind == "qa":
+            obj.retest_tester_id = new_assignee.id
+            workflow_state["qa_owner_id"] = new_assignee.id
+            workflow_state["qa_owner_reassigned_at"] = models.now().isoformat()
+            # Repair records affected by the former generic reassign path.
+            # Their resolver was overwritten with the QA owner after the QA
+            # handoff. The immutable Triaged event still contains the real
+            # resolver, so restore it while moving QA ownership to the proper
+            # field.
+            if responsibility.legacy_assignee_override:
+                resolver_event = next((
+                    event for event in reversed(workflow_state.get("history", []))
+                    if event.get("to") == "Triaged" and event.get("assignee_id")
+                ), None)
+                if resolver_event:
+                    resolver_id = int(resolver_event["assignee_id"])
+                    reassignment.record_assignment_change(
+                        db, "DEFECT", obj.id, "DEFECT_ASSIGNEE", current_user,
+                        [obj.assignee_id], [resolver_id],
+                        "Restored resolver after QA-stage owner correction",
+                        previous_assigned_at=obj.assigned_at,
+                    )
+                    obj.assignee_id = resolver_id
+                    obj.assigned_team = resolver_event.get("assigned_team") or obj.assigned_team
+        elif responsibility.kind == "business":
+            workflow_state["business_owner_id"] = new_assignee.id
+        elif responsibility.kind == "release":
+            workflow_state["release_owner_id"] = new_assignee.id
+        if obj.workflow_json:
+            obj.workflow_state_json = json.dumps(workflow_state)
+            obj.workflow_revision += 1
     previous_label = previous_assignee.full_name if previous_assignee else (obj.assignee_name or "Unassigned")
-    obj.assignee_id = new_assignee.id
-    obj.assigned_by_id = current_user.id
-    obj.assigned_at = models.now()
     reassignment.record_reassignment(
         db, "DEFECT", obj.id, current_user, previous_label, new_assignee.full_name, reason,
-        assignment_role="DEFECT_ASSIGNEE",
+        assignment_role=responsibility.assignment_role,
         previous_assignee_ids=[previous_assignee_id],
         new_assignee_ids=[new_assignee.id],
         previous_assigned_at=previous_assigned_at,

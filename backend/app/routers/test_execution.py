@@ -533,7 +533,9 @@ def _require_assigned_runner(obj: models.TestExecution, current_user: models.Use
 
 
 # Governed statuses (defects.py) that no longer represent unresolved
-# development work. "Not a Defect Review" remains active and blocks further
+# development work. A rejected report is a disposition, not an outstanding
+# fix, so it releases the linked execution just like Duplicate/Not a Defect.
+# "Not a Defect Review" remains active and blocks further
 # execution; final "Not a Defect" is included only because the revised flow
 # requires an independent QA reviewer to confirm that outcome first. A
 # Duplicate delegates remediation to its canonical defect, so the duplicate
@@ -541,7 +543,7 @@ def _require_assigned_runner(obj: models.TestExecution, current_user: models.Use
 # The canonical defect still blocks any execution to which it is itself
 # linked while that canonical record remains active.
 _DEFECT_RETEST_CLEAR_STATUSES = (
-    "Deferred", "Closed", "Duplicate", "Not a Defect", "Change Request Raised",
+    "Deferred", "Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised",
 )
 # These dispositions do not represent a delivered fix and therefore do not
 # need environment verification, including for modern workflows.
@@ -549,8 +551,14 @@ _DEFECT_RETEST_CLEAR_STATUSES = (
 # its verification covers this execution's environment. Recorded build values
 # are retained for traceability but never partition verification coverage.
 _DEFECT_UNCONDITIONAL_CLEAR_STATUSES = (
-    "Deferred", "Duplicate", "Not a Defect", "Change Request Raised",
+    "Deferred", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised",
 )
+# A modern Closed defect normally represents a delivered fix and therefore
+# remains locked until verification covers the execution environment. Risk
+# acceptance is different: it is an authorized terminal disposition and has
+# no fix to verify, so keeping the testcase locked would make that workflow
+# impossible to finish.
+_DEFECT_UNCONDITIONAL_CLEAR_RESOLUTIONS = ("Accepted Risk",)
 _DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES = (
     "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened",
     "Not a Defect Review",
@@ -595,13 +603,21 @@ def _defect_blocks_execution(defect, cycle, verification_check=None) -> bool:
 
     Non-remediation outcomes short-circuit before environment verification. This is
     particularly important for Duplicate: a duplicate has no fix or
-    verification of its own, so ``verified_for`` can never clear it. Legacy
-    Closed defects retain their historic clear behavior, while modern Closed
-    defects still need verification for the execution's environment.
+    verification of its own, so ``verified_for`` can never clear it. The same
+    applies to a modern Accepted Risk closure. Legacy Closed defects retain
+    their historic clear behavior, while modern Fixed closures still need
+    verification for the execution's environment.
     Any active canonical defect remains independently authoritative when
     linked.
     """
-    if defect.status in _DEFECT_UNCONDITIONAL_CLEAR_STATUSES:
+    if (
+        defect.status in _DEFECT_UNCONDITIONAL_CLEAR_STATUSES
+        or (
+            defect.status == "Closed"
+            and getattr(defect, "resolution_type", None)
+            in _DEFECT_UNCONDITIONAL_CLEAR_RESOLUTIONS
+        )
+    ):
         return False
     if not getattr(defect, "workflow_json", None):
         return defect.status not in _DEFECT_RETEST_CLEAR_STATUSES
@@ -2897,7 +2913,12 @@ def _detach_governed_defect_execution(
     promoted_execution_id = None
 
     if defect.execution_id == execution.id:
-        promoted_link = (
+        # Oracle rejects FOR UPDATE when SQLAlchemy's .first() adds
+        # FETCH FIRST 1 ROWS ONLY (ORA-02014). Lock the small, ordered set of
+        # remaining trace rows without a row-limit clause, then promote the
+        # first one in Python. Locking all candidates also serializes two
+        # concurrent unlink/promote requests deterministically.
+        promotion_candidates = (
             db.query(models.DefectExecutionLink)
             .filter(
                 models.DefectExecutionLink.defect_id == defect.id,
@@ -2905,8 +2926,9 @@ def _detach_governed_defect_execution(
             )
             .order_by(models.DefectExecutionLink.id.asc())
             .with_for_update()
-            .first()
+            .all()
         )
+        promoted_link = promotion_candidates[0] if promotion_candidates else None
         if promoted_link:
             promoted = (
                 db.query(models.TestExecution)

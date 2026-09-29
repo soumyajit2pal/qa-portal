@@ -1,8 +1,9 @@
 """Modern workflow mutation handler. Uses existing defect scope and actors."""
 import json
 from fastapi import HTTPException
-from .. import models
+from .. import models, reassignment
 from ..constants import Role, ENVIRONMENTS
+from ..defect_assignment import current_defect_responsibility
 from ..defect_workflow import state, policy, transitions, environment_for, production_required
 
 
@@ -18,13 +19,36 @@ def apply_action(db, obj, payload, user):
     s = state(obj)
     p = policy(obj.workflow_json)
     manager = d._is_manager(db, obj, user)
-    assignee = d._is_assignee(obj, user)
-    qa = obj.retest_tester_id == user.id
+    responsibility = current_defect_responsibility(obj)
+    assignee = d._is_assignee(obj, user) and responsibility.kind == 'resolver'
+    qa = responsibility.kind == 'qa' and responsibility.owner_id == user.id
     business = s.get('business_owner_id') == user.id
     release = s.get('release_owner_id') == user.id
     previous = obj.status
     event = {'at': models.now().isoformat(), 'user_id': user.id, 'user_name': user.full_name,
              'iteration': s.get('iteration', 0), 'from': previous}
+
+    # Releases before the stage-owner fix wrote a QA-stage reassignment into
+    # assignee_id. Preserve the latest QA owner, then restore the developer
+    # resolver from the immutable triage event before any transition can move
+    # this record back to a resolver-owned stage such as Reopened.
+    if responsibility.legacy_assignee_override:
+        s['qa_owner_id'] = responsibility.owner_id
+        s['qa_owner_reassigned_at'] = (obj.assigned_at or models.now()).isoformat()
+        resolver_event = next((
+            item for item in reversed(s.get('history', []))
+            if item.get('to') == 'Triaged' and item.get('assignee_id')
+        ), None)
+        if resolver_event:
+            resolver_id = int(resolver_event['assignee_id'])
+            reassignment.record_assignment_change(
+                db, 'DEFECT', obj.id, 'DEFECT_ASSIGNEE', user,
+                [obj.assignee_id], [resolver_id],
+                'Restored resolver after QA-stage owner correction',
+                previous_assigned_at=obj.assigned_at,
+            )
+            obj.assignee_id = resolver_id
+            obj.assigned_team = resolver_event.get('assigned_team') or obj.assigned_team
 
     if payload.evidence_document_ids:
         available = {doc.id: doc for doc in d.doc_store.list_documents(db, d._DOC_MODULE, obj.id)}
@@ -131,7 +155,9 @@ def apply_action(db, obj, payload, user):
             obj.resolution_summary = obj.fix_details
             obj.resolution_type = 'Fixed'
             obj.resolved_at = models.now()
-            obj.retest_tester_id = owner(payload.retest_tester_id, 'QA tester').id
+            qa_owner = owner(payload.retest_tester_id, 'QA tester')
+            obj.retest_tester_id = qa_owner.id
+            s['qa_owner_id'] = qa_owner.id
             s.pop('verification_invalidated', None)
             s['iteration'] = s.get('iteration', 0) + 1
             s['deployed_build'] = obj.fixed_build_version
@@ -149,6 +175,7 @@ def apply_action(db, obj, payload, user):
             if reviewer.id in {user.id, obj.assignee_id}:
                 raise HTTPException(400, 'Select an independent QA reviewer other than the developer/resolver proposing this outcome')
             obj.retest_tester_id = reviewer.id
+            s['qa_owner_id'] = reviewer.id
             obj.not_a_defect_reason = required(payload.remarks, 'Developer rationale')
             evidence_reference = required(payload.reference, 'Developer evidence or requirements reference')
             obj.closed_at = None

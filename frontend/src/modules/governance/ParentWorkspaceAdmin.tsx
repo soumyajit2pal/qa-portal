@@ -9,7 +9,20 @@ import { IconPlus } from '../../components/Icons'
 import { uniqueWorkspaceAccess } from '../../constants'
 import { LocalAdminWorkspaceCandidateOut, QAWorkspaceOut } from '../../types'
 
-type GroupedMember = { user_id: number; user_name: string; roles: string[]; required: boolean }
+type GroupedMember = {
+  user_id: number
+  user_name: string
+  username: string
+  departments: string[]
+  roles: string[]
+  required: boolean
+}
+
+type DirectoryUser = GroupedMember & {
+  inherited: boolean
+  profileRoles: string[]
+  access: 'direct' | 'inherited' | 'none'
+}
 
 function groupedMembers(workspace: QAWorkspaceOut | null): GroupedMember[] {
   const rows = new Map<number, GroupedMember>()
@@ -18,9 +31,13 @@ function groupedMembers(workspace: QAWorkspaceOut | null): GroupedMember[] {
     const current = rows.get(member.user_id) || {
       user_id: member.user_id,
       user_name: member.user_name || `User ${member.user_id}`,
+      username: member.user_username || '',
+      departments: [],
       roles: [],
       required: false,
     }
+    if (!current.username && member.user_username) current.username = member.user_username
+    current.departments = [...new Set([...current.departments, ...(member.user_departments || [])])]
     current.roles.push(member.role)
     current.required ||= member.is_system_administrator
     rows.set(member.user_id, current)
@@ -44,6 +61,7 @@ export default function ParentWorkspaceAdmin() {
   const [workspaceSearch, setWorkspaceSearch] = useState('')
   const [memberSearch, setMemberSearch] = useState('')
   const [accessFilter, setAccessFilter] = useState('all')
+  const [departmentFilter, setDepartmentFilter] = useState('all')
   const [adding, setAdding] = useState(false)
   const [page, setPage] = useState(1)
 
@@ -81,6 +99,29 @@ export default function ParentWorkspaceAdmin() {
     ...inheritedMembers.filter((member) => !directMembers.some((direct) => direct.user_id === member.user_id))
       .map((member) => ({ ...member, inherited: true })),
   ]
+  const displayedMemberIds = new Set(displayedMembers.map((member) => member.user_id))
+  const directoryUsers: DirectoryUser[] = [
+    ...displayedMembers.map((member) => ({
+      ...member,
+      profileRoles: [],
+      access: member.inherited ? 'inherited' as const : 'direct' as const,
+    })),
+    ...candidates.filter((candidate) => !displayedMemberIds.has(candidate.id)).map((candidate) => ({
+      user_id: candidate.id,
+      user_name: candidate.full_name,
+      username: candidate.username,
+      departments: candidate.departments?.length
+        ? candidate.departments
+        : candidate.department ? [candidate.department] : [],
+      roles: [],
+      required: false,
+      inherited: false,
+      profileRoles: candidate.roles || [],
+      access: 'none' as const,
+    })),
+  ]
+  const departmentOptions = [...new Set(directoryUsers.flatMap((member) => member.departments))]
+    .sort((left, right) => left.localeCompare(right))
 
   const loadCandidates = useCallback(async (workspaceId: number) => {
     try {
@@ -90,7 +131,7 @@ export default function ParentWorkspaceAdmin() {
   useEffect(() => {
     let active = true
     setMemberId(''); setCandidates([]); setAdding(false)
-    setMemberSearch(''); setAccessFilter('all'); setPage(1)
+    setMemberSearch(''); setAccessFilter('all'); setDepartmentFilter('all'); setPage(1)
     if (!selectedId) { setCandidateLoading(false); return }
     setCandidateLoading(true)
     api.get<LocalAdminWorkspaceCandidateOut[]>(`/api/workspaces/${selectedId}/member-candidates`)
@@ -99,11 +140,26 @@ export default function ParentWorkspaceAdmin() {
       .finally(() => { if (active) setCandidateLoading(false) })
     return () => { active = false }
   }, [selectedId])
-  useEffect(() => { setPage(1) }, [memberSearch, accessFilter])
-  const visibleMembers = displayedMembers.filter(member =>
-    member.user_name.toLowerCase().includes(memberSearch.trim().toLowerCase())
-    && (accessFilter === 'all' || (accessFilter === 'inherited' ? member.inherited : !member.inherited))
-  ).sort((a, b) => a.user_name.localeCompare(b.user_name))
+  useEffect(() => { setPage(1) }, [memberSearch, accessFilter, departmentFilter])
+  const normalizedMemberSearch = memberSearch.trim().toLowerCase()
+  const visibleMembers = directoryUsers.filter(member => {
+    const matchesSearch = !normalizedMemberSearch || [
+      member.user_name,
+      member.username,
+      ...member.departments,
+      ...member.profileRoles,
+    ].some((value) => value.toLowerCase().includes(normalizedMemberSearch))
+    const matchesAccess = accessFilter === 'all'
+      || (accessFilter === 'access' && member.access !== 'none')
+      || member.access === accessFilter
+    const matchesDepartment = departmentFilter === 'all'
+      || (departmentFilter === '__none__' ? !member.departments.length : member.departments.includes(departmentFilter))
+    return matchesSearch && matchesAccess && matchesDepartment
+  }).sort((left, right) => {
+    const leftDepartment = left.departments[0] || '\uffff'
+    const rightDepartment = right.departments[0] || '\uffff'
+    return leftDepartment.localeCompare(rightDepartment) || left.user_name.localeCompare(right.user_name)
+  })
   const pageCount = Math.max(1, Math.ceil(visibleMembers.length / 12))
   const currentPage = Math.min(page, pageCount)
   const pageMembers = visibleMembers.slice((currentPage - 1) * 12, currentPage * 12)
@@ -127,12 +183,21 @@ export default function ParentWorkspaceAdmin() {
   }
 
   async function addMember() {
-    const candidate = candidates.find((row) => row.id === Number(memberId))
+    await addDirectoryMember(Number(memberId))
+    setMemberId('')
+  }
+
+  async function addDirectoryMember(userId: number) {
+    const candidate = candidates.find((row) => row.id === userId)
     if (!candidate || directMembers.some(member => member.user_id === candidate.id)) return
     await replace([...directMembers, {
-      user_id: candidate.id, user_name: candidate.full_name, roles: ['WORKSPACE_MEMBER'], required: false,
+      user_id: candidate.id,
+      user_name: candidate.full_name,
+      username: candidate.username,
+      departments: candidate.departments || [],
+      roles: ['WORKSPACE_MEMBER'],
+      required: false,
     }])
-    setMemberId('')
   }
 
   function workspaceButton(workspace: QAWorkspaceOut, child = false) {
@@ -164,6 +229,7 @@ export default function ParentWorkspaceAdmin() {
           <button type="button" className="btn btn-primary btn-sm" disabled={busy} aria-expanded={adding} aria-controls="workspace-add-member" onClick={() => setAdding(!adding)}><IconPlus width={14} /> Add member</button>
         </header>
         <div className="members-statistics" aria-label="Membership summary">
+          <div><strong>{directoryUsers.length}</strong><span>Directory users</span></div>
           <div><strong>{displayedMembers.length}</strong><span>People with access</span></div>
           <div><strong>{directMembers.length}</strong><span>Direct memberships</span></div>
           <div><strong>{inheritedMembers.length}</strong><span>Inherited memberships</span></div>
@@ -174,22 +240,26 @@ export default function ParentWorkspaceAdmin() {
             <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setAdding(false)}>Cancel</button></div>
           {!candidateLoading && !availableCandidates.length && <p role="status">No additional users are available to add.</p>}
         </section>}
-        <section className="members-register" aria-label="People with access">
-          <div className="members-toolbar"><label className="members-search"><span className="sr-only">Search members</span><input value={memberSearch} onChange={event => setMemberSearch(event.target.value)} placeholder="Search members…" /></label>
-            <select aria-label="Filter membership source" value={accessFilter} onChange={event => setAccessFilter(event.target.value)}><option value="all">All access</option><option value="direct">Direct access only</option><option value="inherited">Inherited access</option></select>
+        <section className="members-register" aria-label="Workspace user directory">
+          <div className="members-toolbar"><label className="members-search"><span className="sr-only">Search users</span><input value={memberSearch} onChange={event => setMemberSearch(event.target.value)} placeholder="Search name, user ID, department, or role…" /></label>
+            <select aria-label="Filter workspace access" value={accessFilter} onChange={event => setAccessFilter(event.target.value)}><option value="all">All users</option><option value="access">People with access</option><option value="direct">Direct access only</option><option value="inherited">Inherited access</option><option value="none">Not added</option></select>
+            <select aria-label="Filter department" value={departmentFilter} onChange={event => setDepartmentFilter(event.target.value)}><option value="all">All departments</option>{departmentOptions.map(department => <option key={department} value={department}>{department}</option>)}<option value="__none__">No department</option></select>
           </div>
-          <div className="members-table-scroll"><table className="members-table"><thead><tr><th>Member</th><th>Access source</th><th>Permission</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
+          <div className="members-table-scroll"><table className="members-table"><thead><tr><th>User</th><th>Department</th><th>Access source</th><th>Permission</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
             {pageMembers.map(member => <tr key={member.user_id}>
-              <td><div className="members-person"><span className="members-avatar" aria-hidden="true">{member.user_name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()}</span><strong>{member.user_name}</strong></div></td>
-              <td><span className={`members-source ${member.inherited ? 'inherited' : ''}`}>{member.inherited ? 'Inherited' : 'Direct'}</span>{member.inherited && <small className="members-origin">{parent?.name || 'Parent workspace'}</small>}</td>
-              <td><span className="members-permission">{member.required ? 'System administrator' : member.roles.includes('PARENT_WORKSPACE_ADMIN') ? 'Parent administrator' : member.roles.includes('PARENT_WORKSPACE_VIEWER') ? 'Parent viewer' : 'Workspace member'}</span></td>
-              <td>{member.inherited || member.required || member.roles.some(role => role === 'PARENT_WORKSPACE_ADMIN' || role === 'PARENT_WORKSPACE_VIEWER')
+              <td><div className="members-person"><span className="members-avatar" aria-hidden="true">{member.user_name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()}</span><span><strong>{member.user_name}</strong>{member.username && <small>{member.username}</small>}</span></div></td>
+              <td><div className="members-departments">{member.departments.length ? member.departments.map(department => <span key={department}>{department}</span>) : <small>No department</small>}</div></td>
+              <td><span className={`members-source ${member.access}`}>{member.access === 'inherited' ? 'Inherited' : member.access === 'direct' ? 'Direct' : 'Not added'}</span>{member.inherited && <small className="members-origin">{parent?.name || 'Parent workspace'}</small>}</td>
+              <td><span className="members-permission">{member.access === 'none' ? 'No workspace access' : member.required ? 'System administrator' : member.roles.includes('PARENT_WORKSPACE_ADMIN') ? 'Parent administrator' : member.roles.includes('PARENT_WORKSPACE_VIEWER') ? 'Parent viewer' : 'Workspace member'}</span></td>
+              <td>{member.access === 'none'
+                ? <button type="button" className="members-add-inline" disabled={busy || candidateLoading} aria-label={`Add ${member.user_name} to ${selected.name}`} onClick={() => void addDirectoryMember(member.user_id)}>Add</button>
+                : member.inherited || member.required || member.roles.some(role => role === 'PARENT_WORKSPACE_ADMIN' || role === 'PARENT_WORKSPACE_VIEWER')
                 ? <span className="members-managed" title="This access is managed by a System Administrator">Admin managed</span>
                 : <button type="button" className="members-remove" disabled={busy} aria-label={`Remove ${member.user_name} from ${selected.name}`} onClick={() => void replace(directMembers.filter(row => row.user_id !== member.user_id))}>Remove</button>}</td>
             </tr>)}
-            {!pageMembers.length && <tr><td colSpan={4}><div className="members-empty"><strong>{displayedMembers.length ? 'No matching members' : 'No members yet'}</strong><p>{displayedMembers.length ? 'Try another name or access filter.' : 'Add a member to give them access to this workspace.'}</p></div></td></tr>}
+            {!pageMembers.length && <tr><td colSpan={5}><div className="members-empty"><strong>{directoryUsers.length ? 'No matching users' : candidateLoading ? 'Loading department directory…' : 'No users available'}</strong><p>{directoryUsers.length ? 'Try another search, access, or department filter.' : candidateLoading ? 'Active users will appear here shortly.' : 'No active visible users are available for this workspace.'}</p></div></td></tr>}
           </tbody></table></div>
-          <footer className="members-pagination"><span>{visibleMembers.length ? `${(currentPage - 1) * 12 + 1}–${Math.min(currentPage * 12, visibleMembers.length)} of ${visibleMembers.length} members` : '0 members'}</span><div><button type="button" className="btn btn-sm" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}>Previous</button><span>{currentPage} / {pageCount}</span><button type="button" className="btn btn-sm" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)}>Next</button></div></footer>
+          <footer className="members-pagination"><span>{visibleMembers.length ? `${(currentPage - 1) * 12 + 1}–${Math.min(currentPage * 12, visibleMembers.length)} of ${visibleMembers.length} users` : '0 users'}</span><div><button type="button" className="btn btn-sm" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}>Previous</button><span>{currentPage} / {pageCount}</span><button type="button" className="btn btn-sm" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)}>Next</button></div></footer>
         </section>
         <p className="members-guidance">Inherited access and administrator permissions are managed by a System Administrator. Adding a member here does not change their permission profile.</p>
       </main> : <div className="members-empty">Select an available workspace to see its members.</div>}

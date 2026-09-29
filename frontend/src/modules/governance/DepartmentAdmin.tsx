@@ -44,18 +44,40 @@ export default function DepartmentAdmin() {
     setLoading(true)
     setLoadError(null)
     try {
-      const [rows, workspaces, allowedRoles] = await Promise.all([
-        api.get<UserOut[]>('/api/auth/local-admin/users'),
-        api.get<LocalAdminApprovalWorkspaceOut[]>('/api/auth/local-admin/approval-workspaces'),
-        api.get<string[]>('/api/auth/local-admin/assignable-roles'),
+      const [rawRows, rawWorkspaces, rawAllowedRoles] = await Promise.all([
+        api.get<unknown>('/api/auth/local-admin/users'),
+        api.get<unknown>('/api/auth/local-admin/approval-workspaces'),
+        api.get<unknown>('/api/auth/local-admin/assignable-roles'),
       ])
+      if (!Array.isArray(rawRows)) throw new Error('The department user directory returned an invalid response. Please retry.')
+      if (!Array.isArray(rawWorkspaces)) throw new Error('The approval workspace directory returned an invalid response. Please retry.')
+      if (!Array.isArray(rawAllowedRoles)) throw new Error('The assignable-role directory returned an invalid response. Please retry.')
+
+      // Validate and normalize the complete response before publishing any
+      // of it. Previously setUsers(rows) ran before rows.filter(...); a bad
+      // or partially upgraded response could therefore put a non-array into
+      // render state and throw past the page's own inline load-error UI.
+      const allowedRoles = rawAllowedRoles.filter((role): role is string => typeof role === 'string')
+      const rows = (rawRows as UserOut[]).map((row) => ({
+        ...row,
+        roles: Array.isArray(row.roles) ? row.roles : [],
+        departments: Array.isArray(row.departments) ? row.departments : [],
+      }))
+      const workspaces = (rawWorkspaces as LocalAdminApprovalWorkspaceOut[]).map((workspace) => ({
+        ...workspace,
+        coordinator_departments: Array.isArray(workspace.coordinator_departments)
+          ? workspace.coordinator_departments
+          : [],
+      }))
+      const nextReviewRoles = Object.fromEntries(rows.filter((row) => row.needs_role_review).map((row) => [
+        row.id,
+        row.roles.filter((role) => allowedRoles.includes(role)),
+      ]))
+
       setUsers(rows)
       setAssignableRoles(allowedRoles)
       setApprovalWorkspaces(workspaces)
-      setReviewRoles(Object.fromEntries(rows.filter((row) => row.needs_role_review).map((row) => [
-        row.id,
-        row.roles.filter((role) => allowedRoles.includes(role)),
-      ])))
+      setReviewRoles(nextReviewRoles)
     } catch (err) { setLoadError(err) } finally { setLoading(false) }
   }, [])
   useEffect(() => {

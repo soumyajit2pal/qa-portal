@@ -52,8 +52,9 @@ export function availableDefectWorkflowActions(defect: DefectOut, user?: UserOut
   const roles = user.roles || []
   const manager = hasWorkflowRole(user, 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
   const canTriage = manager || roles.includes('QA_ENGINEER')
-  const resolver = defect.assignee_id === user.id
-  const qa = defect.retest_tester_id === user.id
+  const currentOwnership = defectStageOwnership(defect, [])
+  const resolver = currentOwnership.kind === 'resolver' && defect.assignee_id === user.id
+  const qa = currentOwnership.kind === 'qa' && currentOwnership.ownerId === user.id
   const business = state.business_owner_id === user.id
   const release = state.release_owner_id === user.id
   const reporter = defect.reporter_id === user.id
@@ -119,8 +120,9 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
   const roles = user?.roles || []
   const manager = hasWorkflowRole(user, 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
   const canTriage = manager || roles.includes('QA_ENGINEER')
-  const resolver = defect.assignee_id === user?.id
-  const qa = defect.retest_tester_id === user?.id
+  const stageOwnership = defectStageOwnership(defect, users)
+  const resolver = stageOwnership.kind === 'resolver' && defect.assignee_id === user?.id
+  const qa = stageOwnership.kind === 'qa' && stageOwnership.ownerId === user?.id
   const business = state.business_owner_id === user?.id
   const release = state.release_owner_id === user?.id
   const reporter = defect.reporter_id === user?.id
@@ -229,7 +231,6 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
     'Change Request Raised': 'QA found a requirement gap and recorded the related Change Request or enhancement reference.',
     Duplicate: 'This issue is tracked by another defect. Review the linked canonical defect below.',
   }
-  const stageOwnership = defectStageOwnership(defect, users)
   const stageHelp: Record<string, string> = { New: 'Report', Triaged: 'Assess & assign', 'In Progress': 'Investigate & fix', 'Not a Defect Review': 'Independent QA triage', 'Not a Defect': 'QA-confirmed outcome', 'Change Request Raised': 'Enhancement recorded', 'Ready for QA': 'QA handoff', 'QA Testing': 'Test & verify', 'Business Acceptance': 'Business sign-off', 'Ready for Release': 'Release approval', 'Production Verification': 'Verify live fix', Closed: 'Complete' }
   const availableActions = availableDefectWorkflowActions(defect, user)
   const recommendedAction = availableActions.find(target => target === primaryTarget)

@@ -1432,7 +1432,7 @@ function DefectLinks({ executionId, run, readOnly, onChanged, onExecutionChanged
       </form>}
       <ErrorText error={error} title="Defect linking failed" />
       {pendingRemove && <ConfirmModal title="Unlink defect?" message={pendingRemove.defect_url?.startsWith('/defects')
-        ? <p>Unlink governed defect <strong>{pendingRemove.defect_key}</strong> from this testcase execution? The defect and failed attempt remain in history, but this defect will no longer block a new attempt. A successful retry must be recorded as <strong>Retest Passed</strong>.</p>
+        ? <p>Unlink governed defect <strong>{pendingRemove.defect_key}</strong> from this testcase execution? The defect and failed attempt remain in history. This testcase has a previous failed or blocked attempt. A successful retry must be recorded as <strong>Retest Passed</strong>.</p>
         : <p>Remove external defect reference <strong>{pendingRemove.defect_key}</strong> from Attempt #{run.attempt_no}? The external defect itself will not be deleted.</p>}
         confirmLabel="Unlink defect" cancelLabel="Keep link" destructive busy={busy} onConfirm={unlink} onCancel={() => setPendingRemove(null)} />}
     </div>

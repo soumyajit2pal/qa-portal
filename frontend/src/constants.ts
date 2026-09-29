@@ -635,7 +635,7 @@ export const SAST_DAST_ANALYST_REASSIGNABLE_STATUSES: string[] = [
 // Mirrors backend/app/constants.py's DEFECT_REASSIGNABLE_STATUSES exactly --
 // every status where a defect actually has an assignee and is still active.
 // See Defects.tsx's DefectDetail (Reassign action) and ReassignDefectModal.
-export const DEFECT_REASSIGNABLE_STATUSES: string[] = ['Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification']
+export const DEFECT_REASSIGNABLE_STATUSES: string[] = ['Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Ready for QA', 'QA Testing', 'Not a Defect Review', 'Business Acceptance', 'Ready for Release', 'Production Verification']
 
 // SAST/DAST's own "Security Readiness" pre-scan checklists used to be
 // hardcoded here (DEFAULT_SAST_CHECKLIST_ITEMS/DEFAULT_DAST_CHECKLIST_ITEMS)
@@ -1025,14 +1025,17 @@ export const TEST_EXECUTION_TERMINAL_STATUSES: string[] = ['Pass', 'Fail', 'NA',
 export const TEST_EXECUTION_DEFECT_ELIGIBLE_STATUSES: string[] = ['Fail', 'Blocked']
 // Governed statuses (defects.py) that count as "resolved enough to retest
 // against" -- mirrors the backend's own _DEFECT_RETEST_CLEAR_STATUSES
-// (test_execution.py) exactly. A Duplicate is a terminal pointer to the
-// canonical defect and must never keep every execution linked to the retired
-// report locked.
-const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed', 'Duplicate', 'Not a Defect', 'Change Request Raised']
+// (test_execution.py) exactly. Rejected and Duplicate are dispositions, not
+// outstanding fixes, and must never keep executions linked to those retired
+// reports locked. A Closed/Accepted Risk record is also a disposition with no
+// delivered fix to verify; other modern Closed records remain environment-
+// verification dependent.
+const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised']
 
 type ExecutionLinkedDefect = {
   defect_key: string
   status: string
+  resolution_type?: string | null
   related_cr_number?: string | null
   modern_workflow?: boolean
   verified_execution_ids?: number[]
@@ -1042,7 +1045,8 @@ type ExecutionLinkedDefect = {
 // gate on one predicate prevents one UI from continuing to treat a Duplicate
 // as active after the other has been corrected.
 export function defectBlocksExecution(defect: ExecutionLinkedDefect, executionId?: number): boolean {
-  if (['Deferred', 'Duplicate', 'Not a Defect', 'Change Request Raised'].includes(defect.status)) return false
+  if (['Deferred', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'].includes(defect.status)) return false
+  if (defect.status === 'Closed' && defect.resolution_type === 'Accepted Risk') return false
   if (executionId && defect.verified_execution_ids?.includes(executionId)) return false
   return !!defect.modern_workflow || !DEFECT_RETEST_CLEAR_STATUSES.includes(defect.status)
 }

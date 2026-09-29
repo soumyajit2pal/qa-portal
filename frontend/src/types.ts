@@ -164,6 +164,8 @@ export interface QAWorkspaceMemberOut {
   role: string
   is_active: boolean
   user_name?: string | null
+  user_username?: string | null
+  user_departments: string[]
   is_system_administrator: boolean
 }
 
@@ -1843,6 +1845,7 @@ export interface LinkedGovernedDefectRef {
   id: number
   defect_key: string
   status: string
+  resolution_type?: string | null
   related_cr_number?: string | null
 }
 
@@ -1990,7 +1993,7 @@ export interface DefectWorkflowPolicy {
 }
 export interface DefectOut {
   workflow?: DefectWorkflowPolicy | null
-  workflow_state?: { production_impact?: string; business_owner_id?: number; release_owner_id?: number; deployed_build?: string; blocked?: { reason: string; review_date: string }; occurrences?: Record<string, any>[]; history?: Record<string, any>[] }
+  workflow_state?: { production_impact?: string; qa_owner_id?: number; qa_owner_reassigned_at?: string; business_owner_id?: number; release_owner_id?: number; deployed_build?: string; blocked?: { reason: string; review_date: string }; occurrences?: Record<string, any>[]; history?: Record<string, any>[] }
   workflow_revision?: number
   workflow_stages?: string[]
   workflow_transitions?: string[]

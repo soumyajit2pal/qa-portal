@@ -659,10 +659,14 @@ function ReassignDefectModal({ defect, users, onClose, onChanged }: {
   const [reason, setReason] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const currentAssignee = users.find((u) => u.id === defect.assignee_id)
+  const currentOwnership = defectStageOwnership(defect, users)
+  const resolverStage = currentOwnership.kind === 'resolver'
+  const currentAssignee = users.find((u) => u.id === currentOwnership.ownerId)
   const teammateDepartments = userDepartments(currentAssignee)
   const eligibleDepartments = Array.from(new Set(
-    teammateDepartments.length ? teammateDepartments : (defect.assigned_team ? [defect.assigned_team] : []),
+    resolverStage
+      ? (teammateDepartments.length ? teammateDepartments : (defect.assigned_team ? [defect.assigned_team] : []))
+      : teammateDepartments,
   ))
   const eligibleUsers = useUserOptions('defect_reassign', defect.qa_workspace_id, defect.id)
 
@@ -670,6 +674,7 @@ function ReassignDefectModal({ defect, users, onClose, onChanged }: {
     const selectedUser = eligibleUsers.find((candidate) => String(candidate.id) === value)
     setAssigneeId(value ? Number(value) : '')
     if (!selectedUser) { setAssignedTeam(''); return }
+    if (!resolverStage) { setAssignedTeam(''); return }
     const selectedDepartments = userDepartments(selectedUser)
     const destination = eligibleDepartments.find((department) => selectedDepartments.includes(department))
       || selectedDepartments[0] || ''
@@ -690,15 +695,15 @@ function ReassignDefectModal({ defect, users, onClose, onChanged }: {
 
   return <Modal title={`Reassign ${defect.defect_key}`} onClose={onClose} variant="dialog" preventBackdropClose>
     <form onSubmit={submit}>
-      <p className="defect-assignment-current">Currently assigned to <strong>{defect.assignee_name || 'Unassigned'}</strong>{defect.assigned_team ? ` (${defect.assigned_team})` : ''}.</p>
-      <Field label="Eligible reassignment teams">
+      <p className="defect-assignment-current">Currently responsible: <strong>{currentOwnership.ownerName || 'Unassigned'}</strong>{currentOwnership.departmentLabel ? ` (${currentOwnership.departmentLabel})` : ''}.</p>
+      <Field label={resolverStage ? 'Eligible reassignment teams' : 'Eligible stage owners'}>
         <div className="defect-reassignment-scope">
           {eligibleDepartments.map((department) => <span key={department}>{department}</span>)}
-          <span className="qa">QA members in this workspace</span>
+          <span className="qa">{resolverStage ? 'QA members in this workspace' : `${currentOwnership.kind.toUpperCase()} owners in this workspace`}</span>
         </div>
       </Field>
-      <Field label="New Assignee *"><UserAssignSelect value={assigneeId ? String(assigneeId) : ''} onChange={selectAssignee} users={eligibleUsers} placeholder="Search teammates or QA members…" /></Field>
-      {assignedTeam && <p className="muted small defect-reassignment-destination">The defect will be routed to <strong>{assignedTeam}</strong>.</p>}
+      <Field label="New responsible owner *"><UserAssignSelect value={assigneeId ? String(assigneeId) : ''} onChange={selectAssignee} users={eligibleUsers} placeholder={resolverStage ? 'Search teammates or QA members…' : 'Search eligible workflow owners…'} /></Field>
+      {resolverStage && assignedTeam && <p className="muted small defect-reassignment-destination">The defect will be routed to <strong>{assignedTeam}</strong>.</p>}
       <Field label="Reassignment reason *"><textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Required -- why is this defect being reassigned?" /></Field>
       <ErrorText error={error} title="Defect could not be reassigned" />
       <div className="modal-actions">
@@ -892,13 +897,15 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const manager = roles.some((role) => ['ADMIN', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA'].includes(role))
   const canAssign = manager || roles.includes('QA_ENGINEER')
   const applicationOwner = roles.includes('APPLICATION_OWNER')
+  const stageOwnership = defectStageOwnership(defect, users)
   const assignee = !viewOnly && defect.assignee_id === user?.id
+  const activeQaOwnerId = stageOwnership.kind === 'qa' ? stageOwnership.ownerId : defect.retest_tester_id
   const tester = !viewOnly && (
-    defect.retest_tester_id === user?.id
+    activeQaOwnerId === user?.id
     || defect.execution_assignee_id === user?.id
     || defect.reporter_id === user?.id
   )
-  const qaReviewer = !viewOnly && defect.retest_tester_id === user?.id
+  const qaReviewer = !viewOnly && stageOwnership.kind === 'qa' && stageOwnership.ownerId === user?.id
   // 2026-08 Reassignment Requirement -- "Assigned" (above) is only reachable
   // from New/Reopened/Deferred, so this is the only way to change the
   // assignee once work is already under way. Eligible to the current
@@ -906,13 +913,15 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   // (looked up from `users`, since a defect's assigned_team can be routed to
   // any active department, not just QA), or Admin.
   const currentAssigneeUser = users.find((u) => u.id === defect.assignee_id)
+  const currentResponsibleUser = users.find((u) => u.id === stageOwnership.ownerId)
   const qaUser = !roles.includes('ADMIN') && roles.some((role) =>
     ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA'].includes(role))
   const qaDispositionBlocked = defect.assignee_is_requester && qaUser
-  const canReassignDefect = !viewOnly && !!defect.assignee_id
+  const canReassignDefect = !viewOnly && !!stageOwnership.ownerId
     && DEFECT_REASSIGNABLE_STATUSES.includes(defect.status)
-    && canReassign(user, defect.assignee_id, currentAssigneeUser?.departments && currentAssigneeUser.departments.length
-      ? currentAssigneeUser.departments : currentAssigneeUser?.department)
+    && (canReassign(user, stageOwnership.ownerId, currentResponsibleUser?.departments && currentResponsibleUser.departments.length
+      ? currentResponsibleUser.departments : currentResponsibleUser?.department)
+      || (stageOwnership.kind === 'qa' && hasWorkspaceRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA')))
   const assigneeOrDepartmentHead = !!defect.assignee_id
     && canReassign(user, defect.assignee_id, currentAssigneeUser?.departments && currentAssigneeUser.departments.length
       ? currentAssigneeUser.departments : (currentAssigneeUser?.department || defect.assigned_team))
@@ -973,7 +982,6 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const traceRows = defectTraceRows(defect)
   const traceCycleCount = new Set(traceRows.map((row) => row.cycle_id || row.cycle_key).filter(Boolean)).size
   const productionImpact = defect.workflow_state?.production_impact || (defect.environment === 'Production' ? 'Reported in Production' : 'Not assessed')
-  const stageOwnership = defectStageOwnership(defect, users)
   function runAction(action: () => void) {
     setActionsOpen(false)
     action()
@@ -1054,7 +1062,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
           <section><span className="defect-section-label">Reproduction evidence</span><h4>Steps to Reproduce</h4><AuthenticatedMarkdown value={defect.steps_to_reproduce} basePath={`/api/defects/${defect.id}/attachments`} /></section>
           <div className="defect-result-compare"><section className="actual"><h4>Actual Result</h4><AuthenticatedMarkdown value={defect.actual_result} basePath={`/api/defects/${defect.id}/attachments`} /></section><section className="expected"><h4>Expected Result</h4><AuthenticatedMarkdown value={defect.expected_result} basePath={`/api/defects/${defect.id}/attachments`} /></section></div>
         </div>
-        <aside className="defect-detail-aside"><section><span className="defect-section-label">Operating context</span><h4>Defect properties</h4><dl><dt>Application</dt><dd>{defect.application_name}</dd><dt>Module / Feature</dt><dd>{defect.module_feature}</dd><dt>Environment</dt><dd>{defect.environment}</dd><dt>Build</dt><dd>{defect.build_version || '—'}</dd><dt>Reporter</dt><dd>{defect.reporter_name}</dd><dt>Assignee</dt><dd>{defect.assignee_name || 'Unassigned'}</dd></dl></section></aside>
+        <aside className="defect-detail-aside"><section><span className="defect-section-label">Operating context</span><h4>Defect properties</h4><dl><dt>Application</dt><dd>{defect.application_name}</dd><dt>Module / Feature</dt><dd>{defect.module_feature}</dd><dt>Environment</dt><dd>{defect.environment}</dd><dt>Build</dt><dd>{defect.build_version || '—'}</dd><dt>Reporter</dt><dd>{defect.reporter_name}</dd><dt>{defect.workflow ? 'Resolver' : 'Assignee'}</dt><dd>{defect.assignee_name || 'Unassigned'}</dd></dl></section></aside>
       </div>
       </div>
       <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-resolution`} aria-labelledby={`defect-${defect.id}-tab-resolution`} hidden={detailTab !== 'resolution'} tabIndex={0}>

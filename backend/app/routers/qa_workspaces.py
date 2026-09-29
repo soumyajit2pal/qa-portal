@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import models, schemas
 from ..document_portal_storage import DOCUMENT_ROOT, OWNER_FILE, rename_workspace_root, workspace_folder_name, workspace_root
@@ -25,7 +25,10 @@ router = APIRouter(tags=["Workspaces"])
 def _workspace(db: Session, workspace_id: int) -> models.QAWorkspace:
     row = db.query(models.QAWorkspace).options(
         joinedload(models.QAWorkspace.parent_workspace),
-        joinedload(models.QAWorkspace.members).joinedload(models.QAWorkspaceMember.user),
+        joinedload(models.QAWorkspace.members).joinedload(models.QAWorkspaceMember.user)
+            .selectinload(models.User.department_assignments),
+        joinedload(models.QAWorkspace.members).joinedload(models.QAWorkspaceMember.user)
+            .selectinload(models.User.role_assignments),
         joinedload(models.QAWorkspace.department_coordinators).joinedload(models.DepartmentCoordinatorAssignment.user),
         joinedload(models.QAWorkspace.department_coordinators).joinedload(models.DepartmentCoordinatorAssignment.department),
         joinedload(models.QAWorkspace.department_coordinators).joinedload(models.DepartmentCoordinatorAssignment.department_unit),
@@ -100,7 +103,10 @@ def _ensure_workspace_fallback(db: Session, user: models.User, excluded_workspac
 def list_workspaces(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     query = db.query(models.QAWorkspace).options(
         joinedload(models.QAWorkspace.parent_workspace),
-        joinedload(models.QAWorkspace.members).joinedload(models.QAWorkspaceMember.user),
+        joinedload(models.QAWorkspace.members).joinedload(models.QAWorkspaceMember.user)
+            .selectinload(models.User.department_assignments),
+        joinedload(models.QAWorkspace.members).joinedload(models.QAWorkspaceMember.user)
+            .selectinload(models.User.role_assignments),
         joinedload(models.QAWorkspace.department_coordinators).joinedload(models.DepartmentCoordinatorAssignment.user),
         joinedload(models.QAWorkspace.department_coordinators).joinedload(models.DepartmentCoordinatorAssignment.department),
         joinedload(models.QAWorkspace.department_coordinators).joinedload(models.DepartmentCoordinatorAssignment.department_unit),
@@ -375,7 +381,10 @@ def list_workspace_member_candidates(
         models.QAWorkspaceMember.role.in_(PARENT_WORKSPACE_ROLES),
         models.QAWorkspaceMember.is_active == True,  # noqa: E712
     )
-    return db.query(models.User).filter(
+    return db.query(models.User).options(
+        selectinload(models.User.department_assignments),
+        selectinload(models.User.role_assignments),
+    ).filter(
         models.User.is_active == True,  # noqa: E712
         models.User.show_in_user_dropdowns == True,  # noqa: E712
         ~models.User.id.in_(direct_member_ids),

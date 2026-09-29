@@ -566,6 +566,14 @@ class QAWorkspaceMember(Base):
         return self.user.full_name if self.user else None
 
     @property
+    def user_username(self):
+        return self.user.username if self.user else None
+
+    @property
+    def user_departments(self):
+        return self.user.departments if self.user else []
+
+    @property
     def is_system_administrator(self):
         return bool(self.user and self.user.has_role(Role.ADMIN))
 

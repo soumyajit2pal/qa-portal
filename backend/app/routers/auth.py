@@ -698,15 +698,26 @@ def user_options(purpose: str = "lookup", workspace_id: Optional[int] = None,
     if purpose == "defect_reassign":
         if defect_id is None:
             raise HTTPException(400, "Defect is required")
-        from .defects import _get_visible
+        from .defects import _get_visible, _valid_defect_reassignment_departments
+        from ..defect_assignment import assignment_error, current_defect_responsibility
         defect = _get_visible(defect_id, db, current_user)
-        previous = db.get(models.User, defect.assignee_id) if defect.assignee_id else None
-        teams = set(previous.departments if previous else []) or {defect.assigned_team}
-        qa_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
-        rows = [u for u in rows if u.id != defect.assignee_id
-                and (not defect.qa_workspace_id or any(a.is_active and a.workspace_id == defect.qa_workspace_id for a in u.qa_workspace_access))
-                and (not u.has_role(Role.ADMIN) or defect.department in u.departments)
-                and (set(u.roles) & qa_roles or u.has_role(Role.ADMIN) or set(u.departments) & teams)]
+        responsibility = current_defect_responsibility(defect)
+        previous = db.get(models.User, responsibility.owner_id) if responsibility.owner_id else None
+        if responsibility.field == "assignee_id":
+            rows = [
+                u for u in rows
+                if u.id != responsibility.owner_id
+                and any(
+                    assignment_error(db, defect, u, "assignee_id", destination) is None
+                    for destination in _valid_defect_reassignment_departments(defect, previous, u)
+                )
+            ]
+        else:
+            rows = [
+                u for u in rows
+                if u.id != responsibility.owner_id
+                and assignment_error(db, defect, u, responsibility.field) is None
+            ]
     if department and (purpose != "approver" or department_scoped):
         rows = [u for u in rows if department in u.departments]
     if purpose == "approver" and department_scoped and not department:

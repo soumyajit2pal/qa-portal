@@ -2332,6 +2332,8 @@ class QAWorkspaceMemberOut(ORMModel):
     role: str
     is_active: bool
     user_name: Optional[str] = None
+    user_username: Optional[str] = None
+    user_departments: List[str] = []
     is_system_administrator: bool = False
     parent_workspace_id: Optional[int] = None
     parent_workspace_name: Optional[str] = None
@@ -3584,8 +3586,9 @@ class LinkedGovernedDefectRef(ORMModel):
     """A governed Defect (defects.py, not the free-text TestRunDefect above)
     linked to a specific execution slot through its primary execution FK or
     an additional DefectExecutionLink. Reported
-    directly: while any linked defect is active (not Deferred/Closed) the
-    whole execution is locked, and once failed at least once, 'Pass'/'NA'
+    directly: while any linked defect is active (rather than a final
+    disposition or an applicable verified closure) the whole execution is
+    locked, and once failed at least once, 'Pass'/'NA'
     stay permanently blocked -- the frontend needs each linked defect's own
     key + governed status to explain why, not just a yes/no flag. See
     routers/test_execution.py::_execution_status_gate for where this is
@@ -3593,6 +3596,7 @@ class LinkedGovernedDefectRef(ORMModel):
     id: int
     defect_key: str
     status: str
+    resolution_type: Optional[str] = None
     related_cr_number: Optional[str] = None
 
 
