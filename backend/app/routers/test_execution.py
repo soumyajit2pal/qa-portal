@@ -9,7 +9,12 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
 from .. import models, schemas, pagination, email_notifications
-from ..execution_cycles import cycle_unlink_allowed, require_cycle_unlinkable
+from ..execution_cycles import (
+    CYCLE_LINKABLE_FUNCTIONAL_STATUSES,
+    cycle_unlink_allowed,
+    require_cycle_request_linkable,
+    require_cycle_unlinkable,
+)
 from ..database import get_db
 from ..database import SessionLocal
 from ..deps import (
@@ -19,7 +24,12 @@ from ..deps import (
     get_project_or_404 as _get_project_or_404,
     require_project_visibility,
 )
-from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES, format_role_labels
+from ..constants import (
+    Role,
+    QAStatus,
+    TEST_CYCLE_LOCKED_STATUSES,
+    format_role_labels,
+)
 from ..workspace_service import (
     active_workspace_scope_ids, current_workspace_id, selectable_workspace_ids,
     workspace_context,
@@ -71,6 +81,21 @@ _RESULT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 # values. Leave headroom rather than relying on the exact boundary so bulk
 # selection remains portable across Oracle versions and SQLAlchemy drivers.
 _ORACLE_IN_BATCH_SIZE = 900
+
+# The QA Lead Group override exists to recover an execution workflow from an
+# incorrect Functional Request association. It must not rewrite the evidence
+# boundary after clearance has become authoritative. Rejected certificates
+# are intentionally absent: they are terminal history, but correcting the
+# underlying association before creating a revised certificate is legitimate.
+_QA_LEAD_UNLINK_PROTECTED_REQUEST_STATUSES = {
+    QAStatus.QA_SIGNED_OFF,
+    QAStatus.REQUESTER_VERIFICATION,
+    QAStatus.CLOSED,
+    QAStatus.CANCELLED,
+}
+_QA_LEAD_UNLINK_PROTECTED_CERTIFICATE_STATUSES = {
+    "ISSUED", "ISSUED_UNDER_REVIEW", "SUPERSEDED",
+}
 
 
 def _in_batches(values: List[int], size: int = _ORACLE_IN_BATCH_SIZE):
@@ -130,6 +155,86 @@ def _get_cycle_or_404(db: Session, cycle_id: int) -> models.TestCycle:
     return obj
 
 
+def _cycle_request_link_identity(link) -> tuple[str | None, int | None]:
+    if link is None:
+        return None, None
+    return link.child_type, link.child_id
+
+
+def _lock_cycle_update_scope(
+    db: Session,
+    cycle_id: int,
+    *,
+    proposed_functional_request_id: int | None = None,
+) -> tuple[models.TestCycle, dict[int, models.FunctionalRequest]]:
+    """Lock a cycle update in Functional-parent-before-cycle order.
+
+    Retest and governed unlink already use ``FunctionalRequest -> TestCycle``
+    as their global lock order. A generic PATCH must use the same order while
+    also protecting the old association row; otherwise it can read an old
+    link, wait behind Start Execution, and then detach/repoint that now-active
+    request from a stale snapshot.
+
+    The initial link read is only discovery. After all discovered Functional
+    parents are locked in stable ID order, the cycle and its association row
+    are locked and the identity is revalidated. A concurrent relink therefore
+    fails with a refresh-required conflict instead of mutating the wrong
+    request.
+    """
+    preview = _get_cycle_or_404(db, cycle_id)
+    preview_link = db.query(models.TestCycleChildRequestLink).filter_by(
+        cycle_id=cycle_id,
+    ).one_or_none()
+    observed_identity = _cycle_request_link_identity(preview_link)
+
+    request_ids: set[int] = set()
+    if observed_identity[0] == "Functional" and observed_identity[1] is not None:
+        request_ids.add(observed_identity[1])
+    if proposed_functional_request_id is not None:
+        request_ids.add(proposed_functional_request_id)
+
+    locked_requests: dict[int, models.FunctionalRequest] = {}
+    if request_ids:
+        rows = (
+            db.query(models.FunctionalRequest)
+            .filter(models.FunctionalRequest.id.in_(sorted(request_ids)))
+            .order_by(models.FunctionalRequest.id)
+            .populate_existing()
+            .with_for_update()
+            .all()
+        )
+        locked_requests = {row.id: row for row in rows}
+
+    cycle = (
+        db.query(models.TestCycle)
+        .filter(models.TestCycle.id == cycle_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if cycle is None:
+        raise HTTPException(404, "Test Cycle not found")
+    locked_link = (
+        db.query(models.TestCycleChildRequestLink)
+        .filter(models.TestCycleChildRequestLink.cycle_id == cycle_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if _cycle_request_link_identity(locked_link) != observed_identity:
+        raise HTTPException(
+            409,
+            "The Test Cycle request link changed concurrently; refresh before saving",
+        )
+
+    # The preview and locked query resolve to the same identity-mapped object.
+    # Expire the relationship explicitly so every later guard observes the
+    # association row that was just locked/revalidated, not a cached preview.
+    db.expire(cycle, ["child_request_link"])
+    cycle.child_request_link  # reload while the association lock is held
+    return cycle, locked_requests
+
+
 def _require_cycle_visibility(
     db: Session, cycle: models.TestCycle, current_user: models.User,
 ) -> None:
@@ -155,36 +260,251 @@ def _require_execution_visibility(
     return cycle
 
 
-def _require_cycle_request_link_change_allowed(db: Session, link) -> None:
+def _require_cycle_request_link_change_allowed(
+    db: Session,
+    link,
+    *,
+    locked_functional_request: models.FunctionalRequest | None = None,
+) -> None:
     """Protect a Functional execution link regardless of which UI changes it."""
     if not link or link.child_type != "Functional":
         return
-    functional_request = db.get(models.FunctionalRequest, link.child_id)
+    functional_request = locked_functional_request or db.get(
+        models.FunctionalRequest, link.child_id,
+    )
+    if locked_functional_request is not None and locked_functional_request.id != link.child_id:
+        raise HTTPException(
+            409,
+            "The Test Cycle request link changed concurrently; refresh before saving",
+        )
     if functional_request:
         require_cycle_unlinkable(functional_request.status)
 
 
-def _attach_request_link_permissions(db: Session, cycles) -> None:
-    """Expose whether Lifecycle may replace a Functional link without per-cycle queries."""
+def _is_qa_lead_group_member(current_user: models.User) -> bool:
+    """Apply the QA Lead Group hierarchy without a generic Admin bypass.
+
+    Chief Manager QA and AGM QA inherit QA Lead authority, matching the
+    established QA Lead Group used throughout Test Management.
+    """
+    return bool({Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA} & set(current_user.roles))
+
+
+def _signed_certificate_cycle_ids(
+    certificate: models.QASignOff,
+) -> Optional[set[int]]:
+    """Return the signed cycle boundary, or ``None`` when it is unknowable."""
+    snapshot = certificate.certificate_summary
+    if not isinstance(snapshot, dict) or not snapshot:
+        return None
+    protected_ids: set[int] = set()
+    has_cycle_boundary = False
+    for field in ("cycle_ids", "defect_scope_cycle_ids"):
+        values = snapshot.get(field)
+        if values is None:
+            continue
+        if not isinstance(values, list):
+            return None
+        has_cycle_boundary = True
+        for value in values:
+            try:
+                protected_ids.add(int(value))
+            except (TypeError, ValueError):
+                return None
+    if not has_cycle_boundary or not protected_ids:
+        return None
+    return protected_ids
+
+
+def _certificate_protects_cycle(
+    certificate: models.QASignOff,
+    cycle_id: int,
+) -> bool:
+    """Whether signed immutable evidence names (or may name) this cycle.
+
+    Draft/pending/returned certificates are deliberately never passed here:
+    their snapshots will be refreshed and reapproved after a governed unlink.
+    A signed legacy row without a usable snapshot fails closed because the
+    affected evidence boundary cannot be proven safely.
+    """
+    protected_ids = _signed_certificate_cycle_ids(certificate)
+    return protected_ids is None or cycle_id in protected_ids
+
+
+def _is_governed_hold_retest(
+    functional_request: models.FunctionalRequest,
+    certificate: models.QASignOff,
+    cycle: models.TestCycle,
+) -> bool:
+    """Identify the post-hold child that cannot be part of the frozen snapshot."""
+    return bool(
+        cycle.reexecution_of_cycle_id is not None
+        and functional_request.status in {
+            QAStatus.EXECUTION_IN_PROGRESS,
+            QAStatus.DEFECT_RAISED,
+            QAStatus.WAITING_FOR_FIX,
+            QAStatus.RETESTING,
+        }
+        and functional_request.signoff_id == certificate.id
+        and certificate.status == "ISSUED_UNDER_REVIEW"
+    )
+
+
+def _signed_certificate_blocks_unlink(
+    functional_request: models.FunctionalRequest,
+    certificate: models.QASignOff,
+    cycle: models.TestCycle,
+) -> bool:
+    protected_ids = _signed_certificate_cycle_ids(certificate)
+    if protected_ids is None and _is_governed_hold_retest(
+        functional_request, certificate, cycle,
+    ):
+        return False
+    return protected_ids is None or cycle.id in protected_ids
+
+
+def _qa_lead_unlink_blocker(
+    db: Session,
+    functional_request: models.FunctionalRequest,
+    cycle: models.TestCycle,
+) -> Optional[str]:
+    """Return the governance boundary that makes break-glass unlink unsafe."""
+    if functional_request.status in _QA_LEAD_UNLINK_PROTECTED_REQUEST_STATUSES:
+        return (
+            f"Functional Request {functional_request.request_id} is already in "
+            f"{functional_request.status}. Its execution trace cannot be detached after QA sign-off."
+        )
+    certificates = (
+        db.query(models.QASignOff)
+        .filter(
+            models.QASignOff.testing_request_id == functional_request.request_id,
+            models.QASignOff.status.in_(_QA_LEAD_UNLINK_PROTECTED_CERTIFICATE_STATUSES),
+        )
+        .order_by(models.QASignOff.id.desc())
+        .all()
+    )
+    for certificate in certificates:
+        # A Retest child was created only after this certificate entered its
+        # immutable hold, so an old snapshot with no cycle-boundary fields
+        # cannot contain that child. This narrow exception permits correcting
+        # the newly selected child while legacy baseline cycles still fail
+        # closed. Explicit inclusion always remains protected.
+        if _signed_certificate_blocks_unlink(functional_request, certificate, cycle):
+            return (
+                f"QA Clearance Certificate {certificate.certificate_id} is {certificate.status} "
+                "and its immutable signed evidence includes this Test Cycle. "
+                "Create or continue a governed re-execution lineage instead of detaching it."
+            )
+    return None
+
+
+def _reexecution_cycles_with_recorded_work(
+    db: Session,
+    cycle_ids: list[int],
+) -> set[int]:
+    """Batch-resolve re-execution children that contain any evidence."""
+    result: set[int] = set()
+    for batch in _in_batches(list(dict.fromkeys(cycle_ids))):
+        result.update(cycle_id for (cycle_id,) in db.query(
+            models.TestExecution.cycle_id,
+        ).filter(
+            models.TestExecution.cycle_id.in_(batch),
+            or_(
+                models.TestExecution.status.is_(None),
+                models.TestExecution.status != "Not Executed",
+                models.TestExecution.run_version.is_(None),
+                models.TestExecution.run_version != 0,
+                models.TestExecution.actual_result.isnot(None),
+                models.TestExecution.test_run_artifacts.isnot(None),
+                models.TestExecution.defect_id.isnot(None),
+                models.TestExecution.executed_by_id.isnot(None),
+                models.TestExecution.executed_at.isnot(None),
+            ),
+        ).distinct().all())
+        result.update(cycle_id for (cycle_id,) in db.query(
+            models.TestExecution.cycle_id,
+        ).join(
+            models.TestExecutionRun,
+            models.TestExecutionRun.execution_id == models.TestExecution.id,
+        ).filter(models.TestExecution.cycle_id.in_(batch)).distinct().all())
+        # Defensive fail-closed boundary: normal UI flows cannot attach a
+        # defect to an untouched slot, but imported/legacy data can. Cover
+        # direct cycle ownership, primary execution ownership, and the
+        # many-to-many additional-execution link.
+        result.update(cycle_id for (cycle_id,) in db.query(
+            models.Defect.cycle_id,
+        ).filter(models.Defect.cycle_id.in_(batch)).distinct().all() if cycle_id is not None)
+        result.update(cycle_id for (cycle_id,) in db.query(
+            models.TestExecution.cycle_id,
+        ).join(
+            models.Defect,
+            models.Defect.execution_id == models.TestExecution.id,
+        ).filter(models.TestExecution.cycle_id.in_(batch)).distinct().all())
+        result.update(cycle_id for (cycle_id,) in db.query(
+            models.TestExecution.cycle_id,
+        ).join(
+            models.DefectExecutionLink,
+            models.DefectExecutionLink.execution_id == models.TestExecution.id,
+        ).filter(models.TestExecution.cycle_id.in_(batch)).distinct().all())
+    return result
+
+
+def _reexecution_cycle_has_recorded_work(db: Session, cycle_id: int) -> bool:
+    return cycle_id in _reexecution_cycles_with_recorded_work(db, [cycle_id])
+
+
+def _attach_request_link_permissions(
+    db: Session, cycles, current_user: models.User,
+) -> None:
+    """Expose normal and executive link permissions without per-cycle queries."""
     functional_ids = {
         cycle.child_request_link.child_id
         for cycle in cycles
         if cycle.child_request_link and cycle.child_request_link.child_type == "Functional"
     }
-    statuses = dict(
-        db.query(models.FunctionalRequest.id, models.FunctionalRequest.status)
+    requests = {
+        row.id: row
+        for row in db.query(models.FunctionalRequest)
         .filter(models.FunctionalRequest.id.in_(functional_ids))
         .all()
-    ) if functional_ids else {}
+    } if functional_ids else {}
+    signed_certificates_by_request: dict[str, list[models.QASignOff]] = {}
+    reexecution_work_cycle_ids = _reexecution_cycles_with_recorded_work(
+        db,
+        [cycle.id for cycle in cycles if cycle.reexecution_of_cycle_id is not None],
+    )
+    if requests and _is_qa_lead_group_member(current_user):
+        request_keys = [request.request_id for request in requests.values() if request.request_id]
+        signed_certificates = db.query(models.QASignOff).filter(
+                models.QASignOff.testing_request_id.in_(request_keys),
+                models.QASignOff.status.in_(_QA_LEAD_UNLINK_PROTECTED_CERTIFICATE_STATUSES),
+            ).all() if request_keys else []
+        for certificate in signed_certificates:
+            signed_certificates_by_request.setdefault(
+                certificate.testing_request_id, [],
+            ).append(certificate)
     for cycle in cycles:
         link = cycle.child_request_link
         if not link:
             allowed = False
-        elif link.child_type != "Functional" or link.child_id not in statuses:
+        elif link.child_type != "Functional" or link.child_id not in requests:
             allowed = True
         else:
-            allowed = cycle_unlink_allowed(statuses[link.child_id])
+            allowed = cycle_unlink_allowed(requests[link.child_id].status)
         cycle.linked_request_change_allowed = allowed
+        request = requests.get(link.child_id) if link and link.child_type == "Functional" else None
+        signed_cycle_protected = bool(request and any(
+            _signed_certificate_blocks_unlink(request, certificate, cycle)
+            for certificate in signed_certificates_by_request.get(request.request_id, [])
+        ))
+        cycle.linked_request_qa_lead_unlink_allowed = bool(
+            request
+            and not allowed
+            and _is_qa_lead_group_member(current_user)
+            and request.status not in _QA_LEAD_UNLINK_PROTECTED_REQUEST_STATUSES
+            and not signed_cycle_protected
+            and cycle.id not in reexecution_work_cycle_ids
+        )
 
 
 def _get_cycle_folder_or_404(db: Session, folder_id: int) -> models.TestCycleFolder:
@@ -361,28 +681,44 @@ def _validate_cycle_ready(db: Session, cycle: models.TestCycle, start_date, end_
         )
 
 
-def _require_scope_change_permission(db: Session, cycle: models.TestCycle, current_user: models.User) -> None:
-    """CYC-007 "Scope changes after execution starts shall require QA Lead
-    permission and audit reason." Once at least one item in this cycle has
-    a recorded attempt, adding/removing testcase slots is QA Lead Group/
-    Admin-only -- the audit reason half of CYC-007 is satisfied by the
-    ApprovalAction comment every caller of this already writes describing
-    exactly what scope changed and why (e.g. "N testcase(s) removed
-    from ..."). 2026-08 whole-module simplification: the old per-project
-    "Project Lead"/"Owner" TestProjectMember carve-out is gone -- the QA Lead
-    Group system-role set (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA) is the sole
-    authority now, matching can_manage_execution_governance in deps.py."""
-    if current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
-        return
-    has_started = db.query(models.TestExecutionRun.id).join(
+_SCOPE_EXPANSION_REASON_MIN_LENGTH = 10
+
+
+def _cycle_has_recorded_attempts(db: Session, cycle_id: int) -> bool:
+    """Whether the cycle has authoritative, retained execution history.
+
+    TestExecutionRun is the immutable attempt ledger. The helper also gives
+    legacy/inconsistent data a fail-closed fallback when a run exists before
+    the lifecycle status was corrected to In Progress.
+    """
+    return db.query(models.TestExecutionRun.id).join(
         models.TestExecution, models.TestExecutionRun.execution_id == models.TestExecution.id,
-    ).filter(models.TestExecution.cycle_id == cycle.id).first()
-    if has_started:
+    ).filter(models.TestExecution.cycle_id == cycle_id).first() is not None
+
+
+def _scope_expansion_reason(db: Session, cycle: models.TestCycle, reason: Optional[str]) -> Optional[str]:
+    """Require and normalize the audit reason for a post-start addition.
+
+    Adding a new approved testcase does not alter any existing attempt, so
+    every QA execution role that can already contribute to the project may
+    expand an open cycle. Once execution has started, however, the expansion
+    must be explicit and explainable in the cycle audit trail. Removal keeps
+    its separate, stricter evidence-protection rules below.
+    """
+    # "In Progress" is the governed start boundary, even before the first
+    # runner saves a result. Using the lifecycle boundary and locking the
+    # cycle in add_test_cases_to_cycle closes the race where Start Execution
+    # and the first scope expansion could otherwise cross in flight.
+    if cycle.status != "In Progress" and not _cycle_has_recorded_attempts(db, cycle.id):
+        return None
+    normalized = (reason or "").strip()
+    if len(normalized) < _SCOPE_EXPANSION_REASON_MIN_LENGTH:
         raise HTTPException(
-            403,
-            "This cycle already has recorded execution attempts -- only a QA Lead or Administrator "
-            "can change its testcase scope now.",
+            400,
+            "Execution has already started. Provide a scope expansion reason of at least "
+            f"{_SCOPE_EXPANSION_REASON_MIN_LENGTH} characters before adding more testcases.",
         )
+    return normalized
 
 
 # 2026-08 -- reported directly: "'Remove from cycle' should be available
@@ -1152,7 +1488,7 @@ def list_cycles(project_id: int, params: pagination.PageParams = Depends(),
     q = pagination.apply_sort(q, params, sortable={"name": models.TestCycle.name},
                                default_column=models.TestCycle.created_at, id_column=models.TestCycle.id)
     result = pagination.paginate(q, params)
-    _attach_request_link_permissions(db, result.items)
+    _attach_request_link_permissions(db, result.items, current_user)
     return pagination.to_page_response(result, params)
 
 
@@ -1162,6 +1498,7 @@ def list_cycles(project_id: int, params: pagination.PageParams = Depends(),
 )
 def list_functional_request_options(
     project_id: int,
+    cycle_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -1174,11 +1511,24 @@ def list_functional_request_options(
     """
     project = _get_project_or_404(db, project_id)
     require_can_execute_project(db, project.id, current_user)
+    prospective_cycle_status = "Draft"
+    if cycle_id is not None:
+        cycle = db.query(models.TestCycle).filter_by(
+            id=cycle_id, project_id=project_id,
+        ).one_or_none()
+        if not cycle:
+            raise HTTPException(404, "Test Cycle not found in this project")
+        _require_cycle_visibility(db, cycle, current_user)
+        prospective_cycle_status = cycle.status
+    linkable_statuses = set(CYCLE_LINKABLE_FUNCTIONAL_STATUSES)
+    if prospective_cycle_status != "Completed":
+        linkable_statuses.discard(QAStatus.QA_COMPLETED)
     return (
         db.query(models.FunctionalRequest)
         .join(models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id)
         .filter(
             models.FunctionalRequest.request_id.isnot(None),
+            models.FunctionalRequest.status.in_(sorted(linkable_statuses)),
             models.QARequest.qa_workspace_id == getattr(current_user, "active_qa_workspace_id", project.qa_workspace_id),
             models.QARequest.application_master_id == project.application_master_id,
         )
@@ -1209,7 +1559,13 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
     project = _get_project_or_404(db, project_id)
     linked_request = None
     if payload.linked_request_id is not None:
-        linked_request = db.get(models.FunctionalRequest, payload.linked_request_id)
+        linked_request = (
+            db.query(models.FunctionalRequest)
+            .filter(models.FunctionalRequest.id == payload.linked_request_id)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+        )
         if not linked_request or not linked_request.request_id:
             raise HTTPException(404, "Functional QA Request not found")
         if (project.application_master_id is not None
@@ -1218,6 +1574,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
         request_workspace_id = linked_request.qa_request.qa_workspace_id if linked_request.qa_request else None
         if getattr(current_user, "active_qa_workspace_id", project.qa_workspace_id) != request_workspace_id:
             raise HTTPException(400, "The Test Cycle and Functional QA Request must belong to the same workspace")
+        require_cycle_request_linkable(linked_request, "Draft")
     obj = models.TestCycle(
         project_id=project_id, name=name, description=payload.description,
         start_date=payload.start_date, end_date=payload.end_date, created_by_id=current_user.id,
@@ -1243,7 +1600,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
         )
     db.commit()
     db.refresh(obj)
-    _attach_request_link_permissions(db, [obj])
+    _attach_request_link_permissions(db, [obj], current_user)
     return obj
 
 
@@ -1251,7 +1608,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
 def get_cycle(cycle_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_cycle_or_404(db, cycle_id)
     _require_cycle_visibility(db, obj, current_user)
-    _attach_request_link_permissions(db, [obj])
+    _attach_request_link_permissions(db, [obj], current_user)
     return obj
 
 
@@ -1259,11 +1616,25 @@ def get_cycle(cycle_id: int, db: Session = Depends(get_db), current_user: models
 def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     """Edit cycle metadata and enforce the controlled five-state lifecycle."""
-    obj = _get_cycle_or_404(db, cycle_id)
+    data = payload.model_dump(exclude_unset=True)
+    # Authorize against a read-only preview before taking workflow locks, then
+    # acquire the Functional parent(s), Test Cycle and link row in the same
+    # order as Retest/governed unlink. The checks are repeated on the locked
+    # cycle so a concurrent metadata move cannot widen access.
+    preview = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, preview, current_user)
+    _require_active_project(db, preview.project_id)
+    require_can_execute_project(db, preview.project_id, current_user)
+    link_changed = "linked_request_type" in data or "linked_request_id" in data
+    proposed_functional_request_id = data.get("linked_request_id") if link_changed else None
+    obj, locked_functional_requests = _lock_cycle_update_scope(
+        db,
+        cycle_id,
+        proposed_functional_request_id=proposed_functional_request_id,
+    )
     _require_cycle_visibility(db, obj, current_user)
     _require_active_project(db, obj.project_id)
     require_can_execute_project(db, obj.project_id, current_user)
-    data = payload.model_dump(exclude_unset=True)
     blocking_reason = (data.pop("blocking_reason", None) or "").strip()
     remarks = (data.pop("remarks", None) or "").strip()
     conditional_clearance = data.pop("conditional_clearance", False)
@@ -1434,11 +1805,38 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     if start_date > end_date:
         raise HTTPException(400, "Start date cannot be after end date")
     entering_ready = data.get("status") == "Ready" and obj.status != "Ready"
-    link_changed = "linked_request_type" in data or "linked_request_id" in data
     link_type = data.pop("linked_request_type", None)
     link_id = data.pop("linked_request_id", None)
     if link_changed and link_id is not None and link_type != "Functional":
         raise HTTPException(400, "Only Functional QA Requests can be linked to Test Cycles")
+    proposed_linked_request = None
+    if link_changed and link_id is not None:
+        proposed_linked_request = locked_functional_requests.get(link_id)
+        if not proposed_linked_request or not proposed_linked_request.request_id:
+            raise HTTPException(404, "Functional QA Request not found")
+        if (
+            obj.project.application_master_id is not None
+            and proposed_linked_request.application_master_id
+            != obj.project.application_master_id
+        ):
+            raise HTTPException(
+                400,
+                "Select a Functional QA Request for this Test Project's application",
+            )
+        request_workspace_id = (
+            proposed_linked_request.qa_request.qa_workspace_id
+            if proposed_linked_request.qa_request
+            else None
+        )
+        if (obj.origin_workspace_id or obj.project.qa_workspace_id) != request_workspace_id:
+            raise HTTPException(
+                400,
+                "The Test Cycle and Functional QA Request must belong to the same workspace",
+            )
+        require_cycle_request_linkable(
+            proposed_linked_request,
+            data.get("status", obj.status),
+        )
     if (link_changed and obj.child_request_link
             and (link_type, link_id) != (previous_link_type, obj.linked_request_id)):
         _require_cycle_request_link_change_allowed(db, obj.child_request_link)
@@ -1454,8 +1852,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         if link_changed and link_id is not None:
             request_ids.add(link_id)
         for request_id in sorted(request_ids):
-            linked_request = (db.query(models.FunctionalRequest).filter_by(id=request_id)
-                              .populate_existing().with_for_update().one_or_none())
+            linked_request = locked_functional_requests.get(request_id)
             if not linked_request:
                 raise HTTPException(404, "Linked Functional QA Request not found")
             require_request_execution_started(linked_request)
@@ -1469,22 +1866,15 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         if link_id is None:
             obj.child_request_link = None
         else:
-            linked_request = db.get(models.FunctionalRequest, link_id)
-            if not linked_request or not linked_request.request_id:
-                raise HTTPException(404, "Functional QA Request not found")
-            if (obj.project.application_master_id is not None
-                    and linked_request.application_master_id != obj.project.application_master_id):
-                raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
-            request_workspace_id = linked_request.qa_request.qa_workspace_id if linked_request.qa_request else None
-            if (obj.origin_workspace_id or obj.project.qa_workspace_id) != request_workspace_id:
-                raise HTTPException(400, "The Test Cycle and Functional QA Request must belong to the same workspace")
             if obj.child_request_link:
                 obj.child_request_link.child_type = "Functional"
-                obj.child_request_link.child_id = linked_request.id
-                obj.child_request_link.child_key = linked_request.request_id
+                obj.child_request_link.child_id = proposed_linked_request.id
+                obj.child_request_link.child_key = proposed_linked_request.request_id
             else:
                 obj.child_request_link = models.TestCycleChildRequestLink(
-                    child_type="Functional", child_id=linked_request.id, child_key=linked_request.request_id,
+                    child_type="Functional",
+                    child_id=proposed_linked_request.id,
+                    child_key=proposed_linked_request.request_id,
                 )
     if obj.project.application_master_id is None:
         raise HTTPException(400, "Select an Application on this Test Project before continuing Test Lifecycle")
@@ -1559,14 +1949,18 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         )
     db.commit()
     db.refresh(obj)
-    _attach_request_link_permissions(db, [obj])
+    _attach_request_link_permissions(db, [obj], current_user)
     return obj
 
 
 @router.delete("/cycles/{cycle_id}/request-link", response_model=schemas.TestCycleOut)
 def unlink_cycle_request(cycle_id: int, db: Session = Depends(get_db),
                          current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    obj = _get_cycle_or_404(db, cycle_id)
+    preview = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, preview, current_user)
+    _require_active_project(db, preview.project_id)
+    require_can_execute_project(db, preview.project_id, current_user)
+    obj, locked_functional_requests = _lock_cycle_update_scope(db, cycle_id)
     _require_cycle_visibility(db, obj, current_user)
     _require_active_project(db, obj.project_id)
     require_can_execute_project(db, obj.project_id, current_user)
@@ -1574,7 +1968,14 @@ def unlink_cycle_request(cycle_id: int, db: Session = Depends(get_db),
     link = obj.child_request_link
     if not link:
         raise HTTPException(404, "This test cycle does not have a linked request")
-    _require_cycle_request_link_change_allowed(db, link)
+    locked_source = (
+        locked_functional_requests.get(link.child_id)
+        if link.child_type == "Functional"
+        else None
+    )
+    _require_cycle_request_link_change_allowed(
+        db, link, locked_functional_request=locked_source,
+    )
     previous_key = link.child_key
     obj.child_request_link = None
     db.add(models.ApprovalAction(
@@ -1585,7 +1986,197 @@ def unlink_cycle_request(cycle_id: int, db: Session = Depends(get_db),
     ))
     db.commit()
     db.refresh(obj)
-    _attach_request_link_permissions(db, [obj])
+    _attach_request_link_permissions(db, [obj], current_user)
+    return obj
+
+
+@router.post(
+    "/cycles/{cycle_id}/request-link/qa-lead-group-unlink",
+    response_model=schemas.TestCycleOut,
+)
+def qa_lead_group_unlink_cycle_request(
+    cycle_id: int,
+    payload: schemas.QALeadGroupCycleRequestUnlinkIn,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(
+        Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+    )),
+):
+    """Governed recovery for a wrong link after Functional execution starts.
+
+    Normal link mutation remains locked. This dedicated command requires an
+    explicit QA Lead Group role, a durable reason and impact confirmation,
+    and serializes against certificate creation/retest through the Functional
+    Request row lock. For a normal cycle it removes only the association row;
+    execution history remains attached to the standalone Test Cycle. For an
+    untouched re-execution child it is a governed retest cancellation: the
+    lineage pointer is cleared and a held request can move from Execution In
+    Progress back to QA Clearance Change Review so QA can select a replacement.
+    """
+    if not _is_qa_lead_group_member(current_user):
+        raise HTTPException(
+            403,
+            "Governed unlink is available only to the QA Lead Group (QA Lead, Chief Manager QA, or AGM QA).",
+        )
+    # Discover/authorize from an unlocked snapshot, then use the shared
+    # FunctionalRequest -> TestCycle -> association-row lock protocol. The
+    # helper reloads and revalidates the link after every lock, so a concurrent
+    # ordinary PATCH cannot redirect this override to a different request.
+    preview = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, preview, current_user)
+    _require_active_project(db, preview.project_id)
+    require_can_execute_project(db, preview.project_id, current_user)
+    preview_link = preview.child_request_link
+    if not preview_link:
+        raise HTTPException(404, "This test cycle does not have a linked request")
+    if preview_link.child_type != "Functional":
+        raise HTTPException(400, "QA Lead Group unlink supports only Functional QA Requests")
+    obj, locked_functional_requests = _lock_cycle_update_scope(db, cycle_id)
+    _require_cycle_visibility(db, obj, current_user)
+    _require_active_project(db, obj.project_id)
+    require_can_execute_project(db, obj.project_id, current_user)
+    link = obj.child_request_link
+    if not link or link.child_type != "Functional":
+        raise HTTPException(
+            409,
+            "The Test Cycle link changed concurrently; refresh before unlinking",
+        )
+    functional_request = locked_functional_requests.get(link.child_id)
+    if not functional_request or not functional_request.request_id:
+        raise HTTPException(409, "The linked Functional QA Request no longer exists")
+    if cycle_unlink_allowed(functional_request.status):
+        raise HTTPException(
+            409,
+            "This link is not locked yet. Use the standard unlink action instead of the QA Lead Group override.",
+        )
+    blocker = _qa_lead_unlink_blocker(db, functional_request, obj)
+    if blocker:
+        raise HTTPException(409, blocker)
+
+    previous_request_status = functional_request.status
+    retest_reset_detail = ""
+    lineage_parent_id = None
+    lineage_parent_key = None
+    if obj.reexecution_of_cycle_id is not None:
+        # Serialize cancellation against every result/evidence mutation. All
+        # execution writers lock the same slot row; populate_existing ensures
+        # we inspect committed work if one of them completed first.
+        db.query(models.TestExecution).filter(
+            models.TestExecution.cycle_id == obj.id,
+        ).order_by(models.TestExecution.id).populate_existing().with_for_update().all()
+        if _reexecution_cycle_has_recorded_work(db, obj.id):
+            raise HTTPException(
+                409,
+                "This re-execution cycle already contains recorded work and cannot be detached "
+                "from its governed clearance lineage. Complete the retest or create a reviewed "
+                "follow-up after preserving this evidence.",
+            )
+        lineage_parent = obj.reexecution_of_cycle
+        lineage_parent_id = obj.reexecution_of_cycle_id
+        lineage_parent_key = (
+            lineage_parent.cycle_key
+            if lineage_parent
+            else f"cycle #{obj.reexecution_of_cycle_id}"
+        )
+        # An untouched child can be corrected safely, but it must stop
+        # occupying the parent's unique successor slot so QA can select the
+        # right source and create a replacement. If this was the mandatory
+        # held-clearance retest, return the request to the explicit QA review
+        # decision instead of letting old Completed evidence satisfy QA
+        # Complete.
+        obj.reexecution_of_cycle_id = None
+        linked_certificate = (
+            db.get(models.QASignOff, functional_request.signoff_id)
+            if functional_request.signoff_id is not None
+            else None
+        )
+        if linked_certificate and linked_certificate.status == "ISSUED_UNDER_REVIEW":
+            functional_request.status = QAStatus.QA_CHANGE_REVIEW
+            retest_reset_detail = (
+                f" Cleared its re-execution lineage from {lineage_parent_key} and restored "
+                "the Functional Request to QA Clearance Change Review; QA must select Retest "
+                "again before QA can be completed."
+            )
+        else:
+            retest_reset_detail = (
+                f" Cleared its re-execution lineage from {lineage_parent_key}, allowing a "
+                "governed replacement successor to be created."
+            )
+
+    execution_count = db.query(func.count(models.TestExecution.id)).filter(
+        models.TestExecution.cycle_id == obj.id,
+    ).scalar() or 0
+    attempt_count = (
+        db.query(func.count(models.TestExecutionRun.id))
+        .join(
+            models.TestExecution,
+            models.TestExecution.id == models.TestExecutionRun.execution_id,
+        )
+        .filter(models.TestExecution.cycle_id == obj.id)
+        .scalar()
+        or 0
+    )
+    previous_key = functional_request.request_id
+    if lineage_parent_id is not None:
+        audit_decision = "Governed Retest Cancelled"
+        audit_comments = (
+            f"QA Lead Group cancelled untouched governed re-execution cycle {obj.cycle_key} "
+            f"for Functional request {previous_key} while the request was "
+            f"{previous_request_status}. Reason: {payload.reason}. Impact confirmed by the "
+            f"actor. Preserved {execution_count} execution slot(s); no recorded execution "
+            f"work was detached.{retest_reset_detail}"
+        )
+    else:
+        audit_decision = "QA Lead Group Unlink"
+        audit_comments = (
+            f"QA Lead Group override removed Functional request {previous_key} from test cycle "
+            f"{obj.cycle_key} while the request was {previous_request_status}. "
+            f"Reason: {payload.reason}. Impact confirmed by the actor. "
+            f"Preserved {execution_count} execution slot(s), {attempt_count} execution attempt(s), "
+            "and all associated results, defects, and evidence; the cycle is now standalone."
+        )
+    obj.child_request_link = None
+    request_status_changed = functional_request.status != previous_request_status
+    audit_actions = [
+        models.ApprovalAction(
+            entity_type="TEST_CYCLE",
+            entity_id=obj.id,
+            step_name="Request Link",
+            actor_id=current_user.id,
+            actor_role=current_user.roles_csv,
+            decision=audit_decision,
+            comments=audit_comments,
+        ),
+        models.ApprovalAction(
+            entity_type="FUNCTIONAL_REQUEST",
+            entity_id=functional_request.id,
+            step_name="Test Cycle Link",
+            actor_id=current_user.id,
+            actor_role=current_user.roles_csv,
+            decision=audit_decision,
+            comments=audit_comments,
+            previous_state=previous_request_status if request_status_changed else None,
+            new_state=functional_request.status if request_status_changed else None,
+        ),
+    ]
+    if lineage_parent_id is not None:
+        audit_actions.append(models.ApprovalAction(
+            entity_type="TEST_CYCLE",
+            entity_id=lineage_parent_id,
+            step_name="Re-execution",
+            actor_id=current_user.id,
+            actor_role=current_user.roles_csv,
+            decision="Successor Cancelled",
+            comments=(
+                f"Cleared untouched successor {obj.cycle_key} from {lineage_parent_key}; "
+                "the unique successor pointer is available for a governed replacement. "
+                f"Reason: {payload.reason}."
+            ),
+        ))
+    db.add_all(audit_actions)
+    db.commit()
+    db.refresh(obj)
+    _attach_request_link_permissions(db, [obj], current_user)
     return obj
 
 
@@ -1609,12 +2200,23 @@ def delete_cycle(cycle_id: int, db: Session = Depends(get_db),
     one step (same cleanup bulk_remove_executions performs per-slot, applied
     to the whole cycle here), logged as a single audit row before the cycle
     itself is removed."""
-    obj = _get_cycle_or_404(db, cycle_id)
+    preview = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, preview, current_user)
+    _require_active_project(db, preview.project_id)
+    obj, locked_functional_requests = _lock_cycle_update_scope(db, cycle_id)
     _require_cycle_visibility(db, obj, current_user)
     _require_active_project(db, obj.project_id)
     _require_open_cycle(obj)
     require_can_manage_execution_governance(db, obj.project_id, current_user)
-    _require_cycle_request_link_change_allowed(db, obj.child_request_link)
+    link = obj.child_request_link
+    locked_source = (
+        locked_functional_requests.get(link.child_id)
+        if link is not None and link.child_type == "Functional"
+        else None
+    )
+    _require_cycle_request_link_change_allowed(
+        db, link, locked_functional_request=locked_source,
+    )
     executions = db.query(models.TestExecution).filter_by(cycle_id=cycle_id).all()
     is_admin_override = bool(executions) and current_user.has_role(Role.ADMIN)
     if executions and not is_admin_override:
@@ -2165,12 +2767,19 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
     creating a Not-Executed TestExecution row for each -- silently skips any
     that are already in this cycle (the (cycle_id, test_case_id) unique
     constraint means re-adding one would otherwise 500)."""
-    cycle = _get_cycle_or_404(db, cycle_id)
+    preview = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, preview, current_user)
+    _require_active_project(db, preview.project_id)
+    require_can_execute_project(db, preview.project_id, current_user)
+    # Serialize scope expansion against lifecycle completion/relink using the
+    # established Functional parent -> Test Cycle -> link lock order. If add
+    # wins, a concurrent completion sees the new Not Executed rows and stops;
+    # if completion wins, the locked status below rejects this mutation.
+    cycle, _ = _lock_cycle_update_scope(db, cycle_id)
     _require_cycle_visibility(db, cycle, current_user)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
-    _require_scope_change_permission(db, cycle, current_user)
     assigned_runner = None
     if payload.assigned_to_id is not None:
         _require_qa_assignment_manager(current_user)
@@ -2227,6 +2836,14 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
             f"Cannot add {len(not_selectable)} test case(s) because they are in the Recycle Bin or have no Approved, "
             f"non-archived version: {preview}{suffix}",
         )
+    # Require the reason only when this request would actually expand the
+    # scope. A harmless retry containing only already-present testcase IDs
+    # stays idempotent and does not manufacture a misleading audit event.
+    new_case_ids = [case_id for case_id in requested_ids if case_id not in already]
+    scope_expansion_reason = (
+        _scope_expansion_reason(db, cycle, payload.reason)
+        if new_case_ids else None
+    )
     created = []
     for case_id in requested_ids:
         if case_id in already:
@@ -2266,6 +2883,22 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
         )
         db.add(action)
         assignment_actions.append(action)
+    if scope_expansion_reason and created:
+        added_keys = [selected_by_id[execution.test_case_id].test_case_key for execution in created]
+        preview = ", ".join(added_keys[:10])
+        suffix = f" and {len(added_keys) - 10} more" if len(added_keys) > 10 else ""
+        db.add(models.ApprovalAction(
+            entity_type="TEST_CYCLE",
+            entity_id=cycle.id,
+            step_name="Testcase Scope",
+            actor_id=current_user.id,
+            actor_role=current_user.roles_csv,
+            decision="Scope Expanded After Execution Started",
+            comments=(
+                f"Added {len(created)} approved testcase(s) as Not Executed without changing existing "
+                f"attempts or evidence: {preview}{suffix}. Reason: {scope_expansion_reason}"
+            ),
+        ))
     if assigned_runner and created:
         email_notifications.queue_test_cycle_assignment_notification(
             db,
@@ -2337,6 +2970,7 @@ def add_test_cases_from_server_selection(
         user_id = current_user.id
         actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
         assigned_to_id = payload.assigned_to_id
+        scope_expansion_reason = payload.reason
 
         def add_in_background(job_id: str):
             with SessionLocal() as worker_db:
@@ -2355,6 +2989,7 @@ def add_test_cases_from_server_selection(
                         schemas.TestExecutionAdd(
                             test_case_ids=selected_ids,
                             assigned_to_id=assigned_to_id,
+                            reason=scope_expansion_reason,
                         ),
                         worker_db,
                         worker_user,
@@ -2376,6 +3011,7 @@ def add_test_cases_from_server_selection(
         schemas.TestExecutionAdd(
             test_case_ids=selected_ids,
             assigned_to_id=payload.assigned_to_id,
+            reason=payload.reason,
         ),
         db,
         current_user,
@@ -2603,7 +3239,7 @@ def update_execution(execution_id: int, payload: schemas.TestExecutionUpdate, db
     reported directly, this used to overwrite the row's own result in
     place, silently destroying any prior attempt (e.g. a Fail with attached
     evidence, once a later retest logged a Pass)."""
-    obj = _execution_or_404(db, execution_id)
+    obj = _execution_or_404(db, execution_id, lock=True)
     defect_key, _ = _validate_defect_values(payload.defect_id or "")
     _prepare_execution_update(db, obj, payload.status, current_user, defect_key)
     if payload.expected_run_version is not None and payload.expected_run_version != (obj.run_version or 0):
@@ -2799,7 +3435,7 @@ def update_rich_execution_result(
     linked to this exact attempt (not the execution slot as a whole), never
     embedded as unbounded base64 data.
     """
-    obj = _execution_or_404(db, execution_id)
+    obj = _execution_or_404(db, execution_id, lock=True)
     defect_key, validated_defect_url = _validate_defect_values(defect_id, defect_url)
     _prepare_execution_update(db, obj, status_value, current_user, defect_key)
     result_text = actual_result.strip()

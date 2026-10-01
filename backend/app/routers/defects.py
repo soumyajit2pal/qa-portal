@@ -313,7 +313,13 @@ def _required(value, label: str):
 
 
 def _execution_context(db: Session, execution_id: int, request: Optional[models.QARequest]):
-    execution = db.get(models.TestExecution, execution_id)
+    execution = (
+        db.query(models.TestExecution)
+        .filter(models.TestExecution.id == execution_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
     if not execution or not execution.cycle or not execution.test_case:
         raise HTTPException(404, "Test Execution, Test Cycle, or Test Case was not found")
     cycle, test_case = execution.cycle, execution.test_case

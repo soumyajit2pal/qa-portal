@@ -251,6 +251,10 @@ class QAStatus:
     QA_SIGNOFF_PENDING = "QA_SIGNOFF_PENDING"
     QA_SIGNED_OFF = "QA_SIGNED_OFF"
     REQUESTER_VERIFICATION = "REQUESTER_VERIFICATION"
+    # The requester returned an already-issued QA Clearance for discussion.
+    # The issued certificate stays immutable and no successor is created
+    # until QA explicitly chooses whether to resend it, revise it, or retest.
+    QA_CHANGE_REVIEW = "QA_CHANGE_REVIEW"
     CLOSED = "CLOSED"
     CANCELLED = "CANCELLED"
 
@@ -264,7 +268,8 @@ QA_REQUEST_STATUSES = [
     QAStatus.PLANNING, QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN, QAStatus.EXECUTION_IN_PROGRESS,
     QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING,
     QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING, QAStatus.QA_SIGNED_OFF,
-    QAStatus.REQUESTER_VERIFICATION, QAStatus.CLOSED, QAStatus.CANCELLED,
+    QAStatus.REQUESTER_VERIFICATION, QAStatus.QA_CHANGE_REVIEW,
+    QAStatus.CLOSED, QAStatus.CANCELLED,
 ]
 
 # 2026-08 -- reported directly: "once assigned there are no other option to
@@ -368,6 +373,7 @@ QA_REQUEST_STATUS_LABELS = {
     QAStatus.QA_SIGNOFF_PENDING: "QA Clearance Pending",
     QAStatus.QA_SIGNED_OFF: "QA Cleared",
     QAStatus.REQUESTER_VERIFICATION: "Requester Verification",
+    QAStatus.QA_CHANGE_REVIEW: "QA Clearance Change Review",
     QAStatus.CLOSED: "Closed",
     QAStatus.CANCELLED: "Cancelled",
 }
@@ -827,7 +833,7 @@ RISK_TIERS = ["Tier 1 (Critical)", "Tier 2 (High)", "Tier 3 (Medium)", "Tier 4 (
 SIGNOFF_STATUSES = [
     "DRAFT", "SUBMITTED", "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
     "DEPT_HEAD_QA_APPROVAL_PENDING", "RETURNED_BY_DEPT_HEAD_COE", "DEPT_HEAD_COE_REJECTED",
-    "ISSUED", "RETURNED_BY_REQUESTER", "SUPERSEDED", "VOIDED",
+    "ISSUED", "ISSUED_UNDER_REVIEW", "RETURNED_BY_REQUESTER", "SUPERSEDED", "VOIDED",
 ]
 
 # A request may have exactly one certificate in one of these non-terminal
@@ -838,6 +844,10 @@ SIGNOFF_STATUSES = [
 ACTIVE_SIGNOFF_STATUSES = [
     "DRAFT", "SUBMITTED", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
     "DEPT_HEAD_QA_APPROVAL_PENDING", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER",
+    # The signed content stays immutable, but its release authority is on
+    # hold while QA assesses a requester return. Treat the hold as active so
+    # the database still prevents a parallel Draft from being created.
+    "ISSUED_UNDER_REVIEW",
 ]
 
 SIGNOFF_TERMINAL_STATUSES = ["SM_REJECTED", "DEPT_HEAD_COE_REJECTED", "ISSUED", "SUPERSEDED", "VOIDED"]
@@ -853,6 +863,7 @@ SIGNOFF_STATUS_LABELS = {
     "RETURNED_BY_DEPT_HEAD_COE": "Returned by Executive",
     "DEPT_HEAD_COE_REJECTED": "Rejected by Executive",
     "ISSUED": "Issued",
+    "ISSUED_UNDER_REVIEW": "Issued — Under QA Review",
     "RETURNED_BY_REQUESTER": "Returned by Requester",
     "SUPERSEDED": "Superseded",
     "VOIDED": "Voided duplicate",

@@ -767,14 +767,16 @@ ACTIVE_QA_STATUSES = {
     QAStatus.QA_ACTIVITY_INITIATED, QAStatus.PLANNING, QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN,
     QAStatus.EXECUTION_IN_PROGRESS, QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX,
     QAStatus.RETESTING, QAStatus.QA_COMPLETED,
-    QAStatus.QA_SIGNOFF_PENDING, QAStatus.QA_SIGNED_OFF, QAStatus.REQUESTER_VERIFICATION,
+    QAStatus.QA_CHANGE_REVIEW, QAStatus.QA_SIGNOFF_PENDING,
+    QAStatus.QA_SIGNED_OFF, QAStatus.REQUESTER_VERIFICATION,
 }
 
 # Statuses awaiting a decision/action from someone other than the requester --
 # used for the "pending approvals" metric.
 PENDING_APPROVAL_STATUSES = {
     QAStatus.SM_APPROVAL_PENDING, QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING,
-    QAStatus.READINESS_VERIFICATION, QAStatus.QA_SIGNOFF_PENDING, QAStatus.REQUESTER_VERIFICATION,
+    QAStatus.READINESS_VERIFICATION, QAStatus.QA_CHANGE_REVIEW,
+    QAStatus.QA_SIGNOFF_PENDING, QAStatus.REQUESTER_VERIFICATION,
 }
 
 # SAST/DAST statuses that represent an open approval checkpoint (i.e. sitting
@@ -792,7 +794,7 @@ SAST_DAST_PENDING_APPROVAL_STATUSES = {
 TESTER_WORKLOAD_STATUSES = [
     QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN, QAStatus.EXECUTION_IN_PROGRESS,
     QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING,
-    QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING,
+    QAStatus.QA_COMPLETED, QAStatus.QA_CHANGE_REVIEW, QAStatus.QA_SIGNOFF_PENDING,
     QAStatus.QA_SIGNED_OFF, QAStatus.REQUESTER_VERIFICATION,
 ]
 
@@ -809,6 +811,7 @@ FUNCTIONAL_TESTER_LOAD = {
     QAStatus.WAITING_FOR_FIX: 0.00,
     QAStatus.RETESTING: 0.75,
     QAStatus.QA_COMPLETED: 0.15,
+    QAStatus.QA_CHANGE_REVIEW: 0.15,
     QAStatus.QA_SIGNOFF_PENDING: 0.10,
     QAStatus.QA_SIGNED_OFF: 0.10,
     QAStatus.REQUESTER_VERIFICATION: 0.05,
@@ -843,7 +846,8 @@ _WAITING_TESTER_STATUSES = {
     QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, "ASSIGNED_TO_REQUESTER",
 }
 _NEAR_COMPLETE_TESTER_STATUSES = {
-    QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING, QAStatus.QA_SIGNED_OFF,
+    QAStatus.QA_COMPLETED, QAStatus.QA_CHANGE_REVIEW,
+    QAStatus.QA_SIGNOFF_PENDING, QAStatus.QA_SIGNED_OFF,
     QAStatus.REQUESTER_VERIFICATION, "REPORT", "SIGNOFF_PENDING", "SECURITY_COMPLETE", "REPORT_READY",
 }
 
@@ -1689,7 +1693,8 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     critical_pending_q = db.query(models.FunctionalRequest).filter(
         models.FunctionalRequest.status.in_([
             QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, QAStatus.READINESS_VERIFICATION,
-            QAStatus.QA_SIGNOFF_PENDING, QAStatus.REQUESTER_VERIFICATION,
+            QAStatus.QA_CHANGE_REVIEW, QAStatus.QA_SIGNOFF_PENDING,
+            QAStatus.REQUESTER_VERIFICATION,
         ]),
         models.FunctionalRequest.priority == "Critical",
     )
@@ -2086,6 +2091,7 @@ def dashboard_attention_detail(
             "SM_APPROVAL_PENDING": "SM / Peer Reviewer",
             "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
             "READINESS_VERIFICATION": "QA Lead",
+            "QA_CHANGE_REVIEW": "QA",
             "QA_SIGNOFF_PENDING": "QA Lead",
             "REQUESTER_VERIFICATION": "Requester",
             "SECURITY_LEAD_ASSIGNED": "QA Lead",
@@ -2461,6 +2467,7 @@ STAGE_LABELS = {
     QAStatus.WAITING_FOR_FIX: "Fix Pending",
     QAStatus.RETESTING: "Retesting In Progress",
     QAStatus.QA_COMPLETED: "Clearance Request Pending",
+    QAStatus.QA_CHANGE_REVIEW: "QA Clearance Change Review Pending",
     QAStatus.QA_SIGNOFF_PENDING: "QA Clearance Pending",
     QAStatus.QA_SIGNED_OFF: "Requester Verification Pending",
     QAStatus.REQUESTER_VERIFICATION: "Requester Verification Pending",
@@ -2486,7 +2493,8 @@ STAGE_TEAM = {
     QAStatus.DEFECT_RAISED: "Requester",
     QAStatus.WAITING_FOR_FIX: "Requester",
     QAStatus.RETESTING: "QA",
-    QAStatus.QA_COMPLETED: "QA Lead",
+    QAStatus.QA_COMPLETED: "QA",
+    QAStatus.QA_CHANGE_REVIEW: "QA",
     QAStatus.QA_SIGNOFF_PENDING: "QA Lead",
     QAStatus.QA_SIGNED_OFF: "Requester",
     QAStatus.REQUESTER_VERIFICATION: "Requester",

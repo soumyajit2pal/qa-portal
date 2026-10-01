@@ -1,16 +1,18 @@
 """Request-scoped certificate evidence captured independently of live records."""
+import datetime
 import json
 import re
 from collections import Counter
 from datetime import date
 from html import unescape
 from fastapi import HTTPException
-from sqlalchemy import func, or_
+from sqlalchemy import or_
 from . import models
 from .constants import CERTIFICATE_TYPES, ENVIRONMENT_PIPELINE_ORDER, QAStatus, SAST_DAST_CLEARANCE_RESOLVED_STATUSES
 
 TERMINAL = {'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'}
 EXECUTION_STATUSES = ['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed']
+EXECUTION_POPULATION_BASIS = 'unique_testcase_latest'
 FULL_CLEARANCE_EXECUTION_STATUSES = {'Pass', 'Retest Passed', 'NA'}
 CLEARANCE_TYPES = {'Full Clearance', 'Conditional Clearance'}
 CLEARANCE_SOURCE_STATUSES = {QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING}
@@ -41,8 +43,50 @@ def defect_bucket(defect):
     return 'Fix Pending'
 
 
+def latest_testcase_executions(executions):
+    """Return one deterministic latest/effective slot per logical testcase.
+
+    A Functional Request may legitimately have several independent current
+    leaf cycles for the same environment. The same testcase can therefore
+    appear in more than one eligible cycle, but a certificate's "Test cases"
+    figure is a logical-testcase population, not a count of cycle slots.
+
+    An executed slot's latest result becomes effective at ``executed_at``.
+    An untouched slot becomes effective when it was added (``created_at``),
+    which is important for conditional evidence: a newly-added Not Executed
+    testcase must not be hidden by an older Pass from another leaf cycle.
+    The immutable execution id is the final tie-breaker. ``as_aware`` keeps
+    Oracle's timezone-naive DateTime values comparable with newly-created,
+    timezone-aware ORM values.
+
+    Lightweight aggregate callers used by reports/tests may not carry a
+    test_case_id or timestamps. They retain the historical id-based behavior.
+    """
+    minimum = datetime.datetime.min.replace(tzinfo=datetime.UTC)
+
+    def recency(item):
+        effective_at = getattr(item, 'executed_at', None) or getattr(item, 'created_at', None)
+        normalized = (
+            models.as_aware(effective_at).astimezone(datetime.UTC)
+            if effective_at is not None else minimum
+        )
+        return normalized, int(getattr(item, 'id', None) or 0)
+
+    latest = {}
+    for item in executions:
+        test_case_id = getattr(item, 'test_case_id', None)
+        execution_id = getattr(item, 'id', None)
+        key = ('testcase', test_case_id) if test_case_id is not None else (
+            'execution', execution_id if execution_id is not None else id(item)
+        )
+        current = latest.get(key)
+        if current is None or recency(item) > recency(current):
+            latest[key] = item
+    return sorted(latest.values(), key=lambda item: int(getattr(item, 'id', None) or 0))
+
+
 def aggregate(executions, defects):
-    executions = {item.id: item for item in executions}.values()
+    executions = latest_testcase_executions(executions)
     defects = list({item.id: item for item in defects}.values())
     counts = Counter(item.status for item in executions)
     total = sum(counts.values())
@@ -54,7 +98,8 @@ def aggregate(executions, defects):
         rows = [item for item in defects if item.severity == level]
         closed = sum(item.status in TERMINAL for item in rows)
         severity.append({'severity': level, 'open': len(rows) - closed, 'closed': closed, 'total': len(rows)})
-    return {'execution': {'total': total, 'counts': dict(counts), 'pass_pct': round(100 * passed / applicable, 2) if applicable else None},
+    return {'execution_population_basis': EXECUTION_POPULATION_BASIS,
+            'execution': {'total': total, 'counts': dict(counts), 'pass_pct': round(100 * passed / applicable, 2) if applicable else None},
             'defects': {'total': len(defects), 'counts': dict(buckets)}, 'severity': severity,
             'open_critical_high': sum(row['open'] for row in severity if row['severity'] in {'Critical', 'High'})}
 
@@ -151,25 +196,54 @@ def capture(db, obj):
     require_linked_security_resolved(db, source)
     cycles_query = db.query(models.TestCycle).join(models.TestCycleChildRequestLink).filter(
         models.TestCycleChildRequestLink.child_type == 'Functional', models.TestCycleChildRequestLink.child_id == source.id)
-    # A certificate is scoped to its declared tested environment. Build values
-    # remain captured on the certificate and cycles as audit evidence, but they
-    # do not partition eligible execution evidence.
+    # Determine lineage leaves across every linked environment first. If a
+    # successor was (incorrectly, or historically) moved to a different
+    # environment, its predecessor must not reappear as current evidence in
+    # the predecessor's environment merely because the successor was filtered
+    # out. Build values remain captured as audit evidence but do not partition
+    # eligibility.
     environment_tested = (obj.environment_tested or '').strip().lower()
-    if environment_tested:
-        cycles_query = cycles_query.filter(
-            func.lower(func.trim(models.TestCycle.environment)) == environment_tested,
-        )
-    cycles = cycles_query.order_by(models.TestCycle.id).all()
+    all_cycles = cycles_query.order_by(models.TestCycle.id).all()
+    # A re-execution cycle replaces its predecessor for future execution
+    # totals. Keep every historical cycle in the defect scope, though: a
+    # defect raised in an earlier round remains material risk until its own
+    # workflow resolves, even after execution moves to a successor cycle.
+    superseded_cycle_ids = {
+        cycle.reexecution_of_cycle_id
+        for cycle in all_cycles
+        if cycle.reexecution_of_cycle_id is not None
+    }
+    lineage_leaves = [
+        cycle for cycle in all_cycles if cycle.id not in superseded_cycle_ids
+    ]
+    cycles = [
+        cycle for cycle in lineage_leaves
+        if not environment_tested
+        or (cycle.environment or '').strip().lower() == environment_tested
+    ]
     cycle_ids = [cycle.id for cycle in cycles]
+    cycles_by_id = {cycle.id: cycle for cycle in all_cycles}
+    defect_scope_cycle_ids = set()
+    for leaf in cycles:
+        cursor = leaf
+        while cursor is not None and cursor.id not in defect_scope_cycle_ids:
+            defect_scope_cycle_ids.add(cursor.id)
+            cursor = cycles_by_id.get(cursor.reexecution_of_cycle_id)
+    all_cycle_ids = [
+        cycle.id for cycle in all_cycles if cycle.id in defect_scope_cycle_ids
+    ]
     execution_ids = db.query(models.TestExecution.id).filter(models.TestExecution.cycle_id.in_(cycle_ids))
+    all_execution_ids = db.query(models.TestExecution.id).filter(
+        models.TestExecution.cycle_id.in_(all_cycle_ids)
+    )
     executions = db.query(models.TestExecution).filter(models.TestExecution.id.in_(execution_ids)).order_by(models.TestExecution.id).all()
     defects = db.query(models.Defect).filter(
         or_(models.Defect.qa_workspace_id == obj.qa_workspace_id,
             models.Defect.qa_request.has(models.QARequest.qa_workspace_id == obj.qa_workspace_id)),
         or_(models.Defect.qa_request_id == source.qa_request_id,
-            models.Defect.execution_id.in_(execution_ids),
-            models.Defect.execution_links.any(models.DefectExecutionLink.execution_id.in_(execution_ids)),
-            models.Defect.cycle_id.in_(cycle_ids))).order_by(models.Defect.id).all()
+            models.Defect.execution_id.in_(all_execution_ids),
+            models.Defect.execution_links.any(models.DefectExecutionLink.execution_id.in_(all_execution_ids)),
+            models.Defect.cycle_id.in_(all_cycle_ids))).order_by(models.Defect.id).all()
     result = aggregate(executions, defects)
     result['testing_scope'] = obj.live_testing_scope
     result['assigned_testers'] = assigned_testers(db, source)
@@ -204,8 +278,8 @@ def capture(db, obj):
                   testing_request_id=obj.testing_request_id, qa_request_id=source.qa_request_id,
                   environment=obj.environment_tested, build=obj.build_number,
                   execution_ids=[item.id for item in executions], defect_ids=[item.id for item in defects],
-                  cycle_ids=cycle_ids,
-                  population_note='Latest result per execution slot in linked Functional Request cycles, filtered by certificate environment when specified. Build values are retained as evidence and do not filter eligibility. Defects include direct QA Request links and primary/additional links to these cycles; each defect is counted once. Deferred remains open. Pass % = (Pass + Retest Passed) / (Total − NA). No matching records means no evidence, not a passing result.')
+                  cycle_ids=cycle_ids, defect_scope_cycle_ids=all_cycle_ids,
+                  population_note='Latest effective result per unique testcase across the leaf/latest linked Functional Request cycles of each re-execution lineage. When a testcase appears in more than one eligible leaf cycle, executed_at (or the slot created_at for Not Executed) determines the latest state, with execution ID as a deterministic tie-breaker. All eligible execution slots remain listed in the frozen audit trace even when duplicate testcase memberships are collapsed in the summary. Lineage leaves are determined before filtering by certificate environment, so a successor in another environment cannot make its predecessor current evidence again. Superseded execution rounds remain immutable history and are excluded from execution totals. Build values are retained as evidence and do not filter eligibility. Defects include direct QA Request links and primary/additional links across every historical ancestor of the selected environment-matching leaves; each defect is counted once. Deferred remains open. Pass % = (Pass + Retest Passed) / (Total − NA). No matching records means no evidence, not a passing result.')
     return result
 
 
@@ -232,7 +306,7 @@ def validate(obj, db=None):
         # Never silently replace reviewed evidence. Changes require an explicit refresh.
         if snapshot.get('testing_scope') and live.get('testing_scope') != snapshot['testing_scope']:
             raise HTTPException(409, 'Linked testing scope changed since capture. Refresh the certificate and obtain full reapproval.')
-        for field in ('assigned_testers', 'execution', 'defects', 'severity', 'execution_ids', 'defect_ids', 'observations', 'security', 'execution_results', 'cycle_results', 'defect_results', 'change_request_ids', 'change_description', 'conditional_observations'):
+        for field in ('assigned_testers', 'execution_population_basis', 'execution', 'defects', 'severity', 'execution_ids', 'defect_ids', 'defect_scope_cycle_ids', 'observations', 'security', 'execution_results', 'cycle_results', 'defect_results', 'change_request_ids', 'change_description', 'conditional_observations'):
             if live.get(field) != snapshot.get(field):
                 raise HTTPException(409, 'Linked evidence changed since capture. Refresh the certificate and obtain full reapproval.')
         previous_fields = snapshot.get('certificate_fields') or {}
@@ -326,8 +400,12 @@ def markdown_tables(snapshot):
         def cell(value): return str(value).replace('|', '\\|').replace('\n', ' ')
         return '\n'.join(['| ' + ' | '.join(map(cell, headers)) + ' |', '| ' + ' | '.join(['---'] * len(headers)) + ' |'] + ['| ' + ' | '.join(map(cell, row)) + ' |' for row in rows])
     e = snapshot['execution']
+    unique_population = snapshot.get('execution_population_basis') == EXECUTION_POPULATION_BASIS
+    execution_title = ('Section B – QA Unique Test Case Execution Summary' if unique_population
+                       else 'Section B – QA Test Case Execution Summary (Legacy Slot-Based)')
+    population_header = 'Unique test cases' if unique_population else 'Execution slots'
     identity = table(['CR/EPIC Number', 'Change Description'], [[snapshot.get('change_request_ids', 'Not captured — refresh and reapproval required') or 'Not recorded', snapshot.get('change_description', 'Not captured — refresh and reapproval required') or 'Not recorded']]) + '\n\n'
     return [
-        ('Section B – QA Test Case Execution Summary', identity + table(['Total', *EXECUTION_STATUSES, 'Pass %'], [[e['total'], *[e['counts'].get(s, 0) for s in EXECUTION_STATUSES], e['pass_pct'] if e['pass_pct'] is not None else 'NA']])),
+        (execution_title, identity + table([population_header, *EXECUTION_STATUSES, 'Pass %'], [[e['total'], *[e['counts'].get(s, 0) for s in EXECUTION_STATUSES], e['pass_pct'] if e['pass_pct'] is not None else 'NA']])),
         ('Section C – QA Defect Status Summary', identity + table(['Status', 'Count'], [(s, snapshot['defects']['counts'].get(s, 0)) for s in DEFECT_BUCKETS if snapshot['defects']['counts'].get(s, 0) > 0] + [('Total', snapshot['defects']['total'])])),
         ('Defect Severity-wise Breakdown', table(['Severity', 'Open', 'Closed', 'Total'], [[r['severity'], r['open'], r['closed'], r['total']] for r in snapshot['severity']]))]

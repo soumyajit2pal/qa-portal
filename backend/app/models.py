@@ -1153,6 +1153,18 @@ class FunctionalRequest(Base):
     def signoff_certificate_status(self):
         return self.signoff.status if self.signoff else None
 
+    @property
+    def signoff_certificate_type(self):
+        return self.signoff.certificate_type if self.signoff else None
+
+    @property
+    def signoff_certificate_environment(self):
+        return self.signoff.environment_tested if self.signoff else None
+
+    @property
+    def signoff_certificate_requester_id(self):
+        return self.signoff.requester_id if self.signoff else None
+
     # Delegated (read-only) lookups from the parent gateway QA Request --
     # see the class docstring above for why these aren't duplicated columns.
     @property
@@ -2373,7 +2385,8 @@ class QASignOff(Base):
             text(
                 "CASE WHEN status IN ('DRAFT','SUBMITTED','SM_APPROVAL_PENDING',"
                 "'RETURNED_BY_SM','DEPT_HEAD_QA_APPROVAL_PENDING',"
-                "'RETURNED_BY_DEPT_HEAD_COE','RETURNED_BY_REQUESTER') "
+                "'RETURNED_BY_DEPT_HEAD_COE','RETURNED_BY_REQUESTER',"
+                "'ISSUED_UNDER_REVIEW') "
                 "THEN testing_request_id END"
             ),
             unique=True,
@@ -2519,6 +2532,20 @@ class QASignOff(Base):
     @property
     def request_department(self):
         return self.source_functional_request.department if self.source_functional_request else None
+
+    @property
+    def source_request_status(self):
+        """Live Functional status; never read this from the frozen snapshot."""
+        return self.source_functional_request.status if self.source_functional_request else None
+
+    @property
+    def source_assigned_tester_ids(self):
+        """Live assignment used to authorize governed certificate revision."""
+        return (
+            self.source_functional_request.assigned_tester_ids
+            if self.source_functional_request
+            else None
+        )
 
     @property
     def request_id(self):
@@ -3522,6 +3549,16 @@ class TestCycle(WorkspaceOwnedContent, Base):
     Completed is terminal. Every transition is validated and recorded by
     routers/test_execution.py instead of accepting arbitrary free text."""
     __tablename__ = "qap_test_cycles"
+    __table_args__ = (
+        # One completed evidence set has one governed successor. A later
+        # retest continues from that successor, producing a linear audit
+        # lineage rather than ambiguous parallel replacements.
+        UniqueConstraint("reexecution_of_cycle_id", name="uq_qap_tc_reexec_parent"),
+        CheckConstraint(
+            "reexecution_of_cycle_id IS NULL OR reexecution_of_cycle_id <> id",
+            name="ck_qap_tc_no_self_reexec",
+        ),
+    )
     id = pk_column()
     origin_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
     cycle_key = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["TEST_CYCLE"]))
@@ -3547,11 +3584,29 @@ class TestCycle(WorkspaceOwnedContent, Base):
     # TestCycleFolder's own docstring for the (optional) access restriction
     # a folder can carry.
     folder_id = Column(Integer, ForeignKey("qap_test_cycle_folders.id"), nullable=True, index=True)
+    # A completed cycle is never reopened after it has contributed to an
+    # issued certificate. Retesting creates a fresh Draft child with empty
+    # results while this self-FK preserves the immutable evidence lineage.
+    reexecution_of_cycle_id = Column(
+        Integer, ForeignKey("qap_test_cycles.id"), nullable=True,
+    )
 
     project = relationship("TestProject", back_populates="cycles")
     created_by = relationship("User", foreign_keys=[created_by_id])
     owner = relationship("User", foreign_keys=[owner_id])
     folder = relationship("TestCycleFolder", back_populates="cycles")
+    reexecution_of_cycle = relationship(
+        "TestCycle",
+        foreign_keys=[reexecution_of_cycle_id],
+        remote_side=[id],
+        back_populates="reexecution_successor_cycle",
+    )
+    reexecution_successor_cycle = relationship(
+        "TestCycle",
+        foreign_keys=[reexecution_of_cycle_id],
+        back_populates="reexecution_of_cycle",
+        uselist=False,
+    )
     executions = relationship("TestExecution", back_populates="cycle", cascade="all,delete-orphan")
     child_request_link = relationship("TestCycleChildRequestLink", back_populates="cycle", cascade="all,delete-orphan", uselist=False)
 
@@ -3574,6 +3629,18 @@ class TestCycle(WorkspaceOwnedContent, Base):
     @property
     def owner_name(self):
         return self.owner.full_name if self.owner else None
+
+    @property
+    def reexecution_of_cycle_key(self):
+        return self.reexecution_of_cycle.cycle_key if self.reexecution_of_cycle else None
+
+    @property
+    def reexecution_successor_cycle_id(self):
+        return self.reexecution_successor_cycle.id if self.reexecution_successor_cycle else None
+
+    @property
+    def reexecution_successor_cycle_key(self):
+        return self.reexecution_successor_cycle.cycle_key if self.reexecution_successor_cycle else None
 
 class TestCycleChildRequestLink(Base):
     """Optional Functional QA Request association for a Test Cycle."""

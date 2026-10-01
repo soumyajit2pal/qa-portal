@@ -478,6 +478,7 @@ export interface FunctionalListOut {
   application_master_status?: string | null
   requester_id?: number | null
   qa_lead_id?: number | null
+  assigned_tester_ids?: string | null
   priority?: string | null
   application_name?: string | null
   epic_number?: string | null
@@ -502,6 +503,9 @@ export interface FunctionalOut {
   signoff_id?: number | null
   signoff_certificate_id?: string | null      // 2026-08 -- "LINK THE CERTIFICATE ONCE GENERATED"
   signoff_certificate_status?: string | null
+  signoff_certificate_type?: string | null
+  signoff_certificate_environment?: string | null
+  signoff_certificate_requester_id?: number | null
   created_at: string
   updated_at: string
   qa_request_id?: number | null
@@ -547,8 +551,13 @@ export interface LinkedTestCycleRef {
   project_id: number
   name: string
   status: string
+  environment?: string | null
   start_date?: string | null
   end_date?: string | null
+  reexecution_of_cycle_id?: number | null
+  reexecution_of_cycle_key?: string | null
+  reexecution_successor_cycle_id?: number | null
+  reexecution_successor_cycle_key?: string | null
 }
 
 export interface EligibleTestCycleOut extends LinkedTestCycleRef {
@@ -977,7 +986,17 @@ export interface SuppressionOut {
 }
 
 // ---------------- QA Clearance ----------------
+export interface CertificateExecutionSummary {
+  // When execution_population_basis is unique_testcase_latest, this is one
+  // latest-effective result per unique test_case_id. Historical snapshots
+  // without that marker retain their original execution-slot totals.
+  total: number
+  counts: Record<string, number>
+  pass_pct: number | null
+}
+
 export interface CertificateSummary {
+  execution_population_basis?: 'unique_testcase_latest'
   certificate_fields?: Record<string, string>
   security?: { type: string; request_id: string; status: string; initial_findings?: number | null; current_findings?: number | null; suppression_count?: number | null; suppression_request_ids?: string[] }[]
   assigned_testers?: { id: number; name: string }[]
@@ -989,7 +1008,7 @@ export interface CertificateSummary {
   captured_at: string
   application_name: string
   population_note: string
-  execution: { total: number; counts: Record<string, number>; pass_pct: number | null }
+  execution: CertificateExecutionSummary
   defects: { total: number; counts: Record<string, number> }
   severity: { severity: string; open: number; closed: number; total: number }[]
   open_critical_high: number
@@ -1014,6 +1033,18 @@ export interface SignOffOut {
   certificate_testing_type?: string | null
   testing_type: string
   testing_request_id?: string | null
+  source_request_status?: string | null
+  source_assigned_tester_ids?: string | null
+  // Per-viewer server capability backed by the same authorization helper as
+  // POST /api/signoffs/{id}/revisions. Missing remains fail-closed.
+  revision_actor_allowed?: boolean
+  // Full live workflow capability: actor, source status/current link,
+  // certificate lineage head, and competing-active-certificate checks.
+  can_create_revision?: boolean
+  // Per-viewer recovery capability for an editable certificate whose
+  // original QA author is no longer eligible. The mutation endpoint
+  // re-evaluates this after locking the source request and certificate.
+  can_take_over?: boolean
   change_request_ids?: string | null
   application_name: string
   application_owner?: string | null
@@ -1681,6 +1712,11 @@ export interface TestCycleOut {
   linked_request_id?: number | null
   linked_request_key?: string | null
   linked_request_change_allowed?: boolean
+  linked_request_qa_lead_unlink_allowed?: boolean
+  reexecution_of_cycle_id?: number | null
+  reexecution_of_cycle_key?: string | null
+  reexecution_successor_cycle_id?: number | null
+  reexecution_successor_cycle_key?: string | null
   cycle_type?: string | null
   environment?: string | null
   build?: string | null

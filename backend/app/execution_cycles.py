@@ -20,6 +20,42 @@ _PRE_EXECUTION_FUNCTIONAL_STATUSES = {
     "TEST_DESIGN",
 }
 _STARTABLE_CYCLE_STATUSES = {"Draft", "Ready", "In Progress"}
+_ACTIVE_EXECUTION_FUNCTIONAL_STATUSES = {
+    "EXECUTION_IN_PROGRESS",
+    "DEFECT_RAISED",
+    "WAITING_FOR_FIX",
+    "RETESTING",
+}
+CYCLE_LINKABLE_FUNCTIONAL_STATUSES = (
+    _PRE_EXECUTION_FUNCTIONAL_STATUSES
+    | _ACTIVE_EXECUTION_FUNCTIONAL_STATUSES
+    | {"QA_COMPLETED"}
+)
+
+
+def require_cycle_request_linkable(request, cycle_status: str) -> None:
+    """Allow only live Functional work to acquire a new cycle trace.
+
+    QA_COMPLETED is the one post-execution exception and accepts only a
+    Completed cycle for trace recovery. QA_CHANGE_REVIEW deliberately stays
+    excluded because its Retest command creates the governed lineage child.
+    """
+    if request.status not in CYCLE_LINKABLE_FUNCTIONAL_STATUSES:
+        detail = (
+            "Use the governed Retest decision to create a re-execution cycle."
+            if request.status == "QA_CHANGE_REVIEW"
+            else "The request is no longer in a stage that accepts new Test Cycle links."
+        )
+        raise HTTPException(
+            409,
+            f"Functional Request {request.request_id} is {request.status}. {detail}",
+        )
+    if request.status == "QA_COMPLETED" and cycle_status != "Completed":
+        raise HTTPException(
+            409,
+            "A QA Completed request can only be linked to an already Completed Test Cycle "
+            "for traceability. Reopen testing through the governed Retest workflow.",
+        )
 
 
 def execution_cycle_choice(existing_link, requested_cycle_id: Optional[int]):

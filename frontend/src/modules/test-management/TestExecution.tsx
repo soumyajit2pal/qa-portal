@@ -25,14 +25,14 @@ import ModuleBoundary from '../../components/ModuleBoundary'
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
 // added to it. QA Engineer + QA Lead both execute (Admin bypasses).
-const CAN_EXEC_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA']
+const CAN_EXEC_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']
 // 2026-08 -- reported directly: "'Remove from cycle' should be available
 // only for QA lead ... Same for Test Cycle ... Administration can supersede
 // everything." Matches backend deps.py's can_manage_execution_governance
-// role set exactly (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA) -- deliberately NOT
-// CAN_EXEC_ROLES above, which is missing AGM_QA and includes plain
-// QA_ENGINEER (who may execute but, per this change, may no longer remove
-// a testcase from a cycle or delete a cycle).
+// role set exactly (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA) -- deliberately
+// narrower than CAN_EXEC_ROLES above, which also includes plain QA_ENGINEER
+// (who may execute but may not remove a governed testcase or delete a
+// cycle).
 const QA_LEAD_GROUP_ROLES = ['QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']
 // Reported directly: "Create Test Cycle Folder, in which I can give access
 // department based or user level, same behaviour like project has. Under
@@ -429,6 +429,73 @@ function LinkCycleRequestModal({ cycle, project, requests, onClose, onSaved }: {
   )
 }
 
+function QALeadGroupUnlinkRequestModal({ cycle, onClose, onSaved }: {
+  cycle: TestCycleOut
+  onClose: () => void
+  onSaved: (c: TestCycleOut) => void
+}) {
+  const [reason, setReason] = useState('')
+  const [impactConfirmed, setImpactConfirmed] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+  const normalizedReason = reason.trim()
+  const canSubmit = normalizedReason.length >= 10 && impactConfirmed && !busy
+  const isGovernedRetestCancellation = cycle.reexecution_of_cycle_id != null
+
+  async function unlink() {
+    if (!canSubmit) return
+    setBusy(true); setError(null)
+    try {
+      const saved = await api.post<TestCycleOut>(`/api/test-execution/cycles/${cycle.id}/request-link/qa-lead-group-unlink`, {
+        reason: normalizedReason,
+        impact_confirmed: true,
+      })
+      onSaved(saved)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={`QA Lead Group unlink — ${cycle.cycle_key}`} onClose={onClose} closeDisabled={busy} variant="dialog" preventBackdropClose>
+      <div className="tm-bulk-confirm">
+        <div className="action-error-dialog" role="alert">
+          <div className="action-error-dialog-icon">!</div>
+          <div>
+            <strong>Break-glass workflow action</strong>
+            <span>Functional Request {cycle.linked_request_key}</span>
+            {isGovernedRetestCancellation
+              ? <p>This performs a governed re-test cancellation. It removes the Functional Request association, clears this cycle&apos;s re-execution lineage, and may return the Functional Request from Execution in Progress to QA Change Review. The detached Test Cycle remains available for audit. Both records receive a QA Lead Group audit entry.</p>
+              : <p>This removes only the Functional Request association. The Test Cycle and its execution attempts, results, linked defects, and evidence remain unchanged. Both records receive a QA Lead Group audit entry.</p>}
+          </div>
+        </div>
+        <p className="muted small">{isGovernedRetestCancellation
+          ? 'Use this only to cancel an untouched, incorrectly created clearance re-test cycle. A cycle with recorded work cannot be detached; its evidence must be preserved through the governed workflow.'
+          : 'Use this only to recover an incorrect association after execution has started. The Functional Request cannot complete QA until the correct execution evidence is linked again.'}</p>
+        <Field label="Override reason *">
+          <textarea
+            autoFocus
+            maxLength={2000}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Explain why the current request link is incorrect and what will be linked instead…"
+          />
+          <small className="muted">At least 10 characters. This explanation is permanent audit history.</small>
+        </Field>
+        <label className="workflow-regression-check">
+          <input type="checkbox" checked={impactConfirmed} disabled={busy} onChange={(event) => setImpactConfirmed(event.target.checked)} />
+          <span>{isGovernedRetestCancellation
+            ? 'I confirm this will cancel the governed re-test association, clear its lineage, may restore the Functional Request to QA Change Review, and retain the detached Test Cycle for audit.'
+            : 'I confirm that only the request association will be removed, all execution evidence will be retained, and the correct request must be linked before QA completion.'}</span>
+        </label>
+        <ErrorText error={error} />
+        <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+          <button type="button" className="btn btn-danger" disabled={!canSubmit} onClick={unlink}>{busy ? 'Unlinking…' : 'Unlink with QA Lead override'}</button>
+          <button type="button" className="btn" disabled={busy} onClick={onClose}>Keep current link</button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount, blockedCount, onChanged, onError }: {
   cycle: TestCycleOut
   executionTotal: number
@@ -758,9 +825,10 @@ interface TestCaseCandidatePage {
   has_more: boolean
 }
 
-function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded }: {
+function AddCasesModal({ cycleId, canAssign, requiresScopeChangeReason, runnerCandidates, onClose, onAdded }: {
   cycleId: number
   canAssign: boolean
+  requiresScopeChangeReason: boolean
   runnerCandidates: UserOption[]
   onClose: () => void
   onAdded: (createdCount: number) => void
@@ -792,6 +860,7 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [assignedTo, setAssignedTo] = useState('')
+  const [scopeChangeReason, setScopeChangeReason] = useState('')
   const submittingRef = useRef(false)
   const requestRef = useRef(0)
   const jobController = useRef<AbortController | null>(null)
@@ -903,6 +972,11 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
     // the ongoing work and prevents every other interaction.
     if (submittingRef.current) return
     if (selectedCount === 0) { setError(new Error('Pick at least one test case')); return }
+    const normalizedScopeChangeReason = scopeChangeReason.trim()
+    if (requiresScopeChangeReason && normalizedScopeChangeReason.length < 10) {
+      setError(new Error('Enter a scope expansion reason of at least 10 characters.'))
+      return
+    }
     submittingRef.current = true
     setBusy(true); setError(null)
     try {
@@ -914,6 +988,7 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
         priority: priority || null,
         created_by_id: createdById ? Number(createdById) : null,
         assigned_to_id: assignedTo ? Number(assignedTo) : null,
+        reason: requiresScopeChangeReason ? normalizedScopeChangeReason : null,
       }, 180_000)
       if (result.job_id && result.status !== 'COMPLETED') {
         const controller = new AbortController()
@@ -943,6 +1018,24 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
             <span>Validating approved versions and creating execution records. Large selections may take a moment.</span>
             <small>Please keep this window open.</small>
           </div>
+        </div>
+      )}
+      {requiresScopeChangeReason && (
+        <div className="info-banner" role="note">
+          <strong>Execution has started.</strong>
+          <span>Adding approved testcases expands the governed scope. Existing attempts and evidence stay unchanged, and every new testcase starts as Not Executed.</span>
+          <Field label="Scope expansion reason (required)">
+            <textarea
+              rows={3}
+              maxLength={2000}
+              value={scopeChangeReason}
+              onChange={(event) => setScopeChangeReason(event.target.value)}
+              placeholder="Explain why these testcases are being added after execution started"
+              disabled={busy}
+              required
+            />
+          </Field>
+          <small>This reason will be retained in the cycle activity. Any pending QA Clearance snapshot must be refreshed before approval.</small>
         </div>
       )}
       {canAssign && <div className="tm-add-cases-runner"><div><strong>Assign selected testcases</strong><span>Optional—assign all selected cases to one runner now, then reassign individual rows later.</span></div><UserAssignSelect value={assignedTo} onChange={setAssignedTo} users={runnerCandidates} placeholder="Leave unassigned…" disabled={busy} /></div>}
@@ -1016,7 +1109,7 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
       )}
       <ErrorText error={error} />
       <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-        <button className="btn btn-primary" disabled={busy || selectedCount === 0} onClick={submit}>
+        <button className="btn btn-primary" disabled={busy || selectedCount === 0 || (requiresScopeChangeReason && scopeChangeReason.trim().length < 10)} onClick={submit}>
           {busy ? 'Adding…' : `Add Selected (${selectedCount.toLocaleString()})`}
         </button>
         <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
@@ -2266,6 +2359,7 @@ export default function TestExecution() {
   // LinkCycleRequestModal, a narrower standalone form for just that one
   // field, and the matching backend allowance in update_cycle.
   const [linkingCycleRequest, setLinkingCycleRequest] = useState<TestCycleOut | null>(null)
+  const [qaLeadUnlinkCycle, setQALeadUnlinkCycle] = useState<TestCycleOut | null>(null)
 
   useEffect(() => () => {
     exportJobController.current?.abort()
@@ -2309,7 +2403,12 @@ export default function TestExecution() {
   // workspace boundary must change atomically with the selected project.
   useEffect(() => {
     if ((showNewCycle || editingCycle || linkingCycleRequest) && projectId) {
-      api.get<LinkedRequestRef[]>(`/api/test-execution/projects/${projectId}/functional-request-options`)
+      // A Completed request is eligible only for trace-recovery linking to
+      // an already Completed cycle. Pass the actual cycle so the options
+      // endpoint applies the same status rule as the eventual PATCH.
+      const optionCycleId = linkingCycleRequest?.id ?? editingCycle?.id
+      const query = optionCycleId ? `?${new URLSearchParams({ cycle_id: String(optionCycleId) }).toString()}` : ''
+      api.get<LinkedRequestRef[]>(`/api/test-execution/projects/${projectId}/functional-request-options${query}`)
         .then(setFunctionalRequestOptions)
         .catch(setError)
     }
@@ -2469,7 +2568,7 @@ export default function TestExecution() {
   // separate `filteredExecutions` client-filter step is needed any more.
   const cycleAuditActivity = useMemo(() => cycleActivity.filter((item) => (
     item.decision === 'Commented'
-    || ['Cycle', 'Cycle Details', 'Lifecycle', 'Request Link'].includes(item.step_name || '')
+    || ['Cycle', 'Cycle Details', 'Lifecycle', 'Request Link', 'Testcase Scope'].includes(item.step_name || '')
   )), [cycleActivity])
   const filteredExecutions = executions
   const executedCount = executionSummary?.executed_count ?? 0
@@ -2781,11 +2880,13 @@ export default function TestExecution() {
                       {selectedCycle?.environment && <span className="badge badge-gray">{selectedCycle.environment}</span>}
                       {selectedCycle?.build && <span className="badge badge-gray">Build {selectedCycle.build}</span>}
                       {selectedCycle?.owner_name && <span className="badge badge-gray">Owner: {selectedCycle.owner_name}</span>}
+                      {selectedCycle?.reexecution_of_cycle_key && <span className="badge badge-gray">Re-execution of {selectedCycle.reexecution_of_cycle_key}</span>}
                     </div>
                     {selectedCycle?.linked_request_key && (
                       <div className="tm-cycle-request-link">
                         <b>Linked {selectedCycle.linked_request_type}</b><strong>{selectedCycle.linked_request_key}</strong>
                         {selectedCycle.linked_request_type === 'Functional' && !selectedCycle.linked_request_change_allowed && <span className="badge badge-gray">Link locked</span>}
+                        {canEditSelectedCycle && projectIsActive && selectedCycle.linked_request_qa_lead_unlink_allowed && <button type="button" className="tm-cycle-request-link-action tm-cycle-request-link-action--danger" onClick={() => setQALeadUnlinkCycle(selectedCycle)}>QA Lead override</button>}
                         {canEditSelectedCycle && projectIsActive && selectedCycle.status === 'Completed' && selectedCycle.linked_request_change_allowed && <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Change link</button>}
                       </div>
                     )}
@@ -2809,7 +2910,7 @@ export default function TestExecution() {
                 {cycleIsLocked && (
                   <div className="info-banner">
                     {selectedCycle?.status === 'Blocked'
-                      ? <>This cycle is <strong>Blocked</strong>. Assignment, editing, execution, testcase, defect, evidence, and link changes are disabled until Resume Execution.</>
+                      ? <>This cycle is <strong>Blocked</strong>. Assignment, editing, execution, testcase, defect, evidence, and ordinary link changes are disabled until Resume Execution.{selectedCycle.linked_request_qa_lead_unlink_allowed ? ' A QA Lead Group member may still use the audited override shown above to remove an incorrect request association.' : ''}</>
                       : <>This cycle is <strong>Completed</strong> and read-only. No further changes are allowed, except linking or updating the QA Request it's filed against.</>}
                   </div>
                 )}
@@ -3040,13 +3141,29 @@ export default function TestExecution() {
           onSaved={(saved) => { setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle)); setLinkingCycleRequest(null) }}
         />
       )}
+      {qaLeadUnlinkCycle && projectIsActive && (
+        <QALeadGroupUnlinkRequestModal
+          cycle={qaLeadUnlinkCycle}
+          onClose={() => setQALeadUnlinkCycle(null)}
+          onSaved={(saved) => {
+            setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle))
+            setQALeadUnlinkCycle(null)
+            api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${saved.id}`).then(setCycleActivity).catch(() => undefined)
+          }}
+        />
+      )}
       {showAddCases && cycleId && projectIsActive && (
         <AddCasesModal
           cycleId={cycleId}
           canAssign={canManageRunners}
+          requiresScopeChangeReason={selectedCycle?.status === 'In Progress' || totalRunCount > 0}
           runnerCandidates={runnerCandidates}
           onClose={() => setShowAddCases(false)}
-          onAdded={() => { refreshExecutions(); setShowAddCases(false) }}
+          onAdded={() => {
+            refreshExecutions()
+            api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
+            setShowAddCases(false)
+          }}
         />
       )}
       {showBulkExecution && cycleId && selectedExecutions.length > 0 && (

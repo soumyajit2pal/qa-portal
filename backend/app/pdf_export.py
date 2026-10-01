@@ -60,6 +60,8 @@ def qa_clearance_export_status(status: Optional[str]) -> Optional[str]:
     """Turn the internal terminal state into audit-friendly export wording."""
     if status == "ISSUED":
         return QA_CLEARANCE_SIGNED_TYPE
+    if status == "ISSUED_UNDER_REVIEW":
+        return f"{QA_CLEARANCE_SIGNED_TYPE} — Under QA Review (release authority on hold)"
     if status == "SUPERSEDED":
         return f"{QA_CLEARANCE_SIGNED_TYPE} — Superseded"
     return status

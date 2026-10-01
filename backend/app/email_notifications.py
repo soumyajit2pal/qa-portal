@@ -608,7 +608,7 @@ def _next_approver_roles(target) -> set[str]:
         return {Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM}
     if status in {
         "QA_LEAD_ASSIGNED", "READINESS_VERIFICATION", "QA_ACTIVITY_INITIATED",
-        "PLANNING", "QA_COMPLETED", "QA_SIGNOFF_PENDING", "ENGINEER_ASSIGNED",
+        "PLANNING", "QA_COMPLETED", "QA_CHANGE_REVIEW", "QA_SIGNOFF_PENDING", "ENGINEER_ASSIGNED",
         "READINESS", "FEASIBILITY", "RESULT_ANALYSIS", "REPORT", "SIGNOFF_PENDING",
     }:
         return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
@@ -750,6 +750,7 @@ def _assigned_user_route(target) -> NotificationRoute | None:
 
     if isinstance(target, models.FunctionalRequest) and status in {
         "TESTER_ASSIGNED", "TEST_DESIGN", "EXECUTION_IN_PROGRESS", "RETESTING",
+        "QA_COMPLETED", "QA_CHANGE_REVIEW",
     }:
         recipients = _user_ids(target.assigned_tester_ids)
         if recipients:

@@ -16,7 +16,7 @@ const SOURCE_DOCUMENTS = [
   { key: 'dast', label: 'DAST Request PDF', source: 'DAST Requests', format: 'PDF', route: '/dast', description: 'Dynamic security testing request and its governed details.' },
   { key: 'performance', label: 'Performance Request PDF', source: 'Performance Testing', format: 'PDF', route: '/performance', description: 'Performance testing request and completed report context.' },
   { key: 'suppression', label: 'Suppression Decision PDF', source: 'Suppression', format: 'PDF', route: '/suppression', description: 'A selected finding suppression decision and approval trail.' },
-  { key: 'certificate', label: 'QA Clearance Certificate', source: 'QA Clearance', format: 'PDF', route: '/signoff', description: 'The issued certificate with frozen test and defect evidence and e-signatures.' },
+  { key: 'certificate', label: 'QA Clearance Certificate', source: 'QA Clearance', format: 'PDF', route: '/signoff', description: 'The issued certificate with frozen latest results per unique test case, defect evidence, and e-signatures. Historical slot-based revisions retain their original basis label.' },
   { key: 'repository', label: 'Test Repository Workbook', source: 'Test Repository', format: 'XLSX', route: '/test-repository', description: 'A selected project’s testcase register and version data.' },
   { key: 'cycle', label: 'Test Cycle Lifecycle Workbook', source: 'Test Execution', format: 'XLSX', route: '/test-execution', description: 'A selected cycle’s executions, attempts, links, and audit history.' },
   { key: 'rtm', label: 'Requirements Traceability Matrix', source: 'Test Reports', format: 'XLSX', route: '/test-reports', description: 'Project-scoped requirement, testcase, execution, and defect coverage.' },

@@ -14,6 +14,8 @@ from ..deps import (
     dashboard_department_scope, require_department_visibility, active_qa_workspace_scope_ids,
     department_unit_visibility_condition, require_department_unit_visibility,
     require_department_unit_action_scope, has_department_unit_action_scope,
+    require_can_execute_project, can_view_cycle_folder,
+    require_can_view_cycle_folder,
 )
 from ..constants import Role, QAStatus, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, QA_REQUEST_TERMINAL_STATUSES, QA_REQUEST_CREATOR_ROLES, format_role_labels, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
@@ -89,6 +91,7 @@ def _clearance_certificate_for_request(
     current_user: Optional[models.User] = None,
     require_requester_ownership: bool = False,
     require_issued: bool = False,
+    allow_denied: bool = False,
 ) -> "models.QASignOff":
     """Resolve a certificate without allowing cross-request/workspace reuse.
 
@@ -121,7 +124,11 @@ def _clearance_certificate_for_request(
             400,
             "The clearance certificate must belong to this Functional Request and QA workspace",
         )
-    if cert.certificate_type not in {"Full Clearance", "Conditional Clearance"}:
+    if cert.certificate_type not in {
+        "Full Clearance", "Conditional Clearance", "Clearance Denied",
+    }:
+        raise HTTPException(400, "The linked certificate has an unsupported certificate type")
+    if cert.certificate_type == "Clearance Denied" and not allow_denied:
         raise HTTPException(400, "A Clearance Denied certificate cannot clear a Functional Request")
 
     other_link = (
@@ -225,6 +232,36 @@ def _assigned_tester_ids(obj: "models.FunctionalRequest") -> set[int]:
     return {int(value) for value in (obj.assigned_tester_ids or "").split(",") if value}
 
 
+FUNCTIONAL_REQUESTER_WORK_STATUSES = {
+    QAStatus.DRAFT,
+    QAStatus.RETURNED_BY_SM,
+    QAStatus.SM_REJECTED,
+    QAStatus.RETURNED_BY_DEPARTMENT_HEAD,
+    QAStatus.RETURNED_BY_QA_LEAD,
+    QAStatus.DEFECT_RAISED,
+    QAStatus.WAITING_FOR_FIX,
+    QAStatus.QA_SIGNED_OFF,
+    QAStatus.REQUESTER_VERIFICATION,
+}
+
+
+def _functional_requester_work(user_id: int):
+    """SQL predicate for work currently owned by the exact requester.
+
+    Keep this status-gated: ``requester_id`` records who raised a request,
+    not who owns every later workflow step.  In particular, adding a bare
+    requester-id condition here would turn “My Assigned Work” into another
+    “My Requests” view and expose SM/Department Head/QA-owned stages in the
+    requester's active queue.  These values mirror the Functional workflow's
+    existing ``Pending With = Requester`` mapping, including Draft as the
+    requester's private work before submission.
+    """
+    return and_(
+        models.FunctionalRequest.requester_id == user_id,
+        models.FunctionalRequest.status.in_(FUNCTIONAL_REQUESTER_WORK_STATUSES),
+    )
+
+
 def _require_assigned_tester(obj: "models.FunctionalRequest", user: models.User) -> None:
     if not user.has_role(Role.ADMIN) and user.id not in _assigned_tester_ids(obj):
         raise HTTPException(403, "Only a QA tester assigned by the QA Lead can perform this action")
@@ -247,6 +284,277 @@ def _require_assigned_qa_lead_or_current_tester(obj: "models.FunctionalRequest",
     if user.id in _assigned_tester_ids(obj):
         return
     raise HTTPException(403, f"Only the QA Lead group or a currently assigned tester can {action}")
+
+
+def _create_reexecution_cycle(
+    db: Session,
+    obj: "models.FunctionalRequest",
+    certificate: "models.QASignOff",
+    payload: schemas.ClearanceChangeDecisionIn,
+    current_user: models.User,
+) -> "models.TestCycle":
+    """Clone execution scope into a new Draft without rewriting signed evidence."""
+    source = (
+        db.query(models.TestCycle)
+        .filter(models.TestCycle.id == payload.source_cycle_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if not source:
+        raise HTTPException(404, "The selected source Test Cycle was not found")
+    link = source.child_request_link
+    if not link or link.child_type != "Functional" or link.child_id != obj.id:
+        raise HTTPException(
+            400,
+            "Select a completed Test Cycle linked to this Functional Request",
+        )
+    if source.status != "Completed":
+        raise HTTPException(409, "Only a Completed Test Cycle can be used for re-execution")
+    source_environment = (source.environment or "").strip().casefold()
+    certificate_environment = (certificate.environment_tested or "").strip().casefold()
+    if not certificate_environment or source_environment != certificate_environment:
+        raise HTTPException(
+            409,
+            "Select a completed lineage-leaf Test Cycle from the certificate's "
+            f"tested environment ({certificate.environment_tested or 'not recorded'})",
+        )
+    existing_successor = db.query(models.TestCycle).filter(
+        models.TestCycle.reexecution_of_cycle_id == source.id,
+    ).first()
+    if existing_successor:
+        raise HTTPException(
+            409,
+            f"{source.cycle_key} already continues as {existing_successor.cycle_key}; "
+            "select the latest completed cycle in that re-execution lineage",
+        )
+    if not source.project or not source.project.is_active:
+        raise HTTPException(409, "The source Test Cycle's project is inactive")
+    require_can_execute_project(db, source.project_id, current_user)
+    source_folder = None
+    if source.folder_id is not None:
+        source_folder = source.folder or db.get(models.TestCycleFolder, source.folder_id)
+        if not source_folder or source_folder.project_id != source.project_id:
+            raise HTTPException(409, "The source Test Cycle's folder is no longer valid")
+        require_can_view_cycle_folder(source_folder, current_user)
+
+    source_slots = list(source.executions)
+    if not source_slots:
+        raise HTTPException(409, "The source Test Cycle has no testcase scope to re-execute")
+    invalid_cases: list[str] = []
+    current_versions = {}
+    for slot in source_slots:
+        test_case = slot.test_case
+        approved = test_case.current_approved_version if test_case else None
+        case_label = (
+            test_case.test_case_key
+            if test_case and test_case.test_case_key
+            else f"Testcase #{slot.test_case_id}"
+        )
+        # Keep the checks ordered by the remedy the user must take. A
+        # rejected testcase in the Recycle Bin can legitimately retain an
+        # Approved baseline, so checking the version pointer first would
+        # hide the real blocker behind a misleading approval message.
+        if not test_case:
+            invalid_cases.append(
+                f"{case_label}: source testcase identity is missing; "
+                "ask an administrator to repair the stale cycle item"
+            )
+        elif test_case.is_deleted:
+            invalid_cases.append(
+                f"{case_label}: in the Recycle Bin; restore it before re-execution"
+            )
+        elif not approved:
+            invalid_cases.append(
+                f"{case_label}: no current Approved version; approve a version before re-execution"
+            )
+        elif approved.status == "Archived":
+            invalid_cases.append(
+                f"{case_label}: current version is Archived; restore it from Archive before re-execution"
+            )
+        elif approved.status != "Approved":
+            version_status = (approved.status or "Unknown").strip() or "Unknown"
+            invalid_cases.append(
+                f"{case_label}: current Approved-version pointer targets status "
+                f"'{version_status}'; correct or approve the version before re-execution"
+            )
+        else:
+            current_versions[slot.test_case_id] = approved.id
+    if invalid_cases:
+        preview = "; ".join(invalid_cases[:8])
+        remaining = len(invalid_cases) - 8
+        suffix = f"; and {remaining} more" if remaining > 0 else ""
+        raise HTTPException(
+            409,
+            detail={
+                "code": "FUNCTIONAL_REEXECUTION_TESTCASE_INELIGIBLE",
+                "cause": "Source testcase scope is not eligible for re-execution",
+                "message": f"Re-execution cannot start. {preview}{suffix}",
+                "guidance": (
+                    "Restore any testcase in the Recycle Bin or Archive, and establish a current "
+                    "Approved version for every remaining testcase. If an identity is missing, ask "
+                    "an administrator to repair the stale cycle item. Then retry; no re-execution "
+                    "cycle was created."
+                ),
+                "retryable": False,
+            },
+        )
+
+    start_date = payload.retest_start_date or models.today_ist()
+    end_date = payload.retest_end_date or start_date
+    if start_date > end_date:
+        raise HTTPException(400, "Retest start date cannot be after end date")
+    generated_name = f"{source.name} - Re-execution"
+    name = (payload.retest_cycle_name or generated_name).strip()[:150]
+    build = payload.retest_build or source.build
+    if not (build or "").strip():
+        raise HTTPException(400, "A build is required for the re-execution cycle")
+
+    successor = models.TestCycle(
+        origin_workspace_id=source.origin_workspace_id,
+        project_id=source.project_id,
+        name=name,
+        description=source.description,
+        status="Draft",
+        start_date=start_date,
+        end_date=end_date,
+        created_by_id=current_user.id,
+        cycle_type=source.cycle_type,
+        environment=source.environment,
+        build=build.strip(),
+        owner_id=source.owner_id,
+        folder_id=source.folder_id,
+        reexecution_of_cycle_id=source.id,
+    )
+    db.add(successor)
+    db.flush()
+    successor.child_request_link = models.TestCycleChildRequestLink(
+        child_type="Functional",
+        child_id=obj.id,
+        child_key=obj.request_id,
+    )
+
+    # An assignment is operational authority, not merely copied display
+    # metadata. Preserve it only when the old runner is still eligible under
+    # the same rules as a fresh execution assignment: active/visible, an
+    # explicit QA Engineer, and able to execute in this cycle's owning
+    # workspace. Revoked roles or workspace access therefore produce an
+    # unassigned slot instead of silently carrying obsolete authority into a
+    # new execution round.
+    candidate_ids = {
+        slot.assigned_to_id for slot in source_slots if slot.assigned_to_id
+    }
+    eligible_assignee_ids: set[int] = set()
+    if candidate_ids:
+        from ..workspace_service import inherited_workspace_access_mode, selectable_workspace_ids
+        from ..workflow_authority import admin_department_allowed
+
+        workspace_id = source.origin_workspace_id or source.project.qa_workspace_id
+        candidates = db.query(models.User).filter(
+            models.User.id.in_(candidate_ids),
+            models.User.is_active == True,  # noqa: E712 - Oracle boolean column
+            models.User.show_in_user_dropdowns == True,  # noqa: E712
+        ).all()
+        for candidate in candidates:
+            if Role.QA_ENGINEER not in candidate.roles or Role.VIEW_ONLY in candidate.roles:
+                continue
+            if workspace_id is None or workspace_id not in selectable_workspace_ids(db, candidate):
+                continue
+            if inherited_workspace_access_mode(db, candidate, workspace_id) == "PARENT_VIEWER":
+                continue
+            if not admin_department_allowed(candidate, source.project.department):
+                continue
+            if source_folder is not None and not can_view_cycle_folder(
+                source_folder, candidate,
+            ):
+                continue
+            eligible_assignee_ids.add(candidate.id)
+
+    for slot in source_slots:
+        assigned_to_id = (
+            slot.assigned_to_id
+            if slot.assigned_to_id in eligible_assignee_ids
+            else None
+        )
+        db.add(models.TestExecution(
+            cycle_id=successor.id,
+            test_case_id=slot.test_case_id,
+            pinned_version_id=current_versions[slot.test_case_id],
+            status="Not Executed",
+            assigned_to_id=assigned_to_id,
+            assigned_by_id=slot.assigned_by_id if assigned_to_id else None,
+            assigned_at=slot.assigned_at if assigned_to_id else None,
+            added_by_id=slot.added_by_id or current_user.id,
+            run_version=0,
+        ))
+
+    audit = (
+        f"Created {successor.cycle_key} as a Draft re-execution of {source.cycle_key}; "
+        f"copied {len(source_slots)} testcase slot(s) at their current Approved versions, "
+        "with results, attempts, evidence and defect links reset. "
+        f"Reason: {payload.comments}"
+    )
+    db.add_all([
+        models.ApprovalAction(
+            entity_type="TEST_CYCLE", entity_id=source.id, step_name="Re-execution",
+            actor_id=current_user.id, actor_role=current_user.roles_csv,
+            decision="Successor Created", comments=audit,
+        ),
+        models.ApprovalAction(
+            entity_type="TEST_CYCLE", entity_id=successor.id, step_name="Re-execution",
+            actor_id=current_user.id, actor_role=current_user.roles_csv,
+            decision="Draft Created", comments=audit,
+        ),
+    ])
+    return successor
+
+
+def _require_held_clearance_retest_leaf_completed(
+    obj: "models.FunctionalRequest",
+) -> None:
+    """Prevent a held certificate's mandated Retest from being bypassed.
+
+    The original signed cycles stay linked and Completed. Without this
+    explicit check, removing an empty successor could make those historical
+    cycles sufficient for Complete QA even though QA selected Retest. A held
+    certificate therefore requires a newly completed, linked lineage leaf
+    that was not part of its frozen issued snapshot.
+    """
+    certificate = obj.signoff
+    if not certificate or certificate.status != "ISSUED_UNDER_REVIEW":
+        return
+    linked_cycles = list(obj.linked_test_cycles)
+    parent_ids = {
+        cycle.reexecution_of_cycle_id
+        for cycle in linked_cycles
+        if cycle.reexecution_of_cycle_id is not None
+    }
+    leaf_cycles = [cycle for cycle in linked_cycles if cycle.id not in parent_ids]
+    snapshot = certificate.certificate_summary or {}
+    frozen_cycle_ids: set[int] = set()
+    for field in ("cycle_ids", "defect_scope_cycle_ids"):
+        for value in snapshot.get(field) or []:
+            try:
+                frozen_cycle_ids.add(int(value))
+            except (TypeError, ValueError):
+                # A malformed frozen snapshot cannot make an old cycle count
+                # as successful new work; simply leave it outside the match.
+                continue
+    eligible = [
+        cycle for cycle in leaf_cycles
+        if cycle.reexecution_of_cycle_id is not None
+        and cycle.id not in frozen_cycle_ids
+        and cycle.status == "Completed"
+        and (cycle.environment or "").strip().casefold()
+            == (certificate.environment_tested or "").strip().casefold()
+    ]
+    if not eligible:
+        raise HTTPException(
+            409,
+            "QA selected Retest for the held clearance. Complete the linked "
+            "re-execution lineage leaf in the certificate's tested environment "
+            "before completing QA.",
+        )
 
 
 # 2026-08 Reassignment CR, reported directly: "Reassignment shall be
@@ -310,10 +618,9 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
         models.QARequestDelegation.status == "ACTIVE",
         models.QARequestDelegation.assigned_to_id == current_user.id,
     ))
-    # A delegation is exceptional, temporary input access.  The normal
-    # ownership fields are the assigned QA Lead and the comma-separated QA
-    # Tester IDs.  The previous filter used only `delegated_to_user`, making
-    # “Assigned to Me” empty for virtually every real Functional assignment.
+    # A delegation is exceptional, temporary input access. QA work is named
+    # through the assigned lead/tester fields; requester work is added below
+    # only for stages whose Pending With owner is the exact requester.
     named_assignee = or_(
         models.FunctionalRequest.qa_lead_id == current_user.id,
         func.instr(
@@ -321,6 +628,7 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
             f",{current_user.id},",
         ) > 0,
     )
+    requester_work = _functional_requester_work(current_user.id)
     if scope is not None:
         organisation_scope = department_unit_visibility_condition(
             db, current_user, models.QARequest.department, models.QARequest.department_unit_id,
@@ -329,7 +637,7 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
     if workspace_scope:
         q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_scope))
     if assigned_to_me:
-        q = q.filter(or_(named_assignee, delegated_to_user))
+        q = q.filter(or_(named_assignee, requester_work, delegated_to_user))
     q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.FunctionalRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
@@ -820,21 +1128,56 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
     # A link can be created from either side of the relationship. Resolve it
     # before evaluating this request so starting from Functional never asks
     # for (or creates) a second link when Test Lifecycle already linked one.
-    existing_link = (db.query(models.TestCycleChildRequestLink)
-                     .filter_by(child_type="Functional", child_id=obj.id)
-                     .order_by(models.TestCycleChildRequestLink.id.asc())
-                     .first())
-    cycle, should_create_link = execution_cycle_choice(existing_link, payload.test_cycle_id)
+    discovered_link = (db.query(models.TestCycleChildRequestLink)
+                       .filter_by(child_type="Functional", child_id=obj.id)
+                       .order_by(models.TestCycleChildRequestLink.id.asc())
+                       .first())
+    discovered_cycle, should_create_link = execution_cycle_choice(
+        discovered_link, payload.test_cycle_id,
+    )
+    cycle_id = (
+        payload.test_cycle_id if should_create_link else discovered_cycle.id
+    )
+    # Global workflow lock order is Functional -> TestCycle -> link row. The
+    # Functional row above prevents any compliant relink/unlink path from
+    # changing an existing association; locking/reloading the selected cycle
+    # and its unique association closes the standalone-cycle race with PATCH,
+    # delete, and another request's Start Execution.
+    cycle = (
+        db.query(models.TestCycle)
+        .filter(models.TestCycle.id == cycle_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if cycle is None or not cycle.project or not cycle.project.is_active:
+        raise HTTPException(
+            400,
+            "The selected test cycle is no longer eligible (only Draft, Ready, or In Progress cycles can be linked)",
+        )
+    locked_cycle_link = (
+        db.query(models.TestCycleChildRequestLink)
+        .filter(models.TestCycleChildRequestLink.cycle_id == cycle.id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if discovered_link is not None:
+        if (
+            locked_cycle_link is None
+            or locked_cycle_link.id != discovered_link.id
+            or locked_cycle_link.child_type != "Functional"
+            or locked_cycle_link.child_id != obj.id
+        ):
+            raise HTTPException(
+                409,
+                "The Test Cycle request link changed concurrently; refresh before starting execution",
+            )
+    elif locked_cycle_link is not None:
+        raise HTTPException(400, "This test cycle is already linked to another request")
+
+    require_cycle_startable(cycle)
     if should_create_link:
-        selected_cycle = (db.query(models.TestCycle)
-                          .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
-                          .filter(models.TestCycle.id == payload.test_cycle_id,
-                                  models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
-                                  models.TestCycle.status.in_(_LINKABLE_TEST_CYCLE_STATUSES))
-                          .first())
-        if not selected_cycle:
-            raise HTTPException(400, "The selected test cycle is no longer eligible (only Draft, Ready, or In Progress cycles can be linked)")
-        cycle = selected_cycle
         application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
         if (application_master_id and cycle.project.application_master_id is not None
                 and cycle.project.application_master_id != application_master_id):
@@ -842,15 +1185,9 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
         request_workspace_id = obj.qa_request.qa_workspace_id if obj.qa_request else None
         if (cycle.origin_workspace_id or cycle.project.qa_workspace_id) != request_workspace_id:
             raise HTTPException(400, "The Test Cycle and Functional QA Request must belong to the same workspace")
-        cycle_link = db.query(models.TestCycleChildRequestLink).filter_by(cycle_id=cycle.id).first()
-        if cycle_link:
-            if cycle_link.child_type != "Functional" or cycle_link.child_id != obj.id:
-                raise HTTPException(400, "This test cycle is already linked to another request")
-        else:
-            db.add(models.TestCycleChildRequestLink(
-                cycle_id=cycle.id, child_type="Functional", child_id=obj.id, child_key=obj.request_id,
-            ))
-    require_cycle_startable(cycle)
+        db.add(models.TestCycleChildRequestLink(
+            cycle_id=cycle.id, child_type="Functional", child_id=obj.id, child_key=obj.request_id,
+        ))
     obj.status = QAStatus.EXECUTION_IN_PROGRESS
     _log(
         db, obj.id, "Test Design", current_user, "Execution Started",
@@ -1007,6 +1344,7 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
     # the Defect Raised/Waiting For Fix/Retesting states are no longer part
     # of this path once a cycle is linked.
     require_cycles_completed(obj.linked_test_cycles)
+    _require_held_clearance_retest_leaf_completed(obj)
 
     obj.status = QAStatus.QA_COMPLETED
     _log(db, obj.id, "Execution", current_user, "QA Completed", payload.comments)
@@ -1019,7 +1357,10 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
 @router.post("/{req_id}/request-signoff", response_model=schemas.FunctionalOut)
 def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.RequestSignoffIn(),
                      db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                     current_user: models.User = Depends(require_roles(
+                         Role.QA_ENGINEER, Role.QA_LEAD,
+                         Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+                     ))):
     obj = _get_or_404(db, req_id, lock=True)
     _require_visible(db, obj, current_user)
     _require(obj, QAStatus.QA_COMPLETED, "Request clearance")
@@ -1034,6 +1375,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
     # as tester reassignment.
     _require_assigned_qa_lead_or_current_tester(obj, current_user, "request sign-off on this request")
     certificate_summary.require_linked_security_resolved(db, obj)
+    newly_linked = False
     # The frontend now creates the QA Clearance Certificate (POST /api/signoffs)
     # right before calling this, via SignOff.tsx's NewSignOffModal opened from
     # this request's own "Request Sign-off" button -- link it immediately
@@ -1048,14 +1390,27 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
             payload.signoff_id,
             current_user=current_user,
             require_requester_ownership=True,
+            allow_denied=True,
         )
-        obj.signoff_id = cert.id
+        if obj.signoff_id is None:
+            obj.signoff_id = cert.id
+            newly_linked = True
     elif obj.signoff_id is not None:
         # A retry may omit the ID, but an existing link must still satisfy
         # the request/workspace/type constraints before the workflow moves.
-        _clearance_certificate_for_request(db, obj, obj.signoff_id)
-    obj.status = QAStatus.QA_SIGNOFF_PENDING
-    _log(db, obj.id, "QA Completed", current_user, "Clearance Requested", None)
+        _clearance_certificate_for_request(
+            db, obj, obj.signoff_id, allow_denied=True,
+        )
+    # Linking a Draft does not put work in the QA Lead bucket. The request
+    # deliberately remains QA_COMPLETED (owned by the assigned QA team)
+    # until the certificate requester submits the Draft; submit_signoff then
+    # advances it atomically to QA_SIGNOFF_PENDING.
+    if newly_linked:
+        _log(
+            db, obj.id, "QA Completed", current_user,
+            "Clearance Draft Linked",
+            f"Certificate {cert.certificate_id} linked to the Functional Request.",
+        )
     db.commit()
     db.refresh(obj)
     return obj
@@ -1085,12 +1440,32 @@ def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session 
     signoff_id = payload.signoff_id if payload.signoff_id is not None else obj.signoff_id
     if signoff_id is None:
         raise HTTPException(409, "Requester verification requires an issued clearance certificate")
-    cert = _clearance_certificate_for_request(db, obj, signoff_id, require_issued=True)
+    cert = _clearance_certificate_for_request(
+        db, obj, signoff_id, require_issued=True, allow_denied=True,
+    )
     obj.signoff_id = cert.id
-    obj.status = QAStatus.QA_SIGNED_OFF
-    _log(db, obj.id, "QA Clearance", current_user, "Cleared", payload.comments)
+    if cert.certificate_type == "Clearance Denied":
+        _log(
+            db, obj.id, "QA Clearance Decision", current_user,
+            "Clearance Denied",
+            payload.comments or (
+                f"Certificate {cert.certificate_id} issued the QA denial decision; "
+                "this is not a positive clearance."
+            ),
+        )
+    else:
+        obj.status = QAStatus.QA_SIGNED_OFF
+        _log(db, obj.id, "QA Clearance", current_user, "Cleared", payload.comments)
     obj.status = QAStatus.REQUESTER_VERIFICATION
-    _log(db, obj.id, "Requester Verification", current_user, "Pending", "Sent for requester verification")
+    _log(
+        db, obj.id, "Requester Verification", current_user,
+        "Denial Acknowledgement Pending" if cert.certificate_type == "Clearance Denied" else "Pending",
+        (
+            "Sent to the requester to acknowledge or return the denial decision for changes."
+            if cert.certificate_type == "Clearance Denied"
+            else "Sent for requester verification"
+        ),
+    )
     db.commit()
     db.refresh(obj)
     return obj
@@ -1102,33 +1477,192 @@ def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Se
                             *QA_REQUEST_CREATOR_ROLES, Role.APPLICATION_OWNER))):
     obj = _get_or_404(db, req_id, lock=True)
     _require_visible(db, obj, current_user)
-    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        raise HTTPException(403, "Only the requester or an admin can record this decision")
+    if obj.requester_id != current_user.id:
+        raise HTTPException(403, "Only the Functional Request requester can record this decision")
     _require(obj, QAStatus.REQUESTER_VERIFICATION, "Requester decision")
+    if obj.signoff_id is None:
+        raise HTTPException(
+            409,
+            "Requester verification requires the currently linked issued certificate",
+        )
+    cert = _clearance_certificate_for_request(
+        db,
+        obj,
+        obj.signoff_id,
+        require_issued=True,
+        allow_denied=True,
+    )
+    denial = cert.certificate_type == "Clearance Denied"
     if payload.decision == "Accepted":
         obj.status = QAStatus.CLOSED
+        certificate_decision = "Denial Acknowledged" if denial else "Accepted by Requester"
+        request_decision = "Denial Acknowledged" if denial else "Accepted"
+        db.add(models.ApprovalAction(
+            entity_type="SIGNOFF", entity_id=cert.id,
+            step_name="Requester Verification", actor_id=current_user.id,
+            actor_role=current_user.roles_csv, decision=certificate_decision,
+            comments=payload.comments,
+        ))
     elif payload.decision == "ChangesRequired":
-        # Issued certificates are immutable audit records. Requesting changes
-        # therefore creates a new Draft successor, marks the issued row
-        # SUPERSEDED, and moves this Functional Request's link to the
-        # successor. The QA certificate requester edits/submits that Draft,
-        # which then follows the complete QA Lead -> Executive chain again.
+        # Preserve the signed certificate and evidence exactly as issued.
+        # QA first decides whether the feedback is clarification-only,
+        # certificate revision, or genuine retesting; no successor Draft is
+        # created merely because the requester asked for a discussion.
         if not (payload.comments or "").strip():
             raise HTTPException(400, "A reason is required when requesting changes")
-        cert = db.get(models.QASignOff, obj.signoff_id) if obj.signoff_id else None
-        if not cert:
-            raise HTTPException(409, "Requester changes require the currently linked issued certificate")
-        certificate_revisions.create_certificate_revision(
-            db,
-            cert,
-            current_user,
-            payload.comments.strip(),
-        )
+        cert.status = "ISSUED_UNDER_REVIEW"
+        obj.status = QAStatus.QA_CHANGE_REVIEW
+        request_decision = "ChangesRequired"
+        db.add(models.ApprovalAction(
+            entity_type="SIGNOFF", entity_id=cert.id,
+            step_name="Requester Verification", actor_id=current_user.id,
+            actor_role=current_user.roles_csv,
+            decision=(
+                "Changes Required — Denial Review"
+                if denial
+                else "Changes Required — QA Review"
+            ),
+            comments=payload.comments.strip(),
+        ))
     else:
         raise HTTPException(400, "decision must be one of: Accepted, ChangesRequired")
-    _log(db, obj.id, "Requester Verification", current_user, payload.decision, payload.comments)
+    _log(
+        db, obj.id, "Requester Verification", current_user,
+        request_decision, payload.comments,
+    )
     db.commit()
     db.refresh(obj)
+    return obj
+
+
+@router.post("/{req_id}/clearance-change-decision", response_model=schemas.FunctionalOut)
+def clearance_change_decision(
+    req_id: int,
+    payload: schemas.ClearanceChangeDecisionIn,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(
+        Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+    )),
+):
+    """Resolve a requester-returned issued clearance without mutating evidence."""
+    obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
+    allowed_statuses = [QAStatus.QA_CHANGE_REVIEW]
+    if payload.decision == "ReviseCertificate":
+        allowed_statuses.append(QAStatus.QA_COMPLETED)
+    _require(obj, allowed_statuses, "QA clearance change decision")
+    if obj.signoff_id is None:
+        raise HTTPException(409, "This Functional Request has no linked issued certificate")
+    cert = _clearance_certificate_for_request(
+        db, obj, obj.signoff_id, allow_denied=True,
+    )
+    allowed_certificate_statuses = {"ISSUED_UNDER_REVIEW"}
+    if payload.decision == "ReviseCertificate" and obj.status == QAStatus.QA_COMPLETED:
+        # Backward-compatible recovery for a retest completed before the
+        # explicit hold state was deployed. New requester returns always use
+        # ISSUED_UNDER_REVIEW.
+        allowed_certificate_statuses.update({
+            "ISSUED", "SM_REJECTED", "DEPT_HEAD_COE_REJECTED",
+        })
+    if cert.status not in allowed_certificate_statuses:
+        raise HTTPException(
+            409,
+            f"Certificate {cert.certificate_id} in status '{cert.status}' cannot perform "
+            f"{payload.decision} while the Functional Request is '{obj.status}'. "
+            "Refresh and continue the certificate action available for its current workflow state.",
+        )
+
+    assigned_testers = _assigned_tester_ids(obj)
+    can_decide = (
+        current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
+        or current_user.id in assigned_testers
+        or (not assigned_testers and cert.requester_id == current_user.id)
+    )
+    if not can_decide:
+        raise HTTPException(
+            403,
+            "Only the QA Lead group or a currently assigned tester can decide the returned clearance; "
+            "the original QA certificate requester is used only when this legacy request has no tester assignment",
+        )
+
+    previous_status = obj.status
+    if payload.decision == "ResendIssued":
+        if previous_status != QAStatus.QA_CHANGE_REVIEW:
+            raise HTTPException(400, "Resend Issued is available only during QA Clearance Change Review")
+        cert.status = "ISSUED"
+        obj.status = QAStatus.REQUESTER_VERIFICATION
+        certificate_decision = "Review completed — Issued certificate resent"
+        request_decision = "Issued Clearance Resent"
+        detail = f"Certificate {cert.certificate_id} was restored to Issued and returned for requester verification."
+    elif payload.decision == "ReviseCertificate":
+        predecessor_status = cert.status
+        successor = certificate_revisions.create_certificate_revision(
+            db, cert, current_user, payload.comments,
+            successor_requester_id=current_user.id,
+        )
+        # create_certificate_revision deliberately returns the Functional
+        # Request to QA_COMPLETED while the successor belongs to its QA
+        # author. Submission, not Draft creation, enters QA Lead review.
+        certificate_decision = "Revision Draft Created"
+        request_decision = "Certificate Revision Required"
+        if predecessor_status in {"SM_REJECTED", "DEPT_HEAD_COE_REJECTED"}:
+            detail = (
+                f"Certificate {cert.certificate_id} retained terminal status {predecessor_status} "
+                f"and was continued by Draft {successor.certificate_id}; full QA Lead and "
+                "Executive reapproval is required."
+            )
+        else:
+            detail = (
+                f"Certificate {cert.certificate_id} was superseded by Draft "
+                f"{successor.certificate_id}; full QA Lead and Executive reapproval is required."
+            )
+    else:  # Retest
+        if previous_status != QAStatus.QA_CHANGE_REVIEW:
+            raise HTTPException(400, "Retest is available only during QA Clearance Change Review")
+        try:
+            successor_cycle = _create_reexecution_cycle(
+                db, obj, cert, payload, current_user,
+            )
+            db.flush()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(
+                409,
+                "A re-execution cycle was created concurrently; refresh and continue the latest cycle",
+            ) from exc
+        obj.status = QAStatus.EXECUTION_IN_PROGRESS
+        certificate_decision = "Retesting required — release authority remains on hold"
+        request_decision = "Retesting Required"
+        detail = (
+            f"Created Draft re-execution cycle {successor_cycle.cycle_key} from "
+            f"cycle #{payload.source_cycle_id}; the issued certificate remains under review."
+        )
+
+    audit_comments = f"{detail} QA comments: {payload.comments}"
+    db.add_all([
+        models.ApprovalAction(
+            entity_type="SIGNOFF", entity_id=cert.id,
+            step_name="QA Change Review", actor_id=current_user.id,
+            actor_role=current_user.roles_csv, decision=certificate_decision,
+            comments=audit_comments,
+        ),
+        models.ApprovalAction(
+            entity_type="FUNCTIONAL_REQUEST", entity_id=obj.id,
+            step_name="QA Clearance Change Review", actor_id=current_user.id,
+            actor_role=current_user.roles_csv, decision=request_decision,
+            comments=audit_comments,
+        ),
+    ])
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            409,
+            "The clearance review changed concurrently; refresh before deciding again",
+        ) from exc
+    db.refresh(obj)
+    db.expire(obj, ["test_cycle_links"])
     return obj
 
 

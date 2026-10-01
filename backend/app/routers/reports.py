@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import case, false, func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from .. import models
+from .. import certificate_summary, models
 from ..database import get_db
 from ..deps import (
     get_current_user, dashboard_department_scope, resolve_entity_department,
@@ -792,7 +792,13 @@ def quality_scorecard(date_from: str | None = None, date_to: str | None = None, 
     if functional_request_app:
         issued_rows = db.query(models.QASignOff.testing_request_id).filter(
             models.QASignOff.testing_request_id.in_(list(functional_request_app)),
-            models.QASignOff.status == "ISSUED",
+            models.QASignOff.status.in_(("ISSUED", "ISSUED_UNDER_REVIEW")),
+            # A Clearance Denied record is signed/issued evidence and can be
+            # acknowledged by the requester, but it is never positive release
+            # authority. Keep it out of the explicitly positive clearance KPI.
+            models.QASignOff.certificate_type.in_((
+                "Full Clearance", "Conditional Clearance",
+            )),
         ).all()
         issued_counts.update(functional_request_app.get(row.testing_request_id) for row in issued_rows)
 
@@ -845,8 +851,8 @@ def qa_signoff_register(date_from: str | None = None, date_to: str | None = None
         "Risk Tier": item.risk_tier,
         "Status": qa_clearance_export_status(item.status),
         "Workflow Status": item.status,
-        "Clearance Signature Type": QA_CLEARANCE_SIGNED_TYPE if item.status == "ISSUED" else "",
-        "Signature Method": DIGITAL_SIGNATURE_METHOD if item.status == "ISSUED" else "",
+        "Clearance Signature Type": QA_CLEARANCE_SIGNED_TYPE if item.status in {"ISSUED", "ISSUED_UNDER_REVIEW"} else "",
+        "Signature Method": DIGITAL_SIGNATURE_METHOD if item.status in {"ISSUED", "ISSUED_UNDER_REVIEW"} else "",
         "Requested By": names.get(item.requester_id),
         "QA Lead Approver": names.get(item.reviewed_by_id),
         "Executive Approver": names.get(item.approved_by_id),
@@ -868,6 +874,10 @@ def qa_clearance_evidence(date_from: str | None = None, date_to: str | None = No
         execution_counts = execution.get("counts") or {}
         defect_counts = defects.get("counts") or {}
         severity = snapshot.get("severity") or []
+        unique_population = (
+            snapshot.get("execution_population_basis")
+            == certificate_summary.EXECUTION_POPULATION_BASIS
+        )
         result.append({
             "Certificate ID": item.certificate_id,
             "Testing Request ID": item.certificate_testing_request_id,
@@ -878,7 +888,9 @@ def qa_clearance_evidence(date_from: str | None = None, date_to: str | None = No
             "Evidence Revision": snapshot.get("revision"),
             "Evidence Captured At": snapshot.get("captured_at"),
             "Assigned Testers": ", ".join(tester.get("name", "") for tester in snapshot.get("assigned_testers", []) if tester.get("name")) if "assigned_testers" in snapshot else "Not captured in this revision",
-            "Test Cases": execution.get("total"),
+            "Execution Population Basis": "Unique testcase latest result" if unique_population else "Legacy execution slots",
+            "Unique Test Cases": execution.get("total") if unique_population else None,
+            "Legacy Execution Slots": None if unique_population else execution.get("total"),
             "Pass": execution_counts.get("Pass"), "Fail": execution_counts.get("Fail"),
             "Blocked": execution_counts.get("Blocked"), "NA": execution_counts.get("NA"),
             "Retest Passed": execution_counts.get("Retest Passed"),

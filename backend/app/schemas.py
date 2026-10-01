@@ -914,8 +914,13 @@ class LinkedTestCycleRef(ORMModel):
     project_id: int
     name: str
     status: str
+    environment: Optional[str] = None
     start_date: Optional[datetime.date] = None
     end_date: Optional[datetime.date] = None
+    reexecution_of_cycle_id: Optional[int] = None
+    reexecution_of_cycle_key: Optional[str] = None
+    reexecution_successor_cycle_id: Optional[int] = None
+    reexecution_successor_cycle_key: Optional[str] = None
 
 
 class FunctionalListOut(ORMModel):
@@ -931,6 +936,7 @@ class FunctionalListOut(ORMModel):
     application_master_status: Optional[str] = None
     requester_id: Optional[int] = None
     qa_lead_id: Optional[int] = None
+    assigned_tester_ids: Optional[str] = None
     priority: Optional[str] = None
     application_name: Optional[str] = None
     epic_number: Optional[str] = None
@@ -969,6 +975,9 @@ class FunctionalOut(ORMModel):
     signoff_id: Optional[int] = None
     signoff_certificate_id: Optional[str] = None      # 2026-08 -- "LINK THE CERTIFICATE ONCE GENERATED"
     signoff_certificate_status: Optional[str] = None
+    signoff_certificate_type: Optional[str] = None
+    signoff_certificate_environment: Optional[str] = None
+    signoff_certificate_requester_id: Optional[int] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
     qa_request: Optional[LinkedRequestRef] = None
@@ -1111,6 +1120,55 @@ class ReadinessDecisionIn(BaseModel):
 class RequesterDecisionIn(BaseModel):
     decision: str                          # Accepted / ChangesRequired
     comments: Optional[str] = None
+
+
+class ClearanceChangeDecisionIn(BaseModel):
+    """QA's explicit disposition of a requester-returned issued clearance.
+
+    Retest creates a fresh Draft execution cycle instead of reopening the
+    completed evidence that supported the issued certificate.  The optional
+    overrides let QA record the new run's context immediately; omitted values
+    safely inherit from the selected completed cycle (dates default to today).
+    """
+    decision: Literal["ResendIssued", "ReviseCertificate", "Retest"]
+    comments: str = Field(min_length=3, max_length=2000)
+    source_cycle_id: Optional[int] = None
+    retest_cycle_name: Optional[str] = Field(default=None, max_length=150)
+    retest_start_date: Optional[datetime.date] = None
+    retest_end_date: Optional[datetime.date] = None
+    retest_build: Optional[str] = Field(default=None, max_length=100)
+
+    @field_validator("comments")
+    @classmethod
+    def normalize_comments(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 3:
+            raise ValueError("Comments of at least 3 characters are required")
+        return normalized
+
+    @field_validator("retest_cycle_name", "retest_build")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @model_validator(mode="after")
+    def validate_retest_fields(self):
+        if self.decision == "Retest" and self.source_cycle_id is None:
+            raise ValueError("source_cycle_id is required when retesting")
+        if self.decision != "Retest" and any((
+            self.source_cycle_id is not None,
+            self.retest_cycle_name is not None,
+            self.retest_start_date is not None,
+            self.retest_end_date is not None,
+            self.retest_build is not None,
+        )):
+            raise ValueError("Retest cycle fields are allowed only for the Retest decision")
+        if (self.retest_start_date and self.retest_end_date
+                and self.retest_start_date > self.retest_end_date):
+            raise ValueError("Retest start date cannot be after end date")
+        return self
 
 
 class ScanCompletionIn(BaseModel):
@@ -2203,6 +2261,18 @@ class SignOffRevisionCreate(BaseModel):
         return normalized
 
 
+class SignOffOwnershipTakeoverIn(BaseModel):
+    reason: str = Field(min_length=10, max_length=2000)
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 10:
+            raise ValueError("A takeover reason of at least 10 characters is required")
+        return normalized
+
+
 class SignOffListOut(ORMModel):
     """Register fields only; evidence is fetched when a certificate is opened."""
     id: int
@@ -2247,6 +2317,11 @@ class SignOffOut(ORMModel):
     department: Optional[str] = None
     qa_workspace_id: Optional[int] = None
     request_department: Optional[str] = None
+    source_request_status: Optional[str] = None
+    source_assigned_tester_ids: Optional[str] = None
+    revision_actor_allowed: bool = False
+    can_create_revision: bool = False
+    can_take_over: bool = False
     approving_qa_team: Optional[str] = None
     # Delegated from the QA Request via source_functional_request -- see
     # models.QASignOff.change_description.
@@ -3398,6 +3473,26 @@ class TestCycleUpdate(BaseModel):
         return self
 
 
+class QALeadGroupCycleRequestUnlinkIn(BaseModel):
+    """Deliberate break-glass input for unlinking after execution starts.
+
+    A literal ``True`` confirmation prevents a caller from accidentally
+    obtaining executive behavior by omitting the impact acknowledgement or
+    posting a generic truthy value. The reason is stored in both affected
+    audit trails, so whitespace-only explanations must fail validation.
+    """
+    reason: str = Field(min_length=10, max_length=2000)
+    impact_confirmed: Literal[True]
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 10:
+            raise ValueError("An override reason of at least 10 characters is required")
+        return normalized
+
+
 class TestCycleOut(ORMModel):
     origin_workspace_id: Optional[int] = None
     origin_workspace_name: Optional[str] = None
@@ -3416,6 +3511,11 @@ class TestCycleOut(ORMModel):
     linked_request_id: Optional[int] = None
     linked_request_key: Optional[str] = None
     linked_request_change_allowed: bool = False
+    linked_request_qa_lead_unlink_allowed: bool = False
+    reexecution_of_cycle_id: Optional[int] = None
+    reexecution_of_cycle_key: Optional[str] = None
+    reexecution_successor_cycle_id: Optional[int] = None
+    reexecution_successor_cycle_key: Optional[str] = None
     cycle_type: Optional[str] = None
     environment: Optional[str] = None
     build: Optional[str] = None
@@ -3442,6 +3542,17 @@ class TestExecutionAdd(BaseModel):
     Not-Executed TestExecution row for each (see routers/test_execution.py)."""
     test_case_ids: List[int]
     assigned_to_id: Optional[int] = None
+    # Required by the service only when this addition expands a cycle that
+    # already has retained execution attempts. Keeping it optional here lets
+    # Draft/Ready cycles use the same endpoint without inventing an audit
+    # reason before execution has begun.
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: Optional[str]) -> Optional[str]:
+        normalized = value.strip() if isinstance(value, str) else value
+        return normalized or None
 
 
 class TestCaseCandidateOut(ORMModel):
@@ -3486,6 +3597,13 @@ class TestExecutionCandidateSelection(BaseModel):
     test_type: Optional[str] = None
     created_by_id: Optional[int] = None
     assigned_to_id: Optional[int] = None
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: Optional[str]) -> Optional[str]:
+        normalized = value.strip() if isinstance(value, str) else value
+        return normalized or None
 
 
 class TestExecutionAddResult(BaseModel):

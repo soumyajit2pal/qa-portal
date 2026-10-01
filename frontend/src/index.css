@@ -4275,6 +4275,7 @@ td { padding: 12px; }
    button, so it gets its own neutral (non-red) treatment; --empty is the
    no-link-yet case, a lone button with no preceding label to divide from. */
 .tm-cycle-request-link-action { color: #0d6678 !important; }
+.tm-cycle-request-link-action--danger { color: #a03e48 !important; }
 .tm-cycle-request-link--empty .tm-cycle-request-link-action { margin-left: 0; border-left: 0; padding-left: 0; }
 .tm-checkin-button { border-color: #d7cda3; color: #745d12; background: #fffaf0; }
 .tm-checkin-button:hover { border-color: #b79019 !important; color: #5f4906 !important; background: #fff3c9 !important; }

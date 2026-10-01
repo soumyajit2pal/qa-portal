@@ -21,6 +21,7 @@ import ClearableSearchInput from '../../components/ClearableSearchInput'
 import { isKeyboardActivationKey } from '../../keyboard'
 import { linkedSecurityClearanceBlockers } from '../../clearanceEligibility'
 import { canCreateClearanceRevision, isImmutableClearanceStatus } from '../../clearanceRevision'
+import { canCreateClearanceForRequest } from '../../clearanceCreation'
 import './SignOff.css'
 
 function userName(users: UserOption[], id?: number | null): string | null {
@@ -51,7 +52,7 @@ function recordedSignature(item: ApprovalActionOut): RecordedElectronicSignature
 // are eligible to be picked as the "Testing Request ID" for a new
 // certificate -- raising sign-off for a request still mid-execution
 // wouldn't make sense.
-const SIGNOFF_ELIGIBLE_STATUSES = ['QA_COMPLETED', 'QA_SIGNOFF_PENDING', 'QA_SIGNED_OFF', 'REQUESTER_VERIFICATION', 'CLOSED']
+const SIGNOFF_ELIGIBLE_STATUSES = ['QA_COMPLETED', 'QA_SIGNOFF_PENDING']
 
 const EMPTY = {
   certificate_type: 'Full Clearance', testing_type: 'Functional', testing_request_id: '',
@@ -82,8 +83,8 @@ type ConditionalField = 'conditional_observations' | 'conditional_mitigation' | 
 function ClearanceRequirements({ certificateType }: { certificateType: string }) {
   if (certificateType === 'Clearance Denied') return null
   return <p className="muted small">Before submission and each approval, {certificateType} requires a Functional Request in QA Completed or QA Clearance Pending, a valid tested environment, completed matching cycles, and execution evidence. {certificateType === 'Full Clearance'
-    ? 'Every applicable test must be Pass or Retest Passed (NA is allowed), with no open Critical or High defects.'
-    : 'Failed, blocked, or unexecuted tests and open defects require documented conditions, residual-risk remarks, and mitigation. Responsible owner and target date are optional.'}</p>
+    ? 'Every applicable unique test case must have a latest result of Pass or Retest Passed (NA is allowed), with no open Critical or High defects.'
+    : 'Unique test cases whose latest result is Fail, Blocked, or Not Executed, and open defects, require documented conditions, residual-risk remarks, and mitigation. Responsible owner and target date are optional.'}</p>
 }
 
 function ConditionalClearanceFields({ form, onChange, onImagesChange }: {
@@ -244,6 +245,17 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   const [additionalImages, setAdditionalImages] = useState<Record<string, File[]>>({})
   function set<K extends keyof SignOffForm>(k: K, v: SignOffForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
+  const isCreationQALead = hasWorkspaceRole(user, ...QA_LEAD_GROUP_ROLES)
+  const isCreationQAEngineer = hasWorkspaceRole(user, 'QA_ENGINEER')
+  const canCreateForRequest = useCallback((request: Pick<FunctionalOut, 'assigned_tester_ids'>) => (
+    canCreateClearanceForRequest({
+      assignedTesterIds: request.assigned_tester_ids,
+      userId: user?.id,
+      isQaLeadGroup: isCreationQALead,
+      isQaEngineer: isCreationQAEngineer,
+    })
+  ), [isCreationQALead, isCreationQAEngineer, user?.id])
+
   const applyRequest = useCallback((r: FunctionalOut) => {
     setSelectedRequest(r)
     setForm((f) => ({
@@ -264,14 +276,18 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   }, [])
 
   useEffect(() => {
-    if (presetRequest) { applyRequest(presetRequest); return }
+    if (presetRequest) {
+      if (canCreateForRequest(presetRequest)) applyRequest(presetRequest)
+      else setError('Only the QA Lead group in this workspace or a currently assigned QA tester can create this clearance certificate.')
+      return
+    }
     // Filtering happens server-side, while the picker exhausts the filtered
     // result so an older eligible request is never impossible to select.
     const statusQuery = SIGNOFF_ELIGIBLE_STATUSES.map((s) => `status=${encodeURIComponent(s)}`).join('&')
     api.getAll<FunctionalListOut>(`/api/functional-requests?${statusQuery}`)
       .then(setEligibleRequests)
       .catch(setError)
-  }, [presetRequest, applyRequest])
+  }, [presetRequest, applyRequest, canCreateForRequest])
 
   useEffect(() => {
     const parentId = selectedRequest?.qa_request_id
@@ -289,8 +305,11 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   const testingTypes = [...new Set((parentRequest?.request_types || '').split(',').map(t => t.trim()).filter(Boolean))]
   const certificateRequestId = testingTypes.length > 1 ? parentRequest!.request_id : selectedRequest?.request_id
   const securityBlockers = parentRequest ? linkedSecurityClearanceBlockers(parentRequest) : []
-  const selectableRequests = form.certificate_type === 'Clearance Denied' ? eligibleRequests
-    : eligibleRequests.filter(request => ['QA_COMPLETED', 'QA_SIGNOFF_PENDING'].includes(request.status))
+  const actorEligibleRequests = eligibleRequests.filter(canCreateForRequest)
+  // Clearance Denied is exempt from evidence/pass eligibility, not from the
+  // Functional workflow. Every certificate type uses the same completed or
+  // clearance-pending source states and the same actor authorization gate.
+  const selectableRequests = actorEligibleRequests.filter(request => SIGNOFF_ELIGIBLE_STATUSES.includes(request.status))
 
   // PAG-006 -- `eligibleRequests` only ever holds the lightweight
   // FunctionalListOut shape; picking one fetches the full FunctionalOut
@@ -302,13 +321,17 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     setError(null)
     try {
       const full = await api.get<FunctionalOut>(`/api/functional-requests/${row.id}`)
+      if (!canCreateForRequest(full)) {
+        setError('Your assignment or QA authority for this request changed. Refresh before creating the certificate.')
+        return
+      }
       applyRequest(full)
     } catch (err) {
       setError(err)
     } finally {
       setSelecting(false)
     }
-  }, [applyRequest])
+  }, [applyRequest, canCreateForRequest])
 
   function clearSelection() {
     setSelectedRequest(null)
@@ -322,6 +345,10 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     // Request ID(s) fields need this explicit check instead -- they're only
     // ever filled in via picking a Testing Request above.
     if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name, Owner and CR Number/EPIC Number are derived from it.'); return }
+    if (!canCreateForRequest(selectedRequest)) {
+      setError('Only the QA Lead group in this workspace or a currently assigned QA tester can create this clearance certificate.')
+      return
+    }
     if (checkingSecurity) { setError('Checking the linked SAST/DAST requests. Please wait.'); return }
     if (securityBlockers.length) {
       setError(`QA Clearance is waiting for active linked SAST/DAST requests to finish: ${securityBlockers.join(', ')}. A final Department Head rejection does not block clearance.`)
@@ -629,19 +656,28 @@ function CertificateEvidence({ item }: { item: SignOffOut }) {
   const activeDefectStatuses = defectStatuses.filter(status => (summary.defects.counts[status] || 0) > 0)
   const openSeverity = summary.severity.reduce((total, row) => total + row.open, 0)
   const passPercent = summary.execution.pass_pct == null ? 'No result' : `${summary.execution.pass_pct}%`
+  const uniquePopulation = summary.execution_population_basis === 'unique_testcase_latest'
+  const populationLabel = uniquePopulation ? 'Unique test cases' : 'Execution slots (legacy snapshot)'
+  const populationDescription = uniquePopulation
+    ? 'latest result per unique test case'
+    : 'captured before unique-testcase counting'
+  const executionSummaryTitle = uniquePopulation
+    ? 'QA Unique Test Case Execution Summary'
+    : 'QA Test Case Execution Summary (Legacy Slot-Based)'
   return <section className="clearance-evidence" id="clearance-evidence">
     <div className="clearance-section-heading"><div><span>Captured results</span><h3>Test evidence</h3><p>Revision {summary.revision} · captured {formatDateTimeIST(summary.captured_at)}</p></div><span className="clearance-frozen-badge">Snapshot locked</span></div>
     <div className="clearance-evidence-metrics">
-      <article><small>Test cases</small><strong>{summary.execution.total}</strong><span>latest linked results</span></article>
+      <article><small>{populationLabel}</small><strong>{summary.execution.total}</strong><span>{populationDescription}</span></article>
       <article><small>Pass rate</small><strong>{passPercent}</strong><span>Pass + Retest Passed</span></article>
       <article><small>Defects</small><strong>{summary.defects.total}</strong><span>counted once</span></article>
       <article className={openSeverity ? 'needs-review' : ''}><small>Open defects</small><strong>{openSeverity}</strong><span>{summary.open_critical_high} Critical / High</span></article>
     </div>
+    {!uniquePopulation && <div className="clearance-evidence-warning" role="status">This frozen revision uses the earlier execution-slot counting method. Refresh editable evidence to recalculate unique test cases; issued and historical revisions remain unchanged for audit integrity.</div>}
     {summary.open_critical_high > 0 && <div className="clearance-evidence-warning" role="status">Full Clearance is blocked while {summary.open_critical_high} Critical or High defect(s) remain open.</div>}
     {changeIdentity}
     <div className="clearance-evidence-panels">
-      <details open><summary><span><b>QA Test Case Execution Summary</b><small>Results and pass percentage for the linked test scope</small></span><strong>{summary.execution.total} cases</strong></summary>
-        <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>Total</th>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <th key={status}>{status}</th>)}<th>Pass %</th></tr></thead><tbody><tr><td>{summary.execution.total}</td>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <td key={status}>{summary.execution.counts[status] || 0}</td>)}<td>{summary.execution.pass_pct == null ? 'NA' : `${summary.execution.pass_pct}%`}</td></tr></tbody></table></div>
+      <details open><summary><span><b>{executionSummaryTitle}</b><small>{uniquePopulation ? 'Latest result per unique test case in the linked test scope' : 'Historical execution-slot results retained exactly as captured'}</small></span><strong>{summary.execution.total} {uniquePopulation ? (summary.execution.total === 1 ? 'unique case' : 'unique cases') : (summary.execution.total === 1 ? 'slot' : 'slots')}</strong></summary>
+        <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>{populationLabel}</th>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <th key={status}>{status}</th>)}<th>Pass %</th></tr></thead><tbody><tr><td>{summary.execution.total}</td>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <td key={status}>{summary.execution.counts[status] || 0}</td>)}<td>{summary.execution.pass_pct == null ? 'NA' : `${summary.execution.pass_pct}%`}</td></tr></tbody></table></div>
       </details>
       <details><summary><span><b>QA Defect Status Summary</b><small>Current disposition, with deferred defects still open</small></span><strong>{summary.defects.total} defects</strong></summary>
         <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>{activeDefectStatuses.map(status => <tr key={status}><td>{status}{status === 'Deferred' ? ' (Open)' : ''}</td><td>{summary.defects.counts[status] || 0}</td></tr>)}{summary.defects.total === 0 && <tr><td colSpan={2}>No linked defects captured</td></tr>}<tr><th>Total</th><td>{summary.defects.total}</td></tr></tbody></table></div>
@@ -670,9 +706,17 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
   const [confirmRefresh, setConfirmRefresh] = useState(false)
   const [showRevision, setShowRevision] = useState(false)
   const [revisionReason, setRevisionReason] = useState('')
+  const [showTakeover, setShowTakeover] = useState(false)
+  const [takeoverReason, setTakeoverReason] = useState('')
+  const [takeoverNotice, setTakeoverNotice] = useState('')
   const [detailTab, setDetailTab] = useState('evidence')
   const detailTabs = [['evidence', 'Test evidence'], ['details', 'Certificate details'], ['remarks', 'Remarks & risks'], ['documents', 'Documents'], ['activity', 'Approvals & activity']]
-  useEffect(() => { setDetailTab('evidence') }, [item.id])
+  useEffect(() => {
+    setDetailTab('evidence')
+    setShowTakeover(false)
+    setTakeoverReason('')
+    setTakeoverNotice('')
+  }, [item.id])
 
   const load = useCallback(async () => {
     try { setHistory(await api.get<ApprovalActionOut[]>(`/api/signoffs/${item.id}/history`)) }
@@ -685,7 +729,18 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
     setBusyAction(action)
     try {
       const updated = await api.post<SignOffOut>(`/api/signoffs/${item.id}/${action}`, extra || {})
-      onChanged(updated)
+      // Mutation responses intentionally serialize viewer capabilities with
+      // fail-closed defaults. Refresh through the detail GET so revision
+      // permissions are recalculated from the live assignment/workflow for
+      // this actor. If only that refresh fails, still publish the successful
+      // mutation and make the recovery step explicit so the actor does not
+      // accidentally submit the workflow action twice.
+      try {
+        onChanged(await api.get<SignOffOut>(`/api/signoffs/${item.id}`))
+      } catch {
+        onChanged(updated)
+        setError(new Error('The action was saved, but current permissions could not be refreshed. Close and reopen this certificate before taking another action.'))
+      }
       setComments('')
       await load()
     } catch (err) { setError(err) } finally { setBusyAction(null) }
@@ -719,6 +774,38 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
     } catch (err) { setError(err) } finally { setBusyAction(null) }
   }
 
+  async function takeOverCertificate() {
+    const reason = takeoverReason.trim()
+    if (reason.length < 10) {
+      setError('Enter a takeover reason of at least 10 characters.')
+      return
+    }
+    setError(null)
+    setTakeoverNotice('')
+    setBusyAction('qa-lead-group-takeover')
+    try {
+      const updated = await api.post<SignOffOut>(
+        `/api/signoffs/${item.id}/qa-lead-group-takeover`,
+        { reason },
+      )
+      let current = updated
+      try {
+        current = await api.get<SignOffOut>(`/api/signoffs/${item.id}`)
+      } catch {
+        setError(new Error('Ownership was transferred, but current permissions could not be refreshed. Close and reopen this certificate before taking another action.'))
+      }
+      setShowTakeover(false)
+      setTakeoverReason('')
+      setTakeoverNotice('Certificate ownership transferred to you through the QA Lead Group recovery action. A different eligible QA Lead must approve it after submission.')
+      onChanged(current)
+      await load()
+    } catch (err) {
+      setError(err)
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
   async function openRelatedCertificate(id: number) {
     setError(null)
     setBusyAction('lineage')
@@ -727,50 +814,64 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
   }
 
   const viewOnly = isViewOnly(user)
-  const isRequester = (!viewOnly && item.requester_id === user?.id) || hasRole(user, 'ADMIN')
+  // System administration is not certificate-workflow authority. An Admin
+  // may use these owner actions only when they are also the actual QA author;
+  // explicit QA approval/revision capabilities remain evaluated separately.
+  const isRequester = !viewOnly && item.requester_id === user?.id
   const status = item.status
-  const isAdmin = hasRole(user, 'ADMIN')
-  const isQADepartment = hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA') || isAdmin
+  const isQADepartment = hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
+  const hasCurrentExecutionBasis = item.certificate_summary?.execution_population_basis === 'unique_testcase_latest'
+  const requiresPopulationRefresh = !isImmutableClearanceStatus(status) && !hasCurrentExecutionBasis
 
-  const canSubmit = isRequester && status === 'DRAFT'
+  const canSubmit = isRequester && status === 'DRAFT' && hasCurrentExecutionBasis
+  // Actor-only context is used solely to explain a temporary Retest lock.
+  // Rendering the action itself below always requires the backend's full
+  // live `can_create_revision` capability.
+  const revisionOtherwiseAllowed = !viewOnly
+    && item.revision_actor_allowed === true
+    && ['ISSUED', 'ISSUED_UNDER_REVIEW', 'SM_REJECTED', 'DEPT_HEAD_COE_REJECTED'].includes(status)
+    && !item.superseded_by_id
   const canCreateRevision = canCreateClearanceRevision({
     status,
-    requesterId: item.requester_id,
-    userId: user?.id,
-    isAdmin,
+    canCreateRevision: item.can_create_revision,
+    revisionActorAllowed: item.revision_actor_allowed,
     viewOnly,
     supersededById: item.superseded_by_id,
+    sourceRequestStatus: item.source_request_status,
+    sourceStatusResolved: item.source_request_status != null || !item.testing_request_id,
   })
+  const revisionBlockedByRetest = revisionOtherwiseAllowed
+    && ['EXECUTION_IN_PROGRESS', 'DEFECT_RAISED', 'WAITING_FOR_FIX', 'RETESTING'].includes(item.source_request_status || '')
   // Rejection is terminal for that certificate. Continuing after either
   // approval-stage rejection creates a linked Draft successor; the rejected
   // predecessor is never edited or resubmitted in place.
   // RETURNED_BY_REQUESTER remains here only so pre-immutable-revision rows
-  // can complete their legacy path. New requester changes create a successor.
-  const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER'].includes(status)
+  // can complete their legacy path. New requester changes enter the
+  // Functional Request's explicit QA change-review stage first.
+  const canResubmit = isRequester && hasCurrentExecutionBasis && ['RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER'].includes(status)
   const resubmitLabel = status === 'RETURNED_BY_REQUESTER' ? 'Reopen Certificate' : 'Re-submit'
   // Reported directly: a person who raised this certificate but also
   // separately holds QA Lead/Executive  must not be able to approve
-  // their own certificate -- someone else holding that role must decide it
-  // instead. Admin still bypasses (matches the backend's
-  // require_not_requester, which enforces the same check server-side).
-  const isSelfApproval = item.requester_id === user?.id && !isAdmin
-  const isPriorStageApprover = item.reviewed_by_id === user?.id && !isAdmin
-  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on this QA Lead
-  // checkpoint, same as Admin -- see ORACLE_MIGRATION_2026-07.md section 59.
-  const canQALeadDecide = hasRole(user, ...QA_LEAD_GROUP_ROLES) && status === 'SM_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
+  // their own certificate -- someone else holding that role must decide it.
+  // Workflow authority deliberately does not inherit System Admin here.
+  const isSelfApproval = item.requester_id === user?.id
+  const isPriorStageApprover = item.reviewed_by_id === user?.id
+  // Executive roles can also act at this QA Lead checkpoint when they hold
+  // active access to the certificate workspace.
+  const canQALeadDecide = hasCurrentExecutionBasis && hasRole(user, ...QA_LEAD_GROUP_ROLES) && status === 'SM_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
   // Reported directly ("Executive also Chief Manager and AGM only") while
   // verifying this checkpoint's role set -- this was missing CHIEF_MANAGER_QA
   // entirely (only checked AGM_QA), even though the backend's
   // executive_coe_decision (signoff.py) already require_roles()'d both. A
   // Chief Manager - QA account couldn't even see these buttons; now fixed to
   // match the backend exactly.
-  const canExecutiveCoeDecide = hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && status === 'DEPT_HEAD_QA_APPROVAL_PENDING' && isQADepartment && !isSelfApproval && !isPriorStageApprover
+  const canExecutiveCoeDecide = hasCurrentExecutionBasis && hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && status === 'DEPT_HEAD_QA_APPROVAL_PENDING' && isQADepartment && !isSelfApproval && !isPriorStageApprover
   const awaitingIndependentExecutive = status === 'DEPT_HEAD_QA_APPROVAL_PENDING' && isPriorStageApprover
   // Reported directly: "only the assigned person can update" -- once the
   // certificate has moved past the requester, document control passes
   // exclusively to whoever it's actually sitting with now, matching the
   // backend's own (now-exclusive) _can_upload_documents (signoff.py).
-  const canManageDocuments = isAdmin || (
+  const canManageDocuments = (
     ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER'].includes(status) ? isRequester :
     status === 'SM_APPROVAL_PENDING' ? canQALeadDecide :
     status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? canExecutiveCoeDecide :
@@ -799,11 +900,12 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
     return Array.from(byStage.values())
   }, [history])
 
-  const stageIndex = ['ISSUED', 'SUPERSEDED'].includes(status) ? 3 : ['DEPT_HEAD_QA_APPROVAL_PENDING', 'DEPT_HEAD_COE_REJECTED'].includes(status) ? 2 : ['SM_APPROVAL_PENDING', 'SM_REJECTED'].includes(status) ? 1 : 0
+  const stageIndex = ['ISSUED', 'ISSUED_UNDER_REVIEW', 'SUPERSEDED'].includes(status) ? 3 : ['DEPT_HEAD_QA_APPROVAL_PENDING', 'DEPT_HEAD_COE_REJECTED'].includes(status) ? 2 : ['SM_APPROVAL_PENDING', 'SM_REJECTED'].includes(status) ? 1 : 0
   const isRejected = ['SM_REJECTED', 'DEPT_HEAD_COE_REJECTED'].includes(status)
+  const isClearanceDenied = item.certificate_type === 'Clearance Denied'
   const stageNames = ['Draft', 'QA Lead', 'Executive', 'Issued']
-  const nextStep = status === 'ISSUED' ? 'Certificate issued' : isRejected ? 'Certificate rejected' : status === 'SUPERSEDED' ? 'Historical certificate' : status === 'VOIDED' ? 'Retired duplicate' : status === 'DRAFT' ? 'Submit for QA Lead review' : status === 'SM_APPROVAL_PENDING' ? 'QA Lead review' : status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? 'Executive review' : canResubmit ? 'Revise and re-submit the certificate' : SIGNOFF_STATUS_LABELS[status] || status
-  const nextStepHint = status === 'ISSUED' ? 'The signed certificate is immutable. Create a revised certificate if approved content must change.' : isRejected ? 'This rejection is terminal and immutable. Create a revised certificate to start a fresh approval workflow.' : status === 'SUPERSEDED' ? 'This signed certificate remains immutable and has been replaced by the linked successor.' : status === 'VOIDED' ? 'This unissued legacy duplicate was retained for audit history and cannot be progressed.' : status === 'DRAFT' ? 'Review the captured evidence and remarks before submitting.' : status === 'SM_APPROVAL_PENDING' ? 'An eligible QA Lead must approve, return, or reject this certificate.' : status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? 'An independent eligible Executive must make the final decision.' : canResubmit ? 'Update the requested details, then restart approval.' : 'Review the decision history and available actions below.'
+  const nextStep = status === 'ISSUED' && isClearanceDenied ? 'Clearance denied — requester acknowledgement' : status === 'ISSUED' ? 'Certificate issued' : status === 'ISSUED_UNDER_REVIEW' ? 'Requester changes under QA review' : isRejected ? 'Certificate rejected' : status === 'SUPERSEDED' ? 'Historical certificate' : status === 'VOIDED' ? 'Retired duplicate' : requiresPopulationRefresh ? 'Refresh evidence for unique-testcase counting' : status === 'DRAFT' ? 'Submit for QA Lead review' : status === 'SM_APPROVAL_PENDING' ? 'QA Lead review' : status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? 'Executive review' : canResubmit ? 'Revise and re-submit the certificate' : SIGNOFF_STATUS_LABELS[status] || status
+  const nextStepHint = status === 'ISSUED' && isClearanceDenied ? 'The denial decision is issued, immutable, and downloadable. The linked Functional Request remains with its requester until they acknowledge the outcome and close it.' : status === 'ISSUED' ? 'The signed certificate is immutable. Create a revised certificate if approved content must change.' : status === 'ISSUED_UNDER_REVIEW' ? 'The signed evidence remains immutable and downloadable while QA decides whether to resend it, revise it, or perform re-testing.' : isRejected ? 'This rejection is terminal and immutable. Create a revised certificate to start a fresh approval workflow.' : status === 'SUPERSEDED' ? 'This signed certificate remains immutable and has been replaced by the linked successor.' : status === 'VOIDED' ? 'This unissued legacy duplicate was retained for audit history and cannot be progressed.' : requiresPopulationRefresh ? 'The certificate owner must refresh this legacy snapshot before submission or approval can continue.' : status === 'DRAFT' ? 'Review the captured evidence and remarks before submitting.' : status === 'SM_APPROVAL_PENDING' ? 'An eligible QA Lead must approve, return, or reject this certificate.' : status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? 'An independent eligible Executive must make the final decision.' : canResubmit ? 'Update the requested details, then restart approval.' : 'Review the decision history and available actions below.'
   const assignedTesters = item.certificate_summary?.assigned_testers
   const conditionalDetails = item.certificate_summary ? item.certificate_summary.certificate_fields : item
 
@@ -811,11 +913,12 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
     <Modal title={item.certificate_id} onClose={onClose} wide>
       <div className="clearance-detail">
       <ErrorText error={error} />
+      {takeoverNotice && <div className="alert alert-success" role="status">{takeoverNotice}</div>}
       <section className="clearance-hero clearance-overview" aria-label="Certificate overview">
         <div className="clearance-hero-main"><span className="clearance-eyebrow">QA clearance · {item.certificate_type}</span><h2>{item.application_name}</h2><p>{item.change_description || 'Change description not recorded'}</p><div className="clearance-hero-chips"><span>Revision <b>{item.revision_number || 1}</b></span><span>CR / EPIC <b>{item.change_request_ids || '—'}</b></span><span>Request <b>{item.certificate_testing_request_id || item.testing_request_id || '—'}</b></span><span>Build <b>{item.build_number || '—'}</b></span><span>Testing <b>{item.certificate_testing_type || item.testing_type}</b></span><span>Promotion <b>{item.environment_tested || '—'} → {item.target_promotion_environment || '—'}</b></span></div></div>
         <div className="clearance-hero-status"><small>Current status</small><WorkflowStatusBadge record={item} workflow="signoff" status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /><span>{SIGNOFF_PENDING_WITH[status] && SIGNOFF_PENDING_WITH[status] !== '—' ? `Pending with ${SIGNOFF_PENDING_WITH[status]}` : item.certificate_date ? `Dated ${item.certificate_date}` : 'See Approvals & activity'}</span></div>
       </section>
-      <nav className="clearance-stage-track" aria-label="Approval progress">{stageNames.map((name, index) => <div key={name} aria-current={index === stageIndex ? 'step' : undefined} className={`clearance-stage ${index < stageIndex ? 'is-done' : index === stageIndex ? (isRejected ? 'is-rejected' : 'is-current') : ''}`}><span>{index === stageIndex && isRejected ? '×' : index < stageIndex || ['ISSUED', 'SUPERSEDED'].includes(status) ? '✓' : index + 1}</span><b>{name}</b></div>)}</nav>
+      <nav className="clearance-stage-track" aria-label="Approval progress">{stageNames.map((name, index) => <div key={name} aria-current={index === stageIndex ? 'step' : undefined} className={`clearance-stage ${index < stageIndex ? 'is-done' : index === stageIndex ? (isRejected ? 'is-rejected' : 'is-current') : ''}`}><span>{index === stageIndex && isRejected ? '×' : index < stageIndex || ['ISSUED', 'ISSUED_UNDER_REVIEW', 'SUPERSEDED'].includes(status) ? '✓' : index + 1}</span><b>{name}</b></div>)}</nav>
       {(item.supersedes_id || item.superseded_by_id) && <div className="alert alert-info" role="status">
         <strong>Certificate lineage:</strong>{' '}
         {item.supersedes_id && <button type="button" className="btn btn-sm" disabled={!!busyAction} onClick={() => void openRelatedCertificate(item.supersedes_id!)}>Previous: {item.supersedes_certificate_id || `#${item.supersedes_id}`}</button>}
@@ -828,13 +931,15 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
         <div className="clearance-section-heading"><div><span>Next action</span><h3>{nextStep}</h3><p>{nextStepHint}</p></div></div>
         {!isImmutableClearanceStatus(status) && <ClearanceRequirements certificateType={item.certificate_type} />}
         <div className="clearance-action-row">
-          <button className={['ISSUED', 'SUPERSEDED'].includes(item.status) ? 'btn btn-sm btn-primary' : 'btn btn-sm'} disabled={!!busyAction} onClick={downloadCertificate}>{busyAction === 'download' ? 'Downloading…' : ['ISSUED', 'SUPERSEDED'].includes(item.status) ? 'Download Certificate' : 'Export PDF'}</button>
+          <button className={['ISSUED', 'ISSUED_UNDER_REVIEW', 'SUPERSEDED'].includes(item.status) ? 'btn btn-sm btn-primary' : 'btn btn-sm'} disabled={!!busyAction} onClick={downloadCertificate}>{busyAction === 'download' ? 'Downloading…' : ['ISSUED', 'ISSUED_UNDER_REVIEW', 'SUPERSEDED'].includes(item.status) ? 'Download Certificate' : 'Export PDF'}</button>
           {canEditDetails && <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setEditing(true)}>Edit Details</button>}
           {canSubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('submit')}>Submit for QA Lead Approval</button>}
           {canResubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
           {canCreateRevision && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => setShowRevision(true)}>Create Revised Certificate</button>}
-          {(isRequester || user?.roles.includes('ADMIN')) && !isImmutableClearanceStatus(status) && <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setConfirmRefresh(true)}>Refresh evidence & restart approval</button>}
+          {item.can_take_over === true && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => { setError(null); setTakeoverNotice(''); setShowTakeover(true) }}>Take Over as QA Lead Group</button>}
+          {isRequester && !isImmutableClearanceStatus(status) && <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setConfirmRefresh(true)}>Refresh evidence & restart approval</button>}
         </div>
+        {revisionBlockedByRetest && <div className="alert alert-info" role="status"><strong>Certificate revision is locked while re-testing is in progress.</strong><span>Complete the new re-execution cycle and mark QA Completed before creating the revised certificate.</span></div>}
       </section>
       {confirmRefresh && <ConfirmModal title="Refresh certificate evidence?" message={<p>This captures current linked results and returns the certificate to Draft. Existing approvals and clearance become invalid. QA Lead and Executive must approve the new revision.</p>} confirmLabel="Refresh & require reapproval" onCancel={() => setConfirmRefresh(false)} onConfirm={() => { setConfirmRefresh(false); void act('refresh-summary') }} />}
       {showRevision && <Modal title="Create Revised Certificate" onClose={() => { if (!busyAction) setShowRevision(false) }} variant="dialog" preventBackdropClose closeDisabled={!!busyAction}>
@@ -843,6 +948,13 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
           : 'The signed certificate remains immutable and will be marked Superseded. A new Draft will capture current evidence and require QA Lead and Executive approval.'}</p>
         <Field label="Revision reason (required)"><textarea maxLength={2000} rows={5} value={revisionReason} onChange={event => setRevisionReason(event.target.value)} placeholder="Describe the agreed certificate changes" /></Field>
         <div className="clearance-action-row"><button type="button" className="btn btn-primary" disabled={!!busyAction || revisionReason.trim().length < 3} onClick={() => void createRevision()}>{busyAction === 'revisions' ? 'Creating…' : 'Create Revision'}</button><button type="button" className="btn" disabled={!!busyAction} onClick={() => setShowRevision(false)}>Cancel</button></div>
+      </Modal>}
+      {showTakeover && <Modal title="Take Over Certificate Ownership" onClose={() => { if (!busyAction) setShowTakeover(false) }} variant="dialog" preventBackdropClose closeDisabled={!!busyAction}>
+        <p>This QA Lead Group recovery action is available because the current certificate owner can no longer act. It transfers the editable Draft to you, clears prior approvals, and preserves the certificate evidence and audit history.</p>
+        <p>A different eligible QA Lead must approve the certificate after you submit it.</p>
+        <Field label="Takeover reason (required)"><textarea maxLength={2000} rows={5} value={takeoverReason} onChange={event => setTakeoverReason(event.target.value)} placeholder="Explain why the current QA author cannot continue" /></Field>
+        <ErrorText error={error} />
+        <div className="clearance-action-row"><button type="button" className="btn btn-primary" disabled={!!busyAction || takeoverReason.trim().length < 10} onClick={() => void takeOverCertificate()}>{busyAction === 'qa-lead-group-takeover' ? 'Transferring…' : 'Confirm QA Lead Group Takeover'}</button><button type="button" className="btn" disabled={!!busyAction} onClick={() => setShowTakeover(false)}>Cancel</button></div>
       </Modal>}
 
       {canQALeadDecide && <div className="clearance-decision-buttons"><ApprovalDecisionButtons userName={user?.full_name} comments={comments} busy={!!busyAction} onApprove={(signed) => act('qa-lead-decision', { decision: 'Approved', comments: signed })} onReturn={(actionNote) => act('qa-lead-decision', { decision: 'Returned', comments: actionNote })} onReject={(actionNote) => act('qa-lead-decision', { decision: 'Rejected', comments: actionNote })} /></div>}
@@ -1003,7 +1115,7 @@ export default function SignOff() {
   const counts = result?.status_counts || {}
   const issuedCount = counts.ISSUED || 0
   const reviewCount = ['SM_APPROVAL_PENDING', 'DEPT_HEAD_QA_APPROVAL_PENDING'].reduce((sum, status) => sum + (counts[status] || 0), 0)
-  const actionCount = ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER', 'DEPT_HEAD_COE_REJECTED'].reduce((sum, status) => sum + (counts[status] || 0), 0)
+  const actionCount = ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER', 'DEPT_HEAD_COE_REJECTED', 'ISSUED_UNDER_REVIEW'].reduce((sum, status) => sum + (counts[status] || 0), 0)
 
   // 2026-08 -- reported directly: "'Request Sign Off' button is not
   // enable[d] for QA lead ... in sign off ... section" -- widened from
@@ -1054,7 +1166,7 @@ export default function SignOff() {
             render: (r) => (
               <span className="signoff-id-cell">
                 <span>{r.certificate_id}</span>
-                {['ISSUED', 'SUPERSEDED'].includes(r.status) && (
+                {['ISSUED', 'ISSUED_UNDER_REVIEW', 'SUPERSEDED'].includes(r.status) && (
                   <button type="button" className="btn btn-sm btn-primary" disabled={downloadingId === r.id} onClick={(e) => { e.stopPropagation(); downloadCertificate(r) }}>
                     {downloadingId === r.id ? 'Downloading…' : 'Download'}
                   </button>

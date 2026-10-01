@@ -359,7 +359,7 @@ export const QA_STATUSES: string[] = [
   'READINESS_VERIFICATION', 'RETURNED_BY_QA_LEAD', 'QA_ACTIVITY_INITIATED',
   'PLANNING', 'TESTER_ASSIGNED', 'TEST_DESIGN', 'EXECUTION_IN_PROGRESS', 'DEFECT_RAISED',
   'WAITING_FOR_FIX', 'RETESTING', 'QA_COMPLETED', 'QA_SIGNOFF_PENDING',
-  'QA_SIGNED_OFF', 'REQUESTER_VERIFICATION', 'CLOSED', 'CANCELLED',
+  'QA_SIGNED_OFF', 'REQUESTER_VERIFICATION', 'QA_CHANGE_REVIEW', 'CLOSED', 'CANCELLED',
 ]
 
 // 2026-08 -- reported directly: "once assigned there are no other option to
@@ -392,7 +392,8 @@ export const QA_STATUS_LABELS: Record<string, string> = {
   EXECUTION_IN_PROGRESS: 'Execution In Progress', DEFECT_RAISED: 'Defect Raised',
   WAITING_FOR_FIX: 'Waiting For Fix', RETESTING: 'Retesting',
   QA_COMPLETED: 'QA Completed', QA_SIGNOFF_PENDING: 'QA Clearance Pending', QA_SIGNED_OFF: 'QA Cleared',
-  REQUESTER_VERIFICATION: 'Requester Verification', CLOSED: 'Closed', CANCELLED: 'Cancelled',
+  REQUESTER_VERIFICATION: 'Requester Verification', QA_CHANGE_REVIEW: 'QA Change Review',
+  CLOSED: 'Closed', CANCELLED: 'Cancelled',
 }
 
 // "Pending With" -- who needs to act next, for the list table column of the
@@ -416,8 +417,9 @@ export const QA_PENDING_WITH: Record<string, string> = {
   TESTER_ASSIGNED: 'QA', TEST_DESIGN: 'QA', EXECUTION_IN_PROGRESS: 'QA',
   DEFECT_RAISED: 'Requester', WAITING_FOR_FIX: 'Requester',
   RETESTING: 'QA',
-  QA_COMPLETED: 'QA Lead', QA_SIGNOFF_PENDING: 'QA Lead',
+  QA_COMPLETED: 'QA', QA_SIGNOFF_PENDING: 'QA Lead',
   QA_SIGNED_OFF: 'Requester', REQUESTER_VERIFICATION: 'Requester',
+  QA_CHANGE_REVIEW: 'QA',
   CLOSED: '—', CANCELLED: '—',
 }
 
@@ -789,9 +791,11 @@ export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
   RETURNED_BY_DEPT_HEAD_COE: 'Returned by Executive',
   DEPT_HEAD_COE_REJECTED: 'Rejected by Executive',
   ISSUED: 'Issued',
+  ISSUED_UNDER_REVIEW: 'Issued — Under QA Review',
   // Compatibility status for certificates returned before immutable
-  // successor revisions were introduced. New requester change decisions
-  // preserve the issued row as SUPERSEDED and create a linked Draft instead.
+  // successor revisions and explicit QA change review were introduced. New
+  // requester change decisions keep the issued row immutable under review;
+  // QA explicitly decides whether a successor Draft is required.
   RETURNED_BY_REQUESTER: 'Returned by Requester',
   SUPERSEDED: 'Superseded',
   VOIDED: 'Voided duplicate',
@@ -805,7 +809,7 @@ export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
 // rejected status and can only be continued by creating a linked Draft
 // successor. RETURNED_BY_REQUESTER remains editable for legacy rows only.
 export const SIGNOFF_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER']
-export const SIGNOFF_TERMINAL_STATUSES: string[] = ['SM_REJECTED', 'DEPT_HEAD_COE_REJECTED', 'ISSUED', 'SUPERSEDED', 'VOIDED']
+export const SIGNOFF_TERMINAL_STATUSES: string[] = ['SM_REJECTED', 'DEPT_HEAD_COE_REJECTED', 'ISSUED', 'ISSUED_UNDER_REVIEW', 'SUPERSEDED', 'VOIDED']
 // "Pending With" -- who needs to act next, for the list table column of the
 // same name. Derived from each transition's require_roles() gate in
 // routers/signoff.py -- "Tester" (not "Requester") for the originator here,
@@ -815,7 +819,7 @@ export const SIGNOFF_PENDING_WITH: Record<string, string> = {
   DRAFT: 'Tester', SUBMITTED: 'QA Lead',
   SM_APPROVAL_PENDING: 'QA Lead', RETURNED_BY_SM: 'Tester', SM_REJECTED: '—',
   DEPT_HEAD_QA_APPROVAL_PENDING: 'Executive', RETURNED_BY_DEPT_HEAD_COE: 'Tester', DEPT_HEAD_COE_REJECTED: '—',
-  ISSUED: '—', RETURNED_BY_REQUESTER: 'Tester', SUPERSEDED: '—', VOIDED: '—',
+  ISSUED: '—', ISSUED_UNDER_REVIEW: 'QA', RETURNED_BY_REQUESTER: 'Tester', SUPERSEDED: '—', VOIDED: '—',
 }
 
 // Admin section: account authentication type (must mirror backend LoginType).
@@ -923,7 +927,7 @@ export const REPORTS: ReportDef[] = [
   { key: 'testcase-approval-summary', label: 'Testcase Approval Backlog', group: 'Management', description: 'Draft, recommendation, QA Lead approval and approved counts by project.' },
   { key: 'application-quality-scorecard', label: 'Application Quality Scorecard', group: 'Management', description: 'Cross-module request, testing, defect and issued clearance position by application.' },
   { key: 'qa-signoff-register', label: 'QA Clearance Register', group: 'Management', description: 'Certificate workflow, validity, signatories and final issuance status.' },
-  { key: 'qa-clearance-evidence', label: 'QA Clearance Evidence Summary', group: 'Management', description: 'Frozen test execution and defect figures from each certificate revision, with assigned testers.' },
+  { key: 'qa-clearance-evidence', label: 'QA Clearance Evidence Summary', group: 'Management', description: 'Frozen latest results per unique test case and defect figures from each certificate revision, with assigned testers. Earlier slot-based revisions are identified separately.' },
   { key: 'audit-evidence', label: 'Approval Audit Evidence', group: 'Management', description: 'Chronological workflow decisions with actor, role, comments and timestamp.' },
   { key: 'document-portal-inventory', label: 'Document Portal Inventory', group: 'Documents', description: 'Files in your selected workspace: relative folder, type, size and last-modified date. Document Portal access required.' },
 ]

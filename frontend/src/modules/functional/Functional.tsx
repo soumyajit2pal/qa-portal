@@ -23,6 +23,7 @@ import {
   useChecklistDocuments,
   ReadinessPassError,
   EmptyState,
+  WorkflowDecisionPanel,
   applicationNameAwareStatusLabel,
 } from "../../components/Common";
 import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
@@ -60,9 +61,20 @@ import {
   ApprovalActionOut,
   SignOffOut,
   EligibleTestCycleOut,
+  LinkedTestCycleRef,
   RequestDocumentOut,
 } from "../../types";
 import { usePaginatedList } from "../../hooks/usePaginatedList";
+import {
+  clearanceRetestLineageLeaves,
+  eligibleClearanceRetestCycles,
+  isLegacyCertificateRequesterFallback,
+} from "../../clearanceRetest";
+import {
+  functionalClearanceCapabilities,
+  functionalWorkflowActors,
+} from "../../functionalWorkflowAuthority";
+import { functionalPendingWithLabel } from "../../functionalPendingWith";
 // Reused as-is from the Governance module -- the app is now a single
 // consolidated Vite app (see README "Frontend architecture"), so importing
 // across module folders is a plain relative import, no remote/federation
@@ -434,7 +446,7 @@ const LIFECYCLE_STAGES = [
 // routers/functional.py's own status transitions -- SM_APPROVAL_PENDING is
 // gated by Role.SM, DEPARTMENT_HEAD_APPROVAL_PENDING by
 // Role.DEPARTMENT_HEAD_CM/AGM, everything from QA_LEAD_ASSIGNED through
-// QA_COMPLETED by Role.QA_LEAD) to whichever group is genuinely holding the
+// QA activity and post-execution review statuses to whichever group is genuinely holding the
 // request right now. Returns null for every requester-owned/terminal/
 // Sign-off-phase status (Draft, Submitted, any RETURNED_BY_*/*_REJECTED,
 // QA Clearance phase, Requester Verification, Closed, Cancelled) -- those
@@ -507,7 +519,11 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const linkedCycle = req.linked_test_cycles?.[0];
+  // A returned clearance may have immutable Completed history plus a new
+  // Draft re-execution clone. Start the active clone, never the first
+  // historical cycle merely because it was linked earliest.
+  const linkedCycle = req.linked_test_cycles?.find((cycle) => cycle.status !== "Completed")
+    || (req.linked_test_cycles?.length === 1 ? req.linked_test_cycles[0] : undefined);
 
   useEffect(() => {
     if (linkedCycle) return;
@@ -698,7 +714,7 @@ function lifecycleStageIndex(status?: string): number {
   )
     return 3;
   if (
-    ["QA_SIGNOFF_PENDING", "QA_SIGNED_OFF", "REQUESTER_VERIFICATION"].includes(
+    ["QA_SIGNOFF_PENDING", "QA_SIGNED_OFF", "REQUESTER_VERIFICATION", "QA_CHANGE_REVIEW"].includes(
       status
     )
   )
@@ -743,6 +759,12 @@ export function FunctionalDetail({
   // the backend's own mandatory-reason check in
   // routers/functional.py::requester_decision.
   const [requesterComments, setRequesterComments] = useState("");
+  // Requester-requested certificate changes are first reviewed by QA. No
+  // successor certificate or mutable copy of an issued certificate is made
+  // until QA explicitly chooses the appropriate path below.
+  const [clearanceChangeComments, setClearanceChangeComments] = useState("");
+  const [retestSourceCycleId, setRetestSourceCycleId] = useState<number | null>(null);
+  const [createdReexecutionCycle, setCreatedReexecutionCycle] = useState<LinkedTestCycleRef | null>(null);
   const [selectedQALead, setSelectedQALead] = useState("");
   const [selectedTesters, setSelectedTesters] = useState<string[]>([]);
   // 2026-08 Reassignment CR -- a reason is mandatory when this is a genuine
@@ -788,6 +810,12 @@ export function FunctionalDetail({
     load();
   }, [load]);
 
+  useEffect(() => {
+    setCreatedReexecutionCycle(null);
+    setRetestSourceCycleId(null);
+    setClearanceChangeComments("");
+  }, [req.id]);
+
   async function act(action: string, extra?: Record<string, unknown>) {
     setError(null);
     const isReadinessPass = action === "readiness-decision" && extra?.decision === "Passed";
@@ -801,6 +829,7 @@ export function FunctionalDetail({
       onChanged(updated);
       setComments("");
       setRequesterComments("");
+      setClearanceChangeComments("");
       await load();
     } catch (err) {
       if (isReadinessPass) setReadinessPassError(err);
@@ -810,12 +839,52 @@ export function FunctionalDetail({
     }
   }
 
+  async function decideClearanceChange(
+    decision: "ResendIssued" | "ReviseCertificate" | "Retest",
+    sourceCycleId?: number | null,
+  ) {
+    const reason = clearanceChangeComments.trim();
+    if (reason.length < 3) {
+      setError(new Error("Enter QA review comments of at least 3 characters before choosing an action."));
+      return;
+    }
+    if (decision === "Retest" && !sourceCycleId) {
+      setError(new Error("Select the completed Test Cycle to use as the re-execution baseline."));
+      return;
+    }
+
+    setError(null);
+    setBusyAction("clearance-change-decision");
+    try {
+      const existingCycleIds = new Set((req.linked_test_cycles || []).map((cycle) => cycle.id));
+      const updated = await api.post<FunctionalOut>(
+        `/api/functional-requests/${req.id}/clearance-change-decision`,
+        {
+          decision,
+          comments: reason,
+          ...(decision === "Retest" ? { source_cycle_id: sourceCycleId } : {}),
+        },
+      );
+      const newReexecution = decision === "Retest"
+        ? (updated.linked_test_cycles || []).find((cycle) => !existingCycleIds.has(cycle.id)) || null
+        : null;
+      setCreatedReexecutionCycle(newReexecution);
+      setClearanceChangeComments("");
+      setRetestSourceCycleId(null);
+      onChanged(updated);
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   // Called once the QA Clearance Certificate modal has successfully created
   // its Draft certificate (POST /api/signoffs) -- immediately links it to
-  // this request and moves the request to QA_SIGNOFF_PENDING via the
-  // existing request-signoff transition (see routers/functional.py::
-  // request_signoff's new optional signoff_id, which is exactly what
-  // schemas.RequestSignoffIn exists for).
+  // this request while the work remains with its QA author. The request only
+  // moves to QA_SIGNOFF_PENDING when that Draft is submitted for QA Lead
+  // approval (see routers/signoff.py::submit_signoff).
   async function requestSignoffWithCertificate(cert: SignOffOut) {
     setShowSignoffModal(false);
     await act("request-signoff", { signoff_id: cert.id });
@@ -833,7 +902,7 @@ export function FunctionalDetail({
       setShowStartExecution(false);
       setExecutionNotice(cycleId !== null
         ? "Test cycle linked successfully. Test execution has started."
-        : `Test Cycle ${req.linked_test_cycles?.[0]?.cycle_key || ""} was already linked. Test execution has started.`);
+        : `Test Cycle ${req.linked_test_cycles?.find((cycle) => cycle.status !== "Completed")?.cycle_key || req.linked_test_cycles?.[0]?.cycle_key || ""} was already linked. Test execution has started.`);
       await load();
     } catch (err) {
       setError(err);
@@ -857,12 +926,18 @@ export function FunctionalDetail({
   const qaLeads = useUserOptions('qa_lead')
   const testers = useUserOptions('tester')
 
-  const isAdmin = hasRole(user, "ADMIN");
   const viewOnly = isViewOnly(user);
-  const isRequester = (!viewOnly && req.requester_id === user?.id) || isAdmin;
+  const workflowActors = functionalWorkflowActors({
+    userId: user?.id,
+    requesterId: req.requester_id,
+    assignedTesterIds: req.assigned_tester_ids,
+    viewOnly,
+    isQaLeadGroup: hasWorkspaceRole(user, "QA_LEAD", "CHIEF_MANAGER_QA", "AGM_QA"),
+    isQaEngineer: hasWorkspaceRole(user, "QA_ENGINEER"),
+  });
+  const isRequester = workflowActors.isRequester;
   const isActiveDelegate = !viewOnly && req.active_delegation?.status === "ACTIVE" && req.active_delegation.assigned_to_id === user?.id;
-  const requesterInputEditor = isActiveDelegate || isAdmin || (isRequester && !req.active_delegation);
-  const isRequesterVerifier = isRequester || hasRole(user, "APPLICATION_OWNER");
+  const requesterInputEditor = isActiveDelegate || (isRequester && !req.active_delegation);
 
   const status = req.status;
   const sameDept = hasDepartment(user, req.department);
@@ -870,12 +945,12 @@ export function FunctionalDetail({
   // gated action, same as Admin, without being listed as "QA Lead group"
   // members anywhere (display-only concern, kept to literal QA_LEAD --
   // see assignedGroupFor below). ORACLE_MIGRATION_2026-07.md section 59.
-  const isQALead = hasRole(user, "QA_LEAD", "CHIEF_MANAGER_QA", "AGM_QA");
-  const isAssignedQALead = isAdmin || isQALead;
+  const isQALead = workflowActors.isQaLeadGroup;
+  const isAssignedQALead = isQALead;
   const assignedTesterIds = new Set(
     (req.assigned_tester_ids || "").split(",").filter(Boolean).map(Number)
   );
-  const isAssignedTester = isAdmin || (hasRole(user, "QA_ENGINEER") && !!user?.id && assignedTesterIds.has(user.id));
+  const isAssignedTester = workflowActors.isAssignedTester;
 
   const canVerifyChecklist =
     isAssignedQALead &&
@@ -935,19 +1010,18 @@ export function FunctionalDetail({
   // Reported directly: a person who raised this request but also separately
   // holds SM/Department Head for the same department must not be able to
   // approve their own request just because they wear both hats -- someone
-  // else holding that role has to decide it instead. Admin still bypasses
-  // (matches the backend's require_not_requester, which does the same
-  // check server-side regardless of what this button shows).
-  const isSelfApproval = req.requester_id === user?.id && !isAdmin;
+  // else holding that role has to decide it instead. System administration
+  // is not operational workflow authority.
+  const isSelfApproval = req.requester_id === user?.id;
   const canSMDecide =
     hasRole(user, "SM") &&
     status === "SM_APPROVAL_PENDING" &&
-    (sameDept || isAdmin) &&
+    sameDept &&
     !isSelfApproval;
   const canDepartmentHeadDecide =
     hasRole(user, "DEPARTMENT_HEAD_CM", "DEPARTMENT_HEAD_AGM") &&
     status === "DEPARTMENT_HEAD_APPROVAL_PENDING" &&
-    (sameDept || isAdmin) &&
+    sameDept &&
     !isSelfApproval;
   // Reported directly: "only the assigned person can update" -- once the
   // request has moved past the requester (e.g. to SM_APPROVAL_PENDING), the
@@ -957,7 +1031,6 @@ export function FunctionalDetail({
   // with canManageReadinessEvidence's own status gate below, this only ever
   // matters for the pre-QA-lead-assignment statuses it covers.
   const evidenceOwner =
-    isAdmin ||
     (status === "SM_APPROVAL_PENDING" ? canSMDecide :
     status === "DEPARTMENT_HEAD_APPROVAL_PENDING" ? canDepartmentHeadDecide :
     requesterInputEditor);
@@ -971,7 +1044,6 @@ export function FunctionalDetail({
   // for the general Documents tab; evidenceOwner above covers the same 3
   // stages for checklist evidence.
   const canManageDocuments =
-    isAdmin ||
     (["DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD",
       "RETURNED_BY_QA_LEAD", "REQUESTER_VERIFICATION"].includes(status)
       ? requesterInputEditor
@@ -1002,8 +1074,7 @@ export function FunctionalDetail({
   // rights too, restoring parity with isAssignedQALead (which already gates
   // the first assignment). Mirrors functional.py's
   // _require_can_reassign_tester exactly.
-  const isQADepartmentHead =
-    isAdmin || (hasWorkspaceRole(user, "CHIEF_MANAGER_QA", "AGM_QA"));
+  const isQADepartmentHead = hasWorkspaceRole(user, "CHIEF_MANAGER_QA", "AGM_QA");
   const canReassignTester = isAssignedTester || isQADepartmentHead || hasRole(user, "QA_LEAD");
   const canAssignTester =
     (isInitialTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignTester) &&
@@ -1039,6 +1110,19 @@ export function FunctionalDetail({
   const openLinkedCycles = (req.linked_test_cycles || []).filter(
     (cycle) => cycle.status !== "Completed"
   );
+  // Resolve lineage heads across every linked cycle before applying the
+  // signed certificate's environment. Otherwise an older UAT parent could
+  // incorrectly reappear merely because its SIT successor was filtered out.
+  const completedCycleLineageLeaves = clearanceRetestLineageLeaves(req.linked_test_cycles || []);
+  const eligibleRetestSourceCycles = eligibleClearanceRetestCycles(
+    req.linked_test_cycles || [],
+    req.signoff_certificate_environment,
+  );
+  const effectiveRetestSourceCycleId = eligibleRetestSourceCycles.some((cycle) => cycle.id === retestSourceCycleId)
+    ? retestSourceCycleId
+    : eligibleRetestSourceCycles.length === 1
+      ? eligibleRetestSourceCycles[0].id
+      : null;
   const canRaiseDefect = false;
   const canMarkWaitingForFix =
     isAssignedTester && status === "DEFECT_RAISED";
@@ -1046,13 +1130,6 @@ export function FunctionalDetail({
     isAssignedTester && status === "WAITING_FOR_FIX";
   // Mark QA Complete requires a linked Test Cycle and that cycle must have
   // reached Completed -- see functional.py::complete_qa's matching gate.
-  const canCompleteQA =
-    isAssignedTester &&
-    ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(
-      status
-    ) &&
-    hasLinkedCycle &&
-    openLinkedCycles.length === 0;
   const completeQAMissingCycle =
     isAssignedTester &&
     ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(status) &&
@@ -1071,10 +1148,52 @@ export function FunctionalDetail({
   // POST /{id}/request-signoff (functional.py) and POST /api/signoffs
   // (signoff.py), so the QA Lead can raise it themselves when a tester
   // isn't available to.
-  const canRequestSignoff =
+  const canManageClearance =
     (isAssignedTester || isAssignedQALead) &&
-    hasWorkspaceRole(user, "QA_ENGINEER", "QA_LEAD", "CHIEF_MANAGER_QA", "AGM_QA") &&
-    status === "QA_COMPLETED";
+    hasWorkspaceRole(user, "QA_ENGINEER", "QA_LEAD", "CHIEF_MANAGER_QA", "AGM_QA");
+  const isCertificateRequesterFallback = isLegacyCertificateRequesterFallback({
+    assignedTesterIds: req.assigned_tester_ids,
+    certificateRequesterId: req.signoff_certificate_requester_id,
+    userId: user?.id,
+  }) && hasWorkspaceRole(user, "QA_ENGINEER", "QA_LEAD", "CHIEF_MANAGER_QA", "AGM_QA");
+  const canDecideClearanceChange = canManageClearance || isCertificateRequesterFallback;
+  const linkedCertificateStatus = req.signoff_certificate_status || null;
+  const isClearanceDeniedOutcome = req.signoff_certificate_type === "Clearance Denied";
+  const hasLinkedEditableCertificate = [
+    "DRAFT",
+    "RETURNED_BY_SM",
+    "RETURNED_BY_DEPT_HEAD_COE",
+    "RETURNED_BY_REQUESTER",
+  ].includes(linkedCertificateStatus || "");
+  const hasLinkedRevisionableCertificate = [
+    "ISSUED",
+    "ISSUED_UNDER_REVIEW",
+    "SM_REJECTED",
+    "DEPT_HEAD_COE_REJECTED",
+  ].includes(linkedCertificateStatus || "");
+  const canCreatePostRetestRevision = canDecideClearanceChange && status === "QA_COMPLETED" && hasLinkedRevisionableCertificate;
+  const canContinueDraftClearance = canDecideClearanceChange && status === "QA_COMPLETED" && hasLinkedEditableCertificate && !!req.signoff_certificate_id;
+  const clearanceCapabilities = functionalClearanceCapabilities({
+    ...workflowActors,
+    status,
+    hasLinkedCycle,
+    hasOpenLinkedCycle: openLinkedCycles.length > 0,
+    hasLinkedCertificate: !!req.signoff_id,
+    certificateRequesterFallback: isCertificateRequesterFallback,
+  });
+  const {
+    canCompleteQA,
+    canRequestSignoff,
+    canReviewClearanceChanges,
+    canRequesterDecide,
+  } = clearanceCapabilities;
+  const revisionPrompt = linkedCertificateStatus === "SM_REJECTED" || linkedCertificateStatus === "DEPT_HEAD_COE_REJECTED"
+    ? "The previous certificate was rejected. Its terminal decision remains immutable; create one governed Draft successor and run the full approval chain again."
+    : isClearanceDeniedOutcome
+      ? "The issued denial decision remains immutable. Create one governed Draft successor from the latest evidence; QA Lead and Executive approval will run again before a revised decision returns to the requester."
+    : linkedCertificateStatus === "ISSUED_UNDER_REVIEW"
+      ? "Re-testing is complete. The issued certificate remains immutable and under review. Create its governed Draft successor from the latest execution evidence; QA Lead and Executive approval will run again."
+      : "The linked issued certificate remains immutable. Create its governed Draft successor from the latest eligible evidence; QA Lead and Executive approval will run again.";
   // "Confirm Sign-off" (a manual QA Lead click) removed -- the linked
   // certificate reaching ISSUED now auto-advances this request straight to
   // Requester Verification (see routers/signoff.py::
@@ -1083,8 +1202,9 @@ export function FunctionalDetail({
   // Tester -> SM -> Department Head COE chain, this request just sits at
   // "QA Clearance Pending" with no action available on this side -- correct,
   // since it's genuinely waiting on someone else's decision, not on QA.
-  const canRequesterDecide =
-    isRequesterVerifier && status === "REQUESTER_VERIFICATION";
+  const latestRequesterChange = [...history].reverse().find((item) => (
+    String(item.decision || "").toLowerCase().replace(/[^a-z]/g, "").startsWith("changesrequired")
+  ));
   // Mirrors backend FUNCTIONAL_EDITABLE_STATUSES/_can_edit_details exactly:
   // the requester (or admin) may edit while it's Draft or sitting with them
   // after a return (RETURNED_BY_SM/RETURNED_BY_DEPARTMENT_HEAD/
@@ -1098,7 +1218,6 @@ export function FunctionalDetail({
   // Head's own decision into QA's post-approval readiness/execution
   // stages.
   const canEditDetails =
-    isAdmin ||
     (requesterInputEditor &&
       [
         "DRAFT",
@@ -1251,6 +1370,8 @@ export function FunctionalDetail({
               {req.linked_test_cycles.map((cycle) => (
                 <DetailField key={cycle.id} label={cycle.cycle_key}>
                   <Link className="linked-cycle-link" to={`/test-execution?project=${cycle.project_id}&cycle=${cycle.id}`}><strong>{cycle.name}</strong></Link> · {cycle.status}
+                  {cycle.environment && <span className="muted small"> · {cycle.environment}</span>}
+                  {cycle.reexecution_of_cycle_key && <span className="muted small"> · Re-execution of {cycle.reexecution_of_cycle_key}</span>}
                   {(cycle.start_date || cycle.end_date) && <span className="muted small"> · {cycle.start_date || "—"} to {cycle.end_date || "—"}</span>}
                 </DetailField>
               ))}
@@ -1269,6 +1390,7 @@ export function FunctionalDetail({
                   <strong>{req.signoff_certificate_id}</strong>
                 </Link>{" "}
                 · <WorkflowStatusBadge record={req} workflow="signoff" status={req.signoff_certificate_status} label={(req.signoff_certificate_status && SIGNOFF_STATUS_LABELS[req.signoff_certificate_status]) || req.signoff_certificate_status} />
+                {req.signoff_certificate_environment && <span className="muted small"> · Tested in {req.signoff_certificate_environment}</span>}
               </DetailField>
             </DetailSection>
           )}
@@ -1309,6 +1431,17 @@ export function FunctionalDetail({
 
           <div className="section-title">Workflow Actions</div>
           {executionNotice && <div className={`execution-start-notice ${executionNotice.includes("was unlinked") ? "unlinked" : "linked"}`} role="status"><strong>{executionNotice.includes("was unlinked") ? "Test cycle unlinked" : "Execution started"}</strong><span>{executionNotice}</span></div>}
+          {createdReexecutionCycle && (
+            <div className="execution-start-notice linked" role="status">
+              <strong>Re-execution cycle created</strong>
+              <span>
+                <Link to={`/test-execution?project=${createdReexecutionCycle.project_id}&cycle=${createdReexecutionCycle.id}`}>
+                  {createdReexecutionCycle.cycle_key} — {createdReexecutionCycle.name}
+                </Link>{" "}
+                is linked to this request. Testcase membership was copied; execution results and defects were not.
+              </span>
+            </div>
+          )}
           {completeQAMissingCycle && (
             <div className="execution-cycle-required-warning" role="alert">
               <strong>Mark QA Complete is locked</strong>
@@ -1656,6 +1789,149 @@ export function FunctionalDetail({
                 </button>
               )}
 
+              {canCreatePostRetestRevision && (
+                <div style={{ width: "100%" }}>
+                  <div className="info-banner">
+                    <strong>Revised clearance required.</strong>{" "}
+                    {revisionPrompt}
+                  </div>
+                  <div className="form-field">
+                    <label htmlFor="post-retest-revision-reason">Revision reason *</label>
+                    <textarea
+                      id="post-retest-revision-reason"
+                      rows={3}
+                      maxLength={2000}
+                      value={clearanceChangeComments}
+                      onChange={(event) => setClearanceChangeComments(event.target.value)}
+                      placeholder="Summarize the re-test outcome and why the clearance must be revised…"
+                      disabled={!!busyAction}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    disabled={!!busyAction || clearanceChangeComments.trim().length < 3}
+                    onClick={() => void decideClearanceChange("ReviseCertificate")}
+                  >
+                    {busyAction === "clearance-change-decision" ? "Creating…" : "Create Revised Clearance"}
+                  </button>
+                </div>
+              )}
+
+              {canContinueDraftClearance && req.signoff_certificate_id && (
+                <div className="info-banner" style={{ width: "100%" }}>
+                  <strong>A linked clearance already needs QA action.</strong>{" "}
+                  Continue that Draft or returned certificate instead of creating another one.{" "}
+                  <Link className="btn btn-primary btn-sm" to={`/signoff?open=${req.signoff_certificate_id}`}>
+                    Continue Clearance
+                  </Link>
+                </div>
+              )}
+
+              {canReviewClearanceChanges && (
+                <div style={{ width: "100%" }}>
+                  <div className="info-banner">
+                    <strong>Requester changes need QA review.</strong>{" "}
+                    The signed certificate is preserved as immutable evidence and no Draft replacement has been created automatically.
+                    <span style={{ display: "block", marginTop: 6 }}>
+                      <b>Held certificate environment:</b> {req.signoff_certificate_environment || "Not recorded"}
+                    </span>
+                    {isCertificateRequesterFallback && (
+                      <span style={{ display: "block", marginTop: 6 }}>
+                        <b>Recovery access:</b> No tester remains assigned, so the original QA certificate requester may resolve this legacy review.
+                      </span>
+                    )}
+                    {latestRequesterChange?.comments && (
+                      <span style={{ display: "block", marginTop: 6 }}>
+                        <b>Requester comment:</b> {latestRequesterChange.comments}
+                      </span>
+                    )}
+                  </div>
+                  <div className="form-field">
+                    <label htmlFor="clearance-change-review-comments">QA review comments *</label>
+                    <textarea
+                      id="clearance-change-review-comments"
+                      rows={3}
+                      maxLength={2000}
+                      value={clearanceChangeComments}
+                      onChange={(event) => setClearanceChangeComments(event.target.value)}
+                      placeholder="Record why QA is resending, revising, or requiring re-testing…"
+                      disabled={!!busyAction}
+                    />
+                  </div>
+                  {eligibleRetestSourceCycles.length > 1 && (
+                    <div className="form-field">
+                      <label htmlFor="retest-source-cycle">Re-execution baseline *</label>
+                      <select
+                        id="retest-source-cycle"
+                        value={effectiveRetestSourceCycleId || ""}
+                        onChange={(event) => setRetestSourceCycleId(event.target.value ? Number(event.target.value) : null)}
+                        disabled={!!busyAction}
+                      >
+                        <option value="">Select the latest completed cycle…</option>
+                        {eligibleRetestSourceCycles.map((cycle) => (
+                          <option key={cycle.id} value={cycle.id}>{cycle.cycle_key} — {cycle.name} · {cycle.environment}</option>
+                        ))}
+                      </select>
+                      <small className="muted">Only completed lineage heads matching the held certificate environment are eligible; an older round that already has a successor cannot be cloned again.</small>
+                    </div>
+                  )}
+                  {eligibleRetestSourceCycles.length === 1 && (
+                    <p className="muted small">
+                      Re-test baseline: <strong>{eligibleRetestSourceCycles[0].cycle_key} — {eligibleRetestSourceCycles[0].name} · {eligibleRetestSourceCycles[0].environment}</strong>. Testcase membership will be cloned into a new Draft cycle; results and defects will not be copied.
+                    </p>
+                  )}
+                  {eligibleRetestSourceCycles.length === 0 && (
+                    <div className="execution-cycle-required-warning" role="alert">
+                      <strong>Re-test is unavailable</strong>
+                      <span>{!req.signoff_certificate_environment
+                        ? "The held certificate does not have a tested environment, so a safe re-execution baseline cannot be selected."
+                        : completedCycleLineageLeaves.length
+                          ? `No latest completed linked Test Cycle matches the held certificate environment ${req.signoff_certificate_environment}. Latest cycle environment(s): ${completedCycleLineageLeaves.map((cycle) => `${cycle.cycle_key} (${cycle.environment || "not recorded"})`).join(", ")}.`
+                          : "No eligible completed linked Test Cycle exists to use as the re-execution baseline."}</span>
+                    </div>
+                  )}
+                  <WorkflowDecisionPanel
+                    busy={!!busyAction}
+                    title="QA clearance change decision"
+                    description="Choose one governed outcome. Every action records your mandatory QA comment."
+                    options={[
+                      {
+                        key: "resend-issued",
+                        label: isClearanceDeniedOutcome ? "Resend Denial Decision" : "Resend Issued Certificate",
+                        description: isClearanceDeniedOutcome
+                          ? "Return the same unchanged issued denial decision to requester verification."
+                          : "Return the same unchanged issued certificate to requester verification.",
+                        tone: "approve",
+                        disabled: clearanceChangeComments.trim().length < 3,
+                        onClick: () => void decideClearanceChange("ResendIssued"),
+                      },
+                      {
+                        key: "revise-certificate",
+                        label: isClearanceDeniedOutcome ? "Create Revised Denial Certificate" : "Create Revised Clearance",
+                        description: isClearanceDeniedOutcome
+                          ? "Supersede the issued denial and create one governed Draft successor for a fresh decision and approval."
+                          : "Supersede the issued certificate and create one governed Draft successor for fresh approval.",
+                        tone: "return",
+                        disabled: clearanceChangeComments.trim().length < 3,
+                        onClick: () => void decideClearanceChange("ReviseCertificate"),
+                      },
+                      {
+                        key: "retest",
+                        label: "Re-testing Required",
+                        description: "Preserve completed evidence and create a linked Draft re-execution cycle from the selected baseline.",
+                        tone: "reject",
+                        disabled: clearanceChangeComments.trim().length < 3 || !effectiveRetestSourceCycleId,
+                        onClick: () => void decideClearanceChange("Retest", effectiveRetestSourceCycleId),
+                      },
+                    ]}
+                  />
+                  <p className="muted small">
+                    Re-testing never unlocks or rewrites a Completed cycle. QA works in the new linked cycle in Test Lifecycle, where testcases may be added and new results, evidence, and defects recorded.
+                  </p>
+                </div>
+              )}
+
               {canRequesterDecide && (
                 <>
                   <div className="form-field" style={{ width: "100%" }}>
@@ -1670,10 +1946,23 @@ export function FunctionalDetail({
                       rows={3}
                       value={requesterComments}
                       onChange={(e) => setRequesterComments(e.target.value)}
-                      placeholder="If requesting changes, describe what still needs to be fixed…"
+                      placeholder={isClearanceDeniedOutcome
+                        ? "Optional for acknowledgement; required when requesting changes to the denial…"
+                        : "If requesting changes, describe what still needs to be fixed…"}
                       disabled={!!busyAction}
                     />
                   </div>
+                  {isClearanceDeniedOutcome ? (
+                    <div className="info-banner" style={{ width: "100%" }}>
+                      <strong>QA issued a Clearance Denied decision.</strong>{" "}
+                      Acknowledge the decision to close this request, or return it to QA Change Review with a required reason. The issued denial and its approval history remain immutable; returning it does not create a Draft or turn it into a positive clearance automatically.
+                    </div>
+                  ) : (
+                    <div className="info-banner" style={{ width: "100%" }}>
+                      <strong>Changes Required sends this request to QA Change Review.</strong>{" "}
+                      It places the issued certificate under review but does not create or supersede a certificate automatically. QA will decide whether to resend it unchanged, create a revision, or perform re-testing.
+                    </div>
+                  )}
                   <button
                     className="btn btn-success btn-sm"
                     disabled={!!busyAction}
@@ -1684,7 +1973,7 @@ export function FunctionalDetail({
                       })
                     }
                   >
-                    Accept &amp; Close
+                    {isClearanceDeniedOutcome ? "Acknowledge Denial & Close" : "Accept & Close"}
                   </button>
                   <button
                     className="btn btn-danger btn-sm"
@@ -1701,7 +1990,7 @@ export function FunctionalDetail({
                       })
                     }
                   >
-                    Changes Required
+                    {isClearanceDeniedOutcome ? "Request Changes to Denial" : "Changes Required"}
                   </button>
                 </>
               )}
@@ -1722,6 +2011,9 @@ export function FunctionalDetail({
                 !canStartRetest &&
                 !canCompleteQA &&
                 !canRequestSignoff &&
+                !canCreatePostRetestRevision &&
+                !canContinueDraftClearance &&
+                !canReviewClearanceChanges &&
                 !canRequesterDecide && (
                   <span className="muted small">
                     No actions available for your role at this stage.
@@ -2021,8 +2313,20 @@ export default function Functional() {
             {
               key: "pending_with",
               header: "Pending With",
-              render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? "Application Owner" : (QA_PENDING_WITH[r.status] || "—"),
-              filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? "Application Owner" : (QA_PENDING_WITH[r.status] || ""),
+              render: (r) => functionalPendingWithLabel(
+                r,
+                applicationNameAwareStatusLabel(r.status, r.application_master_status)
+                  ? "Application Owner"
+                  : QA_PENDING_WITH[r.status],
+                users,
+              ),
+              filterValue: (r) => functionalPendingWithLabel(
+                r,
+                applicationNameAwareStatusLabel(r.status, r.application_master_status)
+                  ? "Application Owner"
+                  : QA_PENDING_WITH[r.status],
+                users,
+              ),
             },
             {
               key: "qa_request",

@@ -90,6 +90,7 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     SM_REJECTED: "badge-red",
     RETURNED_BY_REQUESTER: "badge-red",  // Legacy pre-immutable-revision QASignOff state.
     SUPERSEDED: "badge-gray",
+    ISSUED_UNDER_REVIEW: "badge-yellow",
     VOIDED: "badge-gray",
     DEPARTMENT_HEAD_APPROVAL_PENDING: "badge-yellow",
     RETURNED_BY_DEPARTMENT_HEAD: "badge-red",
@@ -114,6 +115,7 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     QA_COMPLETED: "badge-green",
     QA_SIGNOFF_PENDING: "badge-teal",
     QA_SIGNED_OFF: "badge-green",
+    QA_CHANGE_REVIEW: "badge-yellow",
     // SAST/DAST lifecycle
     SECURITY_LEAD_ASSIGNED: "badge-blue",
     SECURITY_READINESS: "badge-teal",
@@ -1195,6 +1197,11 @@ function correctiveGuidance(message: string): string {
     return "Wait a moment and try again. If the service remains unavailable, contact the portal administrator and provide the technical reference shown above, if available.";
   if (normalized.includes("too long to respond") || normalized.includes("http 408") || normalized.includes("timeout"))
     return "The operation may be under heavy load. Wait briefly, refresh the page, and try again. Avoid submitting the same data repeatedly.";
+  // Re-execution validation can mention both "requires" and "Recycle Bin".
+  // Keep this before the broad required-field branch so the dialog gives the
+  // recovery action instead of incorrectly asking the user to fill a field.
+  if (normalized.includes("recycle bin"))
+    return "Restore the listed testcase(s) from the Recycle Bin, refresh the current record, and try the action again. Existing execution history remains unchanged.";
   if (normalized.includes("checklist") || normalized.includes("readiness"))
     return "Review the readiness checklist, complete every item identified in the reason, and try the action again.";
   if (normalized.includes("required") || normalized.includes("cannot be blank") || normalized.includes("choose") || normalized.includes("select"))

@@ -38,6 +38,8 @@ _COPIED_FIELDS = (
 )
 
 _REVISION_SOURCE_STATUSES = {
+    QAStatus.QA_COMPLETED,
+    QAStatus.QA_CHANGE_REVIEW,
     QAStatus.QA_SIGNED_OFF,
     QAStatus.QA_SIGNOFF_PENDING,
     QAStatus.REQUESTER_VERIFICATION,
@@ -46,6 +48,7 @@ _REVISION_SOURCE_STATUSES = {
 
 _REVISIONABLE_CERTIFICATE_STATUSES = {
     "ISSUED",
+    "ISSUED_UNDER_REVIEW",
     "SM_REJECTED",
     "DEPT_HEAD_COE_REJECTED",
 }
@@ -61,19 +64,50 @@ def active_certificate(db: Session, testing_request_id: str, *, exclude_id: int 
     return query.order_by(models.QASignOff.id).first()
 
 
+def revision_workflow_available(
+    db: Session,
+    original: models.QASignOff,
+    source: models.FunctionalRequest | None,
+) -> bool:
+    """Whether the current lineage/workflow state permits a new successor.
+
+    Actor authorization is intentionally separate. This state predicate is
+    shared by the detail response and the locked mutation route so clients do
+    not have to reverse-engineer active-retest and lineage rules.
+    """
+    if (
+        source is None
+        or source.signoff_id != original.id
+        or source.status not in _REVISION_SOURCE_STATUSES
+        or original.status not in _REVISIONABLE_CERTIFICATE_STATUSES
+        or original.superseded_by_id is not None
+    ):
+        return False
+    if db.query(models.QASignOff.id).filter(
+        models.QASignOff.supersedes_id == original.id,
+    ).first() is not None:
+        return False
+    return active_certificate(
+        db, original.testing_request_id, exclude_id=original.id,
+    ) is None
+
+
 def create_certificate_revision(
     db: Session,
     original: models.QASignOff,
     actor: models.User,
     reason: str,
+    *,
+    successor_requester_id: int | None = None,
 ) -> models.QASignOff:
     """Create one Draft successor without mutating terminal evidence or approvals.
 
-    The caller owns the transaction. An issued predecessor is moved to
-    SUPERSEDED before insertion; a rejected predecessor remains in its exact
-    rejection status. In both cases the predecessor is row-locked and linked
-    to exactly one successor, while the database's conditional unique index
-    guarantees one active certificate even across concurrent workers.
+    The caller owns the transaction. The Functional source is locked first,
+    then its certificate, on every entry path. An issued/held predecessor is
+    moved to SUPERSEDED before insertion; a rejected predecessor remains in
+    its exact rejection status. The predecessor is linked to exactly one
+    successor, while the database's conditional unique index guarantees one
+    active certificate even across concurrent workers.
     """
     normalized_reason = (reason or "").strip()
     if len(normalized_reason) < 3:
@@ -81,7 +115,29 @@ def create_certificate_revision(
     if len(normalized_reason) > 2000:
         raise HTTPException(400, "Revision reason cannot exceed 2,000 characters")
 
-    db.refresh(original, with_for_update=True)
+    # Always lock in parent -> child order. Functional clearance actions
+    # already own the Functional row before reaching this helper; direct
+    # certificate revision enters here without either lock. Acquiring the
+    # source first in both paths avoids a source/certificate lock-order
+    # inversion and its Oracle deadlock risk.
+    source = (
+        db.query(models.FunctionalRequest)
+        .filter(models.FunctionalRequest.request_id == original.testing_request_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if not source:
+        raise HTTPException(409, "The linked Functional Request no longer exists")
+    original = (
+        db.query(models.QASignOff)
+        .filter(models.QASignOff.id == original.id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if not original:
+        raise HTTPException(404, "Clearance certificate not found")
     original_status = original.status
     if original_status not in _REVISIONABLE_CERTIFICATE_STATUSES:
         if original.status == "SUPERSEDED" and original.superseded_by:
@@ -107,13 +163,6 @@ def create_certificate_revision(
             f"{original.testing_request_id}; continue that certificate instead",
         )
 
-    source = (
-        db.query(models.FunctionalRequest)
-        .filter(models.FunctionalRequest.request_id == original.testing_request_id)
-        .populate_existing()
-        .with_for_update()
-        .one_or_none()
-    )
     if not source or source.signoff_id != original.id:
         raise HTTPException(
             409,
@@ -129,16 +178,25 @@ def create_certificate_revision(
     # predecessors are already terminal and deliberately retain their exact
     # decision. If any later step fails, the transaction rollback restores
     # every lineage field and status.
-    if original_status == "ISSUED":
+    if original_status in {"ISSUED", "ISSUED_UNDER_REVIEW"}:
         original.status = "SUPERSEDED"
     original.superseded_at = models.now()
     db.flush()
 
-    source.status = QAStatus.QA_SIGNOFF_PENDING
+    # A successor starts in the QA author's Draft bucket. The Functional
+    # Request moves to QA_SIGNOFF_PENDING only when that Draft is submitted
+    # to the QA Lead (routers/signoff.py::submit_signoff).
+    source.status = QAStatus.QA_COMPLETED
     successor = models.QASignOff(
         **{field: getattr(original, field) for field in _COPIED_FIELDS},
         status="DRAFT",
-        requester_id=original.requester_id,
+        # A returned-clearance decision may be taken by a newly assigned QA
+        # tester or QA Lead rather than the author of the old certificate.
+        # In that path the caller explicitly transfers ownership so the new
+        # Draft lands in the deciding QA user's editable bucket. Lower-level
+        # callers may omit the override only when intentionally retaining the
+        # original author.
+        requester_id=successor_requester_id or original.requester_id,
         revision_number=(original.revision_number or 1) + 1,
         revision_reason=normalized_reason,
         supersedes_id=original.id,
@@ -150,10 +208,14 @@ def create_certificate_revision(
     source.signoff_id = successor.id
     certificate_summary.refresh(db, successor)
 
-    predecessor_decision = "Superseded" if original_status == "ISSUED" else "Revision created"
+    predecessor_decision = (
+        "Superseded"
+        if original_status in {"ISSUED", "ISSUED_UNDER_REVIEW"}
+        else "Revision created"
+    )
     predecessor_comment = (
         f"Superseded by {successor.certificate_id}. Reason: {normalized_reason}"
-        if original_status == "ISSUED"
+        if original_status in {"ISSUED", "ISSUED_UNDER_REVIEW"}
         else f"Terminal rejection retained; continued by {successor.certificate_id}. Reason: {normalized_reason}"
     )
     db.add(models.ApprovalAction(
