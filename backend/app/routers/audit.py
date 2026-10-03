@@ -12,6 +12,7 @@ from ..constants import Role, format_role_labels
 from ..database import get_db
 from ..deps import require_roles
 from ..user_access_report import user_access_workbook
+from ..time_format import format_datetime_ist
 
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
@@ -143,7 +144,7 @@ def export_audit_logs(
     ])
     for row in rows:
         writer.writerow([
-            row.created_at, row.event_type, row.action, row.outcome, row.actor_name,
+            format_datetime_ist(row.created_at), row.event_type, row.action, row.outcome, row.actor_name,
             row.actor_username, format_role_labels(row.actor_roles), row.method, row.path, row.status_code,
             row.target_type, row.target_id, row.target_name, row.ip_address,
             row.request_id, row.details,

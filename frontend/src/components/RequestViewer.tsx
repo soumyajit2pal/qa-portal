@@ -26,6 +26,8 @@ export default function RequestViewer({ children }: { children: React.ReactNode 
   const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState<unknown>(null)
   const generation = useRef(0)
+  const activeRecordId = useRef<number | null>(null)
+  activeRecordId.current = record?.id ?? null
   const close = useCallback(() => {
     generation.current++
     setTarget(null)
@@ -74,13 +76,29 @@ export default function RequestViewer({ children }: { children: React.ReactNode 
     navigate(`${location.pathname}${remaining ? `?${remaining}` : ''}`, { replace: true })
   }
 
-  const unavailable = useCallback(() => {
-    if (!target) return
-    setRecord(null)
-    setError(new RequestLookupError(target.identifier))
-  }, [target])
+  // Detail callbacks can finish after this viewer opens another module or
+  // request. IDs alone cannot distinguish SAST #5 from DAST #5 or a reopen.
+  const detailGeneration = generation.current
+  const detailRecordId = record?.id
+  function isCurrentDetail() {
+    return detailRecordId !== undefined && generation.current === detailGeneration
+      && activeRecordId.current === detailRecordId
+  }
 
-  const props = { users, onClose: dismiss, onChanged: (updated: RequestRecord) => setRecord(updated) }
+  const unavailable = useCallback(() => {
+    if (!target || !isCurrentDetail()) return
+    setRecord(current => isCurrentDetail() && current?.id === detailRecordId ? null : current)
+    setError(new RequestLookupError(target.identifier))
+  }, [target, detailGeneration, detailRecordId])
+
+  const props = {
+    users,
+    onClose: () => { if (isCurrentDetail()) dismiss() },
+    onChanged: (updated: RequestRecord) => {
+      if (!isCurrentDetail() || updated.id !== detailRecordId) return
+      setRecord(current => isCurrentDetail() && current?.id === detailRecordId ? updated : current)
+    },
+  }
   let detail: React.ReactNode = null
   if (record && target) {
     switch (target.path) {

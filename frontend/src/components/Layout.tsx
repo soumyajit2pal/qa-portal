@@ -15,6 +15,7 @@ import ClearableSearchInput from './ClearableSearchInput'
 import WorkspaceSwitcher from './WorkspaceSwitcher'
 import { beginWorkspaceTransition, persistWorkspaceTransition, endWorkspaceTransition } from '../workspaceTransition'
 import AppVersion from './AppVersion'
+import { MaintenanceWindowBanner } from './MaintenanceWindowNotice'
 
 interface NavItem {
   to: string
@@ -31,6 +32,10 @@ interface NavGroup {
 // Governance / Administration) rather than one long flat list -- with 8+
 // destinations a flat list stops reading as a hierarchy, so grouping gives
 // the sidebar a clearer information architecture.
+function canVerifySignatures(user: UserOut | null): boolean {
+  return !!user?.roles.some((role) => !['DOCUMENT_PORTAL_VIEWER', 'DOCUMENT_PORTAL_CONTRIBUTOR', 'DOCUMENT_PORTAL_MANAGER'].includes(role))
+}
+
 function navGroups(user: UserOut | null, workspaceOptions: WorkspaceAccessEntry[]): NavGroup[] {
   const groups: NavGroup[] = [
     {
@@ -101,6 +106,7 @@ function navGroups(user: UserOut | null, workspaceOptions: WorkspaceAccessEntry[
       label: 'Governance',
       items: [
         { to: '/signoff', label: 'QA Clearance', icon: IconCertificate },
+        ...(canVerifySignatures(user) ? [{ to: '/verify-signature', label: 'Verify Signature', icon: IconShield }] : []),
         { to: '/pending-approvals', label: 'Pending Approvals', icon: IconBell },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
@@ -402,6 +408,10 @@ export default function Layout({ children }: { children?: ReactNode }) {
     // Request ID itself, or a free-text application name/epic number) still
     // falls through to the QA Request gateway search, unchanged.
     const upper = term.toUpperCase()
+    if (upper.startsWith('ESIG-')) {
+      navigate(`/verify-signature?id=${encodeURIComponent(upper)}`)
+      return
+    }
     const normalizedTerm = !upper.startsWith('TQA-') && TQA_ID_SHORTHAND.test(upper)
       ? `TQA-${upper}`
       : term
@@ -501,6 +511,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
             <kbd>⌘ K</kbd>
           </form>
           <div className="right-group">
+            {canVerifySignatures(user) && <NavLink to="/verify-signature" className="btn btn-sm" title="Verify a digital signature or PDF" aria-label="Verify Signature"><IconShield width={16} height={16} /><span>Verify Signature</span></NavLink>}
             {workspaceOptions.length > 0 && (
               <div className="qa-workspace-switcher">
                 <WorkspaceSwitcher
@@ -555,6 +566,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
             {!user && <span className="topbar-user-context"><span className="status-dot" />Signed in</span>}
           </div>
         </div>
+        <MaintenanceWindowBanner />
         <div className="content">{children}</div>
         {/* Moved out of the sidebar's own footer (previously .portal-credit,
             hidden entirely once the sidebar was collapsed -- see index.css)

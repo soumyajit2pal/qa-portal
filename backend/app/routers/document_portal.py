@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..time_format import IST, format_datetime_ist
 from ..config import settings
 from ..database import get_db
 from ..document_portal_storage import OWNER_FILE, prepare_existing_roots, workspace_root
@@ -169,7 +170,7 @@ def _item(path: Path, root: Path | None = None) -> dict:
         "path": relative,
         "is_folder": is_folder,
         "size": 0 if is_folder else stat.st_size,
-        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=IST).isoformat(),
         "extension": "Folder" if is_folder else (resolved.suffix[1:].upper() or "FILE"),
     }
 
@@ -514,7 +515,7 @@ def _inventory_rows(root: Path, workspace_name: str,
                 'Relative Path': info['path'],
                 'Type': info['extension'],
                 'Size (bytes)': info['size'],
-                'Last Modified (IST)': modified.astimezone(ist).isoformat(),
+                'Last Modified (IST)': format_datetime_ist(modified),
             })
     return sorted(rows, key=lambda row: row['Relative Path'].casefold())
 

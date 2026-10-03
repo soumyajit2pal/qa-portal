@@ -10,6 +10,7 @@ from ..deps import get_current_user
 from .reports import REPORT_REGISTRY
 from ..pdf_export import DIGITAL_SIGNATURE_METHOD, DIGITAL_SIGNATURE_NOTICE
 from ..workspace_report_layout import all_data_sections
+from ..time_format import display_timestamp
 
 router = APIRouter(prefix="/api/export", tags=["download-export-centre"])
 
@@ -41,7 +42,7 @@ def _rows_to_xlsx(rows, meta: dict) -> io.BytesIO:
             ws.append(headers)
             for row in sheet_rows:
                 ws.append([
-                    (row.get(h, "") if organized else str(row.get(h, "")))
+                    (display_timestamp(row.get(h, "")) if organized else _fmt_cell(row.get(h, "")))
                     if row.get(h) is not None else "" for h in headers
                 ])
         else:
@@ -89,7 +90,7 @@ def _rows_to_csv(rows, meta: dict) -> io.StringIO:
             writer.writerow([title, f"{len(section_rows)} rows"])
             writer.writerow(headers)
             for row in section_rows:
-                writer.writerow([row.get(h, "") for h in headers])
+                writer.writerow([display_timestamp(row.get(h, "")) for h in headers])
             if not section_rows:
                 writer.writerow(["No records found"])
             writer.writerow([])
@@ -97,7 +98,7 @@ def _rows_to_csv(rows, meta: dict) -> io.StringIO:
         headers = list(rows[0].keys())
         writer.writerow(headers)
         for row in rows:
-            writer.writerow([row.get(h, "") for h in headers])
+            writer.writerow([display_timestamp(row.get(h, "")) for h in headers])
     else:
         writer.writerow(["No records found"])
     if meta.get("signature_notice"):
@@ -269,7 +270,7 @@ def _rows_to_pdf(rows, meta: dict) -> io.BytesIO:
 
 
 def _fmt_cell(value) -> str:
-    return str(value) if value is not None else ""
+    return str(display_timestamp(value)) if value is not None else ""
 
 
 @router.get("/{report_key}")
@@ -291,7 +292,7 @@ def export_report(report_key: str, format: str = Query("xlsx", pattern="^(xlsx|p
 
     date_filter = ""
     if date_from or date_to:
-        date_filter = f"Date range: {date_from or 'Beginning'} to {date_to or 'Now'}"
+        date_filter = f"Date range: {display_timestamp(date_from) or 'Beginning'} to {display_timestamp(date_to) or 'Now'}"
     applied_filters = " · ".join(value for value in (filters, date_filter) if value)
 
     meta = {

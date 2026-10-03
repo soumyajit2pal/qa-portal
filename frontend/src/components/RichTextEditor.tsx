@@ -258,6 +258,15 @@ export interface RichTextImageMessages {
   tooMany: () => string
 }
 
+export function richTextImageFilename(prefix: string, originalName: string, mime: string, nonce: string): string {
+  const extension = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' } as Record<string, string>)[mime.toLowerCase()]
+  if (!extension) throw new Error('Unsupported rich text image type')
+  const ascii = (value: string) => value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^[.-]+/, '')
+  const header = `${ascii(prefix).slice(0, 60) || 'image'}-${ascii(nonce).slice(0, 32) || 'upload'}-`
+  const stem = ascii(originalName.replace(/\.[^.]*$/, '')) || 'image'
+  return `${header}${stem.slice(0, 255 - header.length - extension.length - 1)}.${extension}`
+}
+
 export function useRichTextImages(opts: {
   maxImages?: number
   maxBytes?: number
@@ -270,40 +279,47 @@ export function useRichTextImages(opts: {
   const { maxImages = RICH_TEXT_MAX_IMAGES, maxBytes = RICH_TEXT_MAX_IMAGE_BYTES, filenamePrefix, messages, onError } = opts
   const [images, setImages] = useState<PendingRichImage[]>([])
   const imagesRef = useRef<PendingRichImage[]>([])
-  useEffect(() => { imagesRef.current = images }, [images])
+  const imageSequence = useRef(0)
   useEffect(() => () => imagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl)), [])
 
   function addImages(files: File[]): PendingRichImage[] {
     const accepted: PendingRichImage[] = []
-    for (const [fileIndex, sourceFile] of files.entries()) {
-      const file = new File(
-        [sourceFile],
-        `${filenamePrefix}-${Date.now()}-${fileIndex + 1}-${(sourceFile.name || 'image').replace(/[^a-zA-Z0-9._-]+/g, '-')}`,
-        { type: sourceFile.type },
-      )
-      const name = file.name || 'Pasted image'
-      if (!RICH_TEXT_IMAGE_TYPES.has(file.type)) {
-        onError(`“${name}” is not supported. Use PNG, JPEG, GIF, or WebP.`)
+    let rejected = false
+    for (const sourceFile of files) {
+      const type = sourceFile.type.toLowerCase()
+      if (!RICH_TEXT_IMAGE_TYPES.has(type)) {
+        rejected = true
+        onError(`“${sourceFile.name || 'Pasted image'}” is not supported. Use PNG, JPEG, GIF, or WebP.`)
         continue
       }
-      if (file.size > maxBytes) { onError(messages.tooLarge(name)); continue }
-      if (images.length + accepted.length >= maxImages) { onError(messages.tooMany()); break }
+      const file = new File(
+        [sourceFile],
+        richTextImageFilename(filenamePrefix, sourceFile.name || 'image', type, `${Date.now()}-${++imageSequence.current}`),
+        { type },
+      )
+      const name = file.name || 'Pasted image'
+      if (file.size === 0) { rejected = true; onError(`“${sourceFile.name || 'Pasted image'}” is empty. Choose an image containing evidence.`); continue }
+      if (file.size > maxBytes) { rejected = true; onError(messages.tooLarge(name)); continue }
+      if (imagesRef.current.length + accepted.length >= maxImages) { rejected = true; onError(messages.tooMany()); break }
       accepted.push({ file, previewUrl: URL.createObjectURL(file), alt: sourceFile.name || 'Pasted image' })
     }
     if (accepted.length) {
-      setImages((current) => [...current, ...accepted])
-      onError('')
+      imagesRef.current = [...imagesRef.current, ...accepted]
+      setImages(imagesRef.current)
+      if (!rejected) onError('')
     }
     return accepted
   }
 
   function removeImage(previewUrl: string) {
     URL.revokeObjectURL(previewUrl)
-    setImages((current) => current.filter((image) => image.previewUrl !== previewUrl))
+    imagesRef.current = imagesRef.current.filter((image) => image.previewUrl !== previewUrl)
+    setImages(imagesRef.current)
   }
 
   function clearImages() {
-    images.forEach((image) => URL.revokeObjectURL(image.previewUrl))
+    imagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl))
+    imagesRef.current = []
     setImages([])
   }
 

@@ -13,6 +13,7 @@ from ..execution_cycles import (
     CYCLE_LINKABLE_FUNCTIONAL_STATUSES,
     cycle_unlink_allowed,
     require_cycle_request_linkable,
+    require_request_cycle_completable,
     require_cycle_unlinkable,
 )
 from ..database import get_db
@@ -493,6 +494,7 @@ def _attach_request_link_permissions(
             allowed = cycle_unlink_allowed(requests[link.child_id].status)
         cycle.linked_request_change_allowed = allowed
         request = requests.get(link.child_id) if link and link.child_type == "Functional" else None
+        cycle.linked_request_status = request.status if request else None
         signed_cycle_protected = bool(request and any(
             _signed_certificate_blocks_unlink(request, certificate, cycle)
             for certificate in signed_certificates_by_request.get(request.request_id, [])
@@ -563,10 +565,10 @@ def _sync_linked_functional_request_status(db: Session, cycle: "models.TestCycle
     DEFECT_FIX_RETEST status -- so it's deliberately left untouched pending
     its own design decision if this is ever extended there).
 
-    Guarded so this only ever moves a request between the two statuses this
-    sync itself owns -- it will never clobber a manually-reached state like
-    QA_COMPLETED, or a DEFECT_RAISED still awaiting a human decision on the
-    (unlinked-cycle) manual defect flow.
+    Guarded so this only ever restores execution from WAITING_FOR_FIX or the
+    legacy RETESTING recovery state -- it will never clobber a manually-
+    reached state like QA_COMPLETED, or a DEFECT_RAISED still awaiting a
+    human decision on the (unlinked-cycle) manual defect flow.
 
     A Functional request may have several linked Test Cycles at once (see
     FunctionalRequest.linked_test_cycles / complete_qa's own "every linked
@@ -590,17 +592,26 @@ def _sync_linked_functional_request_status(db: Session, cycle: "models.TestCycle
                 comments=f"Auto-set: linked Test Cycle {cycle.cycle_key} - {cycle.name} was marked Blocked.",
             ))
     elif transition_action == "Resume Execution":
-        if freq.status == QAStatus.WAITING_FOR_FIX:
+        if freq.status in (QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING):
             still_blocked = any(
                 other.status == "Blocked" for other in freq.linked_test_cycles if other.id != cycle.id
             )
             if not still_blocked:
+                previous_request_status = freq.status
                 freq.status = QAStatus.EXECUTION_IN_PROGRESS
+                previous_step = (
+                    "Waiting For Fix"
+                    if previous_request_status == QAStatus.WAITING_FOR_FIX
+                    else "Retesting"
+                )
                 db.add(models.ApprovalAction(
-                    entity_type="FUNCTIONAL_REQUEST", entity_id=freq.id, step_name="Waiting For Fix",
+                    entity_type="FUNCTIONAL_REQUEST", entity_id=freq.id, step_name=previous_step,
                     actor_id=current_user.id, actor_role=current_user.roles_csv,
                     decision="Execution In Progress (Test Cycle Resumed)",
-                    comments=f"Auto-set: linked Test Cycle {cycle.cycle_key} - {cycle.name} resumed to In Progress.",
+                    comments=(
+                        f"Auto-set from {previous_step}: linked Test Cycle {cycle.cycle_key} - "
+                        f"{cycle.name} resumed to In Progress."
+                    ),
                 ))
 
 
@@ -615,6 +626,36 @@ def _validate_cycle_transition(current_status: str, requested_status: str,
     if requested_status == "Blocked" and not blocking_reason:
         raise HTTPException(400, "A blocking reason is required before blocking this Test Cycle")
     return _CYCLE_TRANSITION_ACTIONS[(current_status, requested_status)]
+
+
+def _require_completion_link_status(
+    cycle: models.TestCycle,
+    locked_functional_requests: dict[int, models.FunctionalRequest],
+) -> None:
+    """Validate the cycle's locked request association for completion.
+
+    The persisted data model permits at most one request per cycle because
+    ``TestCycleChildRequestLink.cycle_id`` is unique. Combined link mutations
+    and completion are rejected by ``update_cycle`` before this helper, so
+    the one existing association is the complete authoritative scope.
+    """
+    link = cycle.child_request_link
+    if link is None:
+        return
+    if link.child_type != "Functional":
+        raise HTTPException(
+            400,
+            "Cannot complete this Test Cycle while it has an unsupported QA Request link. "
+            "Replace or remove the invalid link first.",
+        )
+    request = locked_functional_requests.get(link.child_id)
+    if request is None:
+        raise HTTPException(
+            409,
+            "The linked Functional QA Request no longer exists. Refresh and correct the "
+            "Test Cycle link before completing it.",
+        )
+    require_request_cycle_completable(request)
 
 
 def _require_cycle_in_progress(cycle: models.TestCycle) -> None:
@@ -1667,6 +1708,17 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         new_status = data["status"]
         transition_action = _validate_cycle_transition(previous_status, new_status, blocking_reason)
         if new_status == "Completed":
+            if link_changed:
+                raise HTTPException(
+                    400,
+                    "Completing a Test Cycle cannot be combined with linking, replacing, or "
+                    "removing its QA Request. Save the request link separately, refresh, and "
+                    "then complete the cycle.",
+                )
+            _require_completion_link_status(
+                obj,
+                locked_functional_requests,
+            )
             # Recorded is not the same as successfully completed. Validate
             # every slot, independent of defect links, roles and UI pagination.
             incomplete_executions = db.query(models.TestExecution).options(

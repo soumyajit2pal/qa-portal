@@ -1185,7 +1185,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     for h in history_rows[reset_index + 1:]:
         history.append((h.step_name or "—", h.decision or "—", uname(h.actor_id) or "—",
                          format_role_labels(h.actor_role) or "—", h.comments or "—",
-                         h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
+                         h.created_at if h.created_at else "—"))
 
     buf = build_request_detail_pdf(
         title=f"{obj.certificate_id} — {obj.application_name}",
@@ -1194,6 +1194,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         history_title=None,
         generated_by=current_user.full_name,
         generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
+        verification_context=(db, "SIGNOFF", signoff_id),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",

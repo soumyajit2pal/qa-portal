@@ -2,17 +2,27 @@ import './RoleSelector.css'
 import WorkspaceDefectWorkflow from '../../components/WorkspaceDefectWorkflow'
 import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api } from '../../api'
+import { api, HttpError } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader, type TableColumn } from '../../components/Common'
 import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole, isSelectableUser, uniqueWorkspaceAccess } from '../../constants'
 import { IconPlus, IconLock, IconShield, IconWarning, IconCheckCircle, IconSearch, IconUsers } from '../../components/Icons'
-import { UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult, QAWorkspaceOut } from '../../types'
+import {
+  UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult, QAWorkspaceOut,
+  MaintenanceWindowAdminEnvelope, MaintenanceWindowCancel, MaintenanceWindowUpdate,
+} from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import SearchableSelect from '../../components/SearchableSelect'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import TestProjectAdmin from './TestProjectAdmin'
+import { formatDateTimeIST, portalDate } from '../../time'
+import {
+  MAINTENANCE_WINDOW_ADMIN_PATH,
+  MAINTENANCE_WINDOW_CANCEL_PATH,
+  maintenanceDateTimeInput,
+  maintenanceDateTimeISO,
+} from '../../maintenanceWindow'
 
 function adminInitials(value: string, fallback = '?') {
   return (value.match(/[a-z0-9]+/gi) || [])
@@ -60,10 +70,10 @@ function CoordinatorRolePolicy() {
   </section>
 }
 
-type AdminSection = 'users' | 'departments' | 'workspaces' | 'projects' | 'applications' | 'email' | 'ldap'
+type AdminSection = 'users' | 'departments' | 'workspaces' | 'projects' | 'applications' | 'email' | 'ldap' | 'downtime'
 type WorkspacePanel = 'members' | 'administrators' | 'settings'
 type WorkspaceMemberView = 'current' | 'add'
-const ADMIN_SECTIONS: AdminSection[] = ['users', 'departments', 'workspaces', 'projects', 'applications', 'email', 'ldap']
+const ADMIN_SECTIONS: AdminSection[] = ['users', 'departments', 'workspaces', 'projects', 'applications', 'email', 'ldap', 'downtime']
 
 // Shared by every page that needs a department picker -- departments are
 // DB-backed now (see backend app/models.py Department / routers/departments.py)
@@ -851,8 +861,8 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
 }
 
 function certificateDate(value: string) {
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
+  const parsed = portalDate(value)
+  return Number.isNaN(parsed.getTime()) ? value : formatDateTimeIST(parsed)
 }
 
 function ldapTransportUsesTls(serverUri: string, useSsl: boolean) {
@@ -1013,7 +1023,7 @@ function LDAPSettingsCard() {
     <p className="muted small">Once saved, these database-backed values are authoritative and apply immediately. Values supplied through <code>APP_ENV_FILE</code> are used only while no database configuration exists. Keep a Standard System Administrator account available for recovery.</p>
     <div className="document-upload-summary" style={{ marginTop: 12 }}>
       <strong>{form.source === 'database' ? 'Database configuration active' : 'APP_ENV_FILE bootstrap configuration'}</strong>
-      <span>{form.updated_at ? `Last updated ${new Date(form.updated_at).toLocaleString()}. Bootstrap/recovery source: ${form.fallback_file || 'APP_ENV_FILE is not set'}.` : `Source: ${form.fallback_file || 'APP_ENV_FILE is not set'}. Save this page to make the database configuration authoritative.`}</span>
+      <span>{form.updated_at ? `Last updated ${formatDateTimeIST(form.updated_at)}. Bootstrap/recovery source: ${form.fallback_file || 'APP_ENV_FILE is not set'}.` : `Source: ${form.fallback_file || 'APP_ENV_FILE is not set'}. Save this page to make the database configuration authoritative.`}</span>
     </div>
     {form.bind_password_unavailable && <div className="alert-banner" style={{ marginTop: 12 }}><div className="icon-wrap"><IconWarning width={16} height={16} /></div><div className="body"><div className="title">Bind password must be entered again</div><div className="sub">The deployment secret changed, so the previously encrypted password cannot be used. Enter a new bind password and save before LDAP sign-ins can succeed.</div></div></div>}
     <form onSubmit={save} style={{ maxWidth: 820, marginTop: 16 }}>
@@ -1668,6 +1678,232 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
   </div>
 }
 
+interface MaintenanceWindowForm {
+  title: string
+  message: string
+  startsAt: string
+  endsAt: string
+}
+
+const EMPTY_MAINTENANCE_WINDOW: MaintenanceWindowForm = {
+  title: '', message: '', startsAt: '', endsAt: '',
+}
+
+function maintenancePhaseLabel(value?: string | null): string {
+  if (!value) return 'Not visible'
+  return value.toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function MaintenanceWindowSettingsCard() {
+  const [envelope, setEnvelope] = useState<MaintenanceWindowAdminEnvelope | null>(null)
+  const [form, setForm] = useState<MaintenanceWindowForm>(EMPTY_MAINTENANCE_WINDOW)
+  const [loading, setLoading] = useState(true)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [savedMessage, setSavedMessage] = useState('')
+  const [cancelOpen, setCancelOpen] = useState(false)
+  const [cancelReason, setCancelReason] = useState('')
+
+  const applyEnvelope = useCallback((value: MaintenanceWindowAdminEnvelope) => {
+    setEnvelope(value)
+    setForm(value.window ? {
+      title: value.window.title,
+      message: value.window.message,
+      startsAt: maintenanceDateTimeInput(value.window.starts_at),
+      endsAt: maintenanceDateTimeInput(value.window.ends_at),
+    } : EMPTY_MAINTENANCE_WINDOW)
+    setLoadFailed(false)
+  }, [])
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    setSavedMessage('')
+    try {
+      applyEnvelope(await api.getFresh<MaintenanceWindowAdminEnvelope>(MAINTENANCE_WINDOW_ADMIN_PATH))
+    } catch (loadError) {
+      setLoadFailed(true)
+      setError(loadError)
+    } finally {
+      setLoading(false)
+    }
+  }, [applyEnvelope])
+
+  useEffect(() => { void load() }, [load])
+
+  async function recoverFromConflict(action: string) {
+    try {
+      const latest = await api.getFresh<MaintenanceWindowAdminEnvelope>(MAINTENANCE_WINDOW_ADMIN_PATH)
+      applyEnvelope(latest)
+      setError(new Error(`The planned downtime was changed by another administrator while you were working. The latest server values are now loaded. Review them before you ${action} again.`))
+    } catch (loadError) {
+      setLoadFailed(true)
+      setError(loadError)
+    }
+  }
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault()
+    setError(null)
+    setSavedMessage('')
+    const title = form.title.trim()
+    const message = form.message.trim()
+    const startsAt = maintenanceDateTimeISO(form.startsAt)
+    const endsAt = maintenanceDateTimeISO(form.endsAt)
+    if (!title || !message || !startsAt || !endsAt) {
+      setError(new Error('Enter a title, message, start time, and end time. All schedule times are required in IST.'))
+      return
+    }
+    const startTime = Date.parse(startsAt)
+    const endTime = Date.parse(endsAt)
+    if (Number.isNaN(startTime) || Number.isNaN(endTime)) {
+      setError(new Error('Enter valid start and end times in IST.'))
+      return
+    }
+    if (endTime <= startTime) {
+      setError(new Error('The downtime end must be later than its start.'))
+      return
+    }
+    const payload: MaintenanceWindowUpdate = {
+      title,
+      message,
+      starts_at: startsAt,
+      ends_at: endsAt,
+      expected_revision: envelope?.window?.revision ?? 0,
+    }
+    setBusy(true)
+    try {
+      const updated = await api.put<MaintenanceWindowAdminEnvelope>(MAINTENANCE_WINDOW_ADMIN_PATH, payload)
+      applyEnvelope(updated)
+      setSavedMessage(envelope?.window ? 'Planned downtime rescheduled.' : 'Planned downtime scheduled.')
+    } catch (saveError) {
+      if (saveError instanceof HttpError && saveError.status === 409) await recoverFromConflict('save')
+      else setError(saveError)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function cancelWindow(event: React.FormEvent) {
+    event.preventDefault()
+    const revision = envelope?.window?.revision
+    const reason = cancelReason.trim()
+    if (revision == null || !reason) return
+    const payload: MaintenanceWindowCancel = { expected_revision: revision, reason }
+    setBusy(true)
+    setError(null)
+    setSavedMessage('')
+    try {
+      const updated = await api.post<MaintenanceWindowAdminEnvelope>(MAINTENANCE_WINDOW_CANCEL_PATH, payload)
+      applyEnvelope(updated)
+      setCancelReason('')
+      setCancelOpen(false)
+      setSavedMessage('Planned downtime cancelled. The user notice is no longer active.')
+    } catch (cancelError) {
+      // Do not stack the shared error dialog over the confirmation dialog.
+      // Keep the typed reason in state so reopening the confirmation does not
+      // force the administrator to reconstruct it after a transient failure.
+      setCancelOpen(false)
+      if (cancelError instanceof HttpError && cancelError.status === 409) {
+        await recoverFromConflict('cancel it')
+      } else setError(cancelError)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const configuredWindow = envelope?.window
+  const cancelled = !!configuredWindow?.cancelled_at
+  const startsAt = maintenanceDateTimeISO(form.startsAt)
+  const endsAt = maintenanceDateTimeISO(form.endsAt)
+  const formLocked = loading || busy || loadFailed
+
+  return (
+    <div className="maintenance-admin-layout">
+      <Card className="maintenance-admin-card" title="Schedule planned downtime" subtitle="The server starts showing this notice 48 hours before the start time. Browser clocks do not decide eligibility.">
+        <div className="maintenance-admin-intro">
+          <span className="maintenance-admin-icon" aria-hidden="true"><IconWarning width={19} height={19} /></span>
+          <div><strong>All times are India Standard Time (IST)</strong><p>Users see the exact window in a login notice and a persistent portal banner when the server marks it visible.</p></div>
+        </div>
+        <ErrorText error={error} title={loadFailed ? 'Planned downtime could not be loaded' : 'Planned downtime was not changed'} />
+        {loadFailed && (
+          <div className="maintenance-admin-load-failure" role="alert">
+            <div><strong>Editing is locked</strong><span>The current server revision could not be loaded, so saving from an unknown version is unsafe.</span></div>
+            <button type="button" className="btn" disabled={loading} onClick={() => void load()}>{loading ? 'Retrying…' : 'Retry load'}</button>
+          </div>
+        )}
+        {loading && !loadFailed && <p className="muted small" role="status">Loading the current downtime schedule…</p>}
+        <form className="maintenance-admin-form" onSubmit={save}>
+          <fieldset disabled={formLocked}>
+            <Field label="Notice title *">
+              <input value={form.title} maxLength={150} required onChange={(event) => setForm((value) => ({ ...value, title: event.target.value }))} placeholder="Example: Core banking maintenance" />
+              <small className="muted">{form.title.length}/150 characters</small>
+            </Field>
+            <Field label="User message *">
+              <textarea value={form.message} maxLength={2000} required rows={5} onChange={(event) => setForm((value) => ({ ...value, message: event.target.value }))} placeholder="Explain the affected services and what users should do before the window." />
+              <small className="muted">Plain text · {form.message.length}/2000 characters</small>
+            </Field>
+            <div className="maintenance-admin-time-grid">
+              <Field label="Starts at * (IST)">
+                <input type="datetime-local" value={form.startsAt} required onChange={(event) => setForm((value) => ({ ...value, startsAt: event.target.value }))} />
+              </Field>
+              <Field label="Ends at * (IST)">
+                <input type="datetime-local" value={form.endsAt} required onChange={(event) => setForm((value) => ({ ...value, endsAt: event.target.value }))} />
+              </Field>
+            </div>
+          </fieldset>
+          <div className="maintenance-admin-actions">
+            <button className="btn btn-primary" disabled={formLocked}>{busy ? 'Saving…' : configuredWindow ? 'Reschedule downtime' : 'Schedule downtime'}</button>
+            {configuredWindow && !cancelled && <button type="button" className="btn btn-danger" disabled={formLocked} onClick={() => setCancelOpen(true)}>Cancel downtime</button>}
+          </div>
+        </form>
+        {savedMessage && <p className="maintenance-admin-saved" role="status"><IconCheckCircle width={15} height={15} /> {savedMessage}</p>}
+      </Card>
+
+      <aside className="maintenance-admin-side" aria-label="Planned downtime status and preview">
+        <section className="maintenance-admin-status">
+          <header><span>SERVER STATUS</span><strong>{cancelled ? 'Cancelled' : envelope?.configured ? maintenancePhaseLabel(configuredWindow?.phase) : 'Not scheduled'}</strong></header>
+          {configuredWindow ? <dl>
+            <div><dt>Revision</dt><dd>{configuredWindow.revision}</dd></div>
+            <div><dt>Notice from</dt><dd><time dateTime={configuredWindow.display_from}>{formatDateTimeIST(configuredWindow.display_from)}</time></dd></div>
+            <div><dt>Starts</dt><dd><time dateTime={configuredWindow.starts_at}>{formatDateTimeIST(configuredWindow.starts_at)}</time></dd></div>
+            <div><dt>Ends</dt><dd><time dateTime={configuredWindow.ends_at}>{formatDateTimeIST(configuredWindow.ends_at)}</time></dd></div>
+            <div><dt>Created</dt><dd>{configuredWindow.created_by_name || 'Administrator'} · <time dateTime={configuredWindow.created_at}>{formatDateTimeIST(configuredWindow.created_at)}</time></dd></div>
+            {configuredWindow.updated_at && <div><dt>Last updated</dt><dd>{configuredWindow.updated_by_name || 'Administrator'} · <time dateTime={configuredWindow.updated_at}>{formatDateTimeIST(configuredWindow.updated_at)}</time></dd></div>}
+            {configuredWindow.cancelled_at && <div className="maintenance-admin-cancelled"><dt>Cancelled</dt><dd>{configuredWindow.cancelled_by_name || 'Administrator'} · <time dateTime={configuredWindow.cancelled_at}>{formatDateTimeIST(configuredWindow.cancelled_at)}</time>{configuredWindow.cancel_reason && <span>{configuredWindow.cancel_reason}</span>}</dd></div>}
+          </dl> : <p>No planned downtime has been configured.</p>}
+          <small>Status and visibility come from the server. They are not inferred from this browser’s clock.</small>
+        </section>
+
+        <section className="maintenance-admin-preview" aria-label="Draft user notice preview">
+          <span>DRAFT PREVIEW</span>
+          <strong>{form.title.trim() || 'Planned downtime title'}</strong>
+          <p>{form.message.trim() || 'The user-facing maintenance message will appear here.'}</p>
+          <dl>
+            <div><dt>Starts</dt><dd>{startsAt ? <time dateTime={startsAt}>{formatDateTimeIST(startsAt)}</time> : 'Not set'}</dd></div>
+            <div><dt>Ends</dt><dd>{endsAt ? <time dateTime={endsAt}>{formatDateTimeIST(endsAt)}</time> : 'Not set'}</dd></div>
+          </dl>
+          <small>This preview does not indicate whether the server is currently showing the notice.</small>
+        </section>
+      </aside>
+
+      {cancelOpen && configuredWindow && (
+        <Modal title="Cancel planned downtime?" variant="dialog" compact preventBackdropClose closeDisabled={busy} onClose={() => { if (!busy) { setCancelReason(''); setCancelOpen(false) } }}>
+          <form className="maintenance-cancel-form" onSubmit={cancelWindow}>
+            <p>Cancellation removes the login notice and global banner. Record why the scheduled window is no longer required.</p>
+            <Field label="Cancellation reason *">
+              <textarea autoFocus value={cancelReason} maxLength={500} required rows={4} disabled={busy} onChange={(event) => setCancelReason(event.target.value)} />
+              <small className="muted">{cancelReason.length}/500 characters</small>
+            </Field>
+            <div className="modal-actions"><button type="button" className="btn" disabled={busy} onClick={() => { setCancelReason(''); setCancelOpen(false) }}>Keep schedule</button><button type="submit" className="btn btn-danger" disabled={busy || !cancelReason.trim()}>{busy ? 'Cancelling…' : 'Confirm cancellation'}</button></div>
+          </form>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
 export default function Admin() {
   const { user } = useAuth()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -1729,6 +1965,7 @@ export default function Admin() {
     applications: { title: 'Application directory', subtitle: 'Maintain approved application names and their owning departments.' },
     email: { title: 'Email diagnostics', subtitle: 'Send a test message to verify the configured email service.' },
     ldap: { title: 'LDAP configuration', subtitle: 'Manage the directory connection used for LDAP authentication.' },
+    downtime: { title: 'Planned downtime', subtitle: 'Schedule the system-wide maintenance notice shown before and during a planned service window.' },
   }
   function setSection(next: AdminSection) {
     const nextParams = new URLSearchParams(searchParams)
@@ -1788,10 +2025,11 @@ export default function Admin() {
         </nav>
         <div className="admin-system-tools">
           <span><strong>System tools</strong><small>Occasional setup and checks</small></span>
-          <SearchableSelect ariaLabel="Choose a system administration tool" searchable={false} value={section === 'applications' || section === 'email' || section === 'ldap' ? section : ''} onChange={(value) => value && setSection(value as AdminSection)} placeholder="Choose a tool…" options={[
+          <SearchableSelect ariaLabel="Choose a system administration tool" searchable={false} value={section === 'applications' || section === 'email' || section === 'ldap' || section === 'downtime' ? section : ''} onChange={(value) => value && setSection(value as AdminSection)} placeholder="Choose a tool…" options={[
             { value: 'applications', label: 'Application directory' },
             { value: 'email', label: 'Email diagnostics' },
             { value: 'ldap', label: 'LDAP configuration' },
+            { value: 'downtime', label: 'Planned downtime' },
           ]} />
         </div>
       </div>
@@ -1900,6 +2138,10 @@ export default function Admin() {
 
       {section === 'ldap' && <div className="access-workspace-panel access-departments-section">
         <LDAPSettingsCard />
+      </div>}
+
+      {section === 'downtime' && <div className="access-workspace-panel access-departments-section">
+        <MaintenanceWindowSettingsCard />
       </div>}
 
       {showCreate && (

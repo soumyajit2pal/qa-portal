@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     Column, Integer, BigInteger, Float, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index,
-    UniqueConstraint, CheckConstraint, text, and_
+    UniqueConstraint, CheckConstraint, text, and_, event
 )
 from sqlalchemy.orm import relationship, foreign
 from .db_base import Base
@@ -1504,6 +1504,14 @@ class SASTComponent(Base):
     commit_id = Column(String(500))
     technology_stack = Column(String(500))
     build_number = Column(String(300))
+    # Repository-local queue: a fix/scan for one component must not move or
+    # clear another component. NULL on legacy rows deliberately requires a
+    # fresh identity-bound scan before its evidence can clear the request.
+    scan_state = Column(String(32), nullable=True)
+    latest_scan_id = Column(Integer, ForeignKey("qap_security_scan_results.id"), nullable=True)
+    validation_scan_id = Column(Integer, ForeignKey("qap_security_scan_results.id"), nullable=True)
+    fix_submitted_at = Column(DateTime, nullable=True)
+    fix_submitted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
 
     sast_request = relationship("SASTRequest", back_populates="components")
 
@@ -2166,6 +2174,7 @@ class ApprovalAction(Base):
     (QA_REQUEST, TEST_CASE, SAST_DAST, SUPPRESSION, SIGNOFF ...).
     """
     __tablename__ = "qap_approval_actions"
+    __table_args__ = (UniqueConstraint("signature_id", name="uq_qap_approval_sig_id"),)
     id = pk_column()
     # entity_type no longer index=True on its own -- superseded by the
     # composite ix_qap_appract_entity_created below (same leading column,
@@ -2185,6 +2194,9 @@ class ApprovalAction(Base):
     # ones and silently worked until a longer one came through.
     decision = Column(String(64))
     comments = Column(Text)
+    signature_id = Column(String(80), nullable=True)
+    signature_seal = Column(String(64), nullable=True)
+    signature_key_id = Column(String(16), nullable=True)
     created_at = Column(DateTime, default=now)
     # APR-005 "Every decision shall record actor, delegated role, timestamp,
     # previous state, new state and comment." Optional/additive -- every
@@ -2225,6 +2237,12 @@ class ApprovalAction(Base):
     @property
     def created_by_name(self):
         return self.created_by.full_name if self.created_by else None
+
+
+@event.listens_for(ApprovalAction, "before_insert")
+def _seal_approval_signature(mapper, connection, action):
+    from .signature_integrity import seal_new_action
+    seal_new_action(connection, action)
 
 
 class EmailNotification(Base):

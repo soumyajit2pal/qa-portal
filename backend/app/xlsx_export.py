@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from .time_format import as_ist, parse_timestamp
 
 
 NAVY = "11182D"
@@ -27,8 +28,9 @@ _ILLEGAL_XML = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 
 def safe_cell(value):
     """Make values Excel-safe while retaining dates and numeric values."""
-    if isinstance(value, datetime.datetime):
-        return value.replace(tzinfo=None) if value.tzinfo else value
+    timestamp = parse_timestamp(value)
+    if timestamp is not None:
+        return as_ist(timestamp).replace(tzinfo=None)
     if isinstance(value, (datetime.date, int, float, bool)) or value is None:
         return value
     text = _ILLEGAL_XML.sub("", str(value))[:32767]
@@ -71,8 +73,8 @@ def add_summary_sheet(
     for label, value in metadata:
         ws.cell(row, 1, safe_cell(label)).font = Font(bold=True, color=MUTED)
         ws.cell(row, 2, safe_cell(value)).alignment = Alignment(wrap_text=True, vertical="top")
-        if isinstance(value, datetime.datetime):
-            ws.cell(row, 2).number_format = "yyyy-mm-dd hh:mm:ss"
+        if isinstance(ws.cell(row, 2).value, datetime.datetime):
+            ws.cell(row, 2).number_format = 'yyyy-mm-dd hh:mm:ss "IST"'
         elif isinstance(value, datetime.date):
             ws.cell(row, 2).number_format = "yyyy-mm-dd"
         row += 1
@@ -157,9 +159,11 @@ def add_table_sheet(
             cell.border = Border(bottom=thin)
             if row_number % 2 == 0:
                 cell.fill = PatternFill("solid", fgColor="F7F8FC")
-            if header in date_headers and isinstance(cell.value, (datetime.date, datetime.datetime)):
-                cell.number_format = "yyyy-mm-dd hh:mm:ss"
-            elif header in date_only_headers and isinstance(cell.value, (datetime.date, datetime.datetime)):
+            if header in date_only_headers and isinstance(cell.value, (datetime.date, datetime.datetime)):
+                cell.number_format = "yyyy-mm-dd"
+            elif isinstance(cell.value, datetime.datetime):
+                cell.number_format = 'yyyy-mm-dd hh:mm:ss "IST"'
+            elif header in date_headers and isinstance(cell.value, datetime.date):
                 cell.number_format = "yyyy-mm-dd"
             if header in status_headers:
                 fill = status_fills.get(str(cell.value or "").lower())

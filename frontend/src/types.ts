@@ -142,6 +142,61 @@ export interface AuditSummary {
   access_management: number
 }
 
+// ---------------- Planned system downtime ----------------
+// The server owns notice eligibility. Clients must use `visible` and `phase`
+// from /current instead of calculating the 48-hour window with a browser
+// clock that may be wrong or in a different timezone.
+export type MaintenanceWindowNoticePhase = 'UPCOMING' | 'IN_PROGRESS'
+
+export interface MaintenanceWindowNoticeOut {
+  revision: number
+  title: string
+  message: string
+  starts_at: string
+  ends_at: string
+  display_from: string
+}
+
+export interface MaintenanceWindowCurrentOut {
+  visible: boolean
+  phase: MaintenanceWindowNoticePhase | null
+  notice: MaintenanceWindowNoticeOut | null
+}
+
+export interface MaintenanceWindowAdminOut extends MaintenanceWindowNoticeOut {
+  // Admin responses may expose additional lifecycle phases beyond the two
+  // user-visible phases, for example SCHEDULED, ENDED, or CANCELLED.
+  phase: string | null
+  cancelled_at: string | null
+  cancel_reason: string | null
+  created_at: string
+  created_by_id: number | null
+  created_by_name: string | null
+  updated_at: string | null
+  updated_by_id: number | null
+  updated_by_name: string | null
+  cancelled_by_id: number | null
+  cancelled_by_name: string | null
+}
+
+export interface MaintenanceWindowAdminEnvelope {
+  configured: boolean
+  window: MaintenanceWindowAdminOut | null
+}
+
+export interface MaintenanceWindowUpdate {
+  title: string
+  message: string
+  starts_at: string
+  ends_at: string
+  expected_revision: number
+}
+
+export interface MaintenanceWindowCancel {
+  expected_revision: number
+  reason: string
+}
+
 // Departments are DB-backed (see backend app/models.py Department, managed
 // via /api/departments) -- fetched at render time everywhere a department
 // picker is shown, instead of importing a hardcoded list.
@@ -625,7 +680,7 @@ export interface SecurityScanResultOut {
   suppressed_total_count: number
   audit_url?: string | null
   filters: SecurityScanFilterOut[]
-  targets: { id: number; label: string; detail?: string | null }[]
+  targets: { id: number; label: string; detail?: string | null; repository_url?: string | null; git_branch?: string | null; commit_id?: string | null }[]
   imported_by_id?: number | null
   imported_at: string
   // 2026-08 "Findings Validation" doc, section 4.3 Scan History -- derived
@@ -637,6 +692,28 @@ export interface SecurityScanResultOut {
 }
 
 // Backs the "Findings Validation" doc's 4.1 Scan Summary section.
+export type SASTRepositoryState = 'NOT_SCANNED' | 'AWAITING_VALIDATION' | 'WAITING_FOR_FIX' | 'READY_FOR_RESCAN' | 'CLEAR' | 'STALE'
+
+export interface SASTRepositoryStateOut {
+  target_id: number
+  label: string
+  state: SASTRepositoryState
+  commit_id?: string | null
+  git_branch?: string | null
+  latest_scan_id?: number | null
+  open_findings: number
+  fix_submitted_at?: string | null
+  fix_submitted_by_id?: number | null
+}
+
+export interface SecurityTargetScanIn {
+  target_id: number
+  application_name: string
+  application_version: string
+  git_branch?: string
+  commit_id?: string
+}
+
 export interface SecurityScanSummaryOut {
   initial?: SecurityScanResultOut | null
   current?: SecurityScanResultOut | null
@@ -645,6 +722,13 @@ export interface SecurityScanSummaryOut {
   total_rescans: number
   open_findings: number
   suppressed_findings: number
+  // SAST tracks progress independently for every repository. Optional for DAST.
+  repository_states?: SASTRepositoryStateOut[]
+  total_repositories?: number
+  clear_repositories?: number
+  ready_for_rescan?: number
+  unscanned_repositories?: number
+  all_repositories_clear?: boolean
 }
 
 // One repository row -- replaces the old design where Repository URL/
@@ -1711,6 +1795,9 @@ export interface TestCycleOut {
   linked_request_type?: string | null
   linked_request_id?: number | null
   linked_request_key?: string | null
+  // Canonical QAStatus code supplied by the server. Cycle completion is
+  // eligible only at EXECUTION_IN_PROGRESS when a request is linked.
+  linked_request_status?: string | null
   linked_request_change_allowed?: boolean
   linked_request_qa_lead_unlink_allowed?: boolean
   reexecution_of_cycle_id?: number | null

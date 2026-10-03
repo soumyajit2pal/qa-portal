@@ -27,6 +27,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import CondPageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from .time_format import display_timestamp, format_datetime_ist, parse_timestamp
 
 _styles = getSampleStyleSheet()
 _section_title_style = ParagraphStyle(
@@ -46,7 +47,7 @@ _CONTENT_WIDTH = A4[0] - (2 * _PAGE_MARGIN) - 2 * _FRAME_PADDING
 
 Field = Tuple[str, object]
 Section = Tuple[str, Sequence[Field]]
-HistoryRow = Tuple[str, str, str, str, str, str]
+HistoryRow = Tuple[str, str, str, str, str, object]
 
 # Standard wording used by every exported QA Clearance signature. Keeping it
 # here (next to the shared signature renderer) prevents the certificate PDF
@@ -125,7 +126,7 @@ def _fmt(value: object) -> str:
     # user-authored and rich-text fields are stored as Markdown, so raw values
     # containing <, >, &, links, code, or Markdown tables must never be handed
     # to Paragraph as markup. Escape first and retain intentional line breaks.
-    return escape(str(value)).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br/>")
+    return escape(str(display_timestamp(value))).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br/>")
 
 
 def _safe_text(value: object) -> str:
@@ -445,77 +446,74 @@ def _rich_field_block(label: str, value: RichTextValue, available_width: float) 
     return flowables
 
 
+def _signature_applied_at(value: str) -> str:
+    """Render recorded signature times in IST, retaining their precision."""
+    applied = parse_timestamp(value)
+    return format_datetime_ist(applied, separator="<br/>") if applied else _fmt(value)
+
+
 def _signature_block(label: str, value: SignatureValue, available_width: float) -> list:
     signature_fonts = {
-        "professional": ("Helvetica-Bold", 14, 18),
-        "classic": ("Times-BoldItalic", 16, 19),
-        "handwritten": ("Times-Italic", 18, 21),
+        "professional": "Helvetica-Bold",
+        "classic": "Times-BoldItalic",
+        "handwritten": "Times-Italic",
     }
-    signature_font, signature_size, signature_leading = signature_fonts.get(
+    signature_font = signature_fonts.get(
         value.style, signature_fonts["professional"]
     )
-    signature_name_style = ParagraphStyle(
-        "SignatureName", parent=_body_style, fontName=signature_font,
-        fontSize=signature_size, leading=signature_leading,
-        textColor=colors.HexColor("#0b6677"),
+    signature_summary_style = ParagraphStyle(
+        "SignatureSummary", parent=_body_style, fontSize=8.5, leading=11,
+        textColor=colors.HexColor("#173f48"),
     )
     signature_meta_style = ParagraphStyle(
-        "SignatureMeta", parent=_body_style, fontSize=7.8, leading=10,
+        "SignatureMeta", parent=_body_style, fontSize=7, leading=9,
         textColor=colors.HexColor("#526c72"),
     )
-    signature_id_style = ParagraphStyle(
-        "SignatureId", parent=signature_meta_style, fontName="Courier-Bold",
-        fontSize=7.5, splitLongWords=True,
-    )
-    signature_notice_style = ParagraphStyle(
-        "SignatureNotice", parent=signature_meta_style, fontName="Helvetica-Bold",
-        textColor=colors.HexColor("#245b3d"),
+    signature_date_style = ParagraphStyle(
+        "SignatureDate", parent=signature_meta_style, alignment=2, leading=11,
     )
     # Keep this as one flat table. ReportLab 4.2.5 raises AttributeError
     # while page-splitting a Table nested inside another Table cell because
     # the child table has no computed ``height`` yet (the production
-    # /api/signoffs/{id}/export traceback). Four proportional columns plus
-    # SPAN commands reproduce the same two-column signature card without any
-    # nested flowable.
-    widths = [available_width * .27, available_width * .27, available_width * .23, available_width * .23]
+    # /api/signoffs/{id}/export traceback).
+    widths = [available_width * .63, available_width * .37]
+    heading = value.stage or label.removesuffix(" — Digital Signature")
     block = Table([
-        [Paragraph(_safe_text(label), _label_style), "", "", ""],
-        [Paragraph(_safe_text(value.signature_type.upper()), signature_notice_style), "", "", ""],
-        [Paragraph("DIGITALLY SIGNED BY", signature_meta_style), "",
-         Paragraph("SIGNATURE ID", signature_meta_style), ""],
-        [Paragraph(_safe_text(value.signer), signature_name_style), "",
-         Paragraph(_safe_text(value.signature_id), signature_id_style), ""],
-        [Paragraph(f"Stage: <b>{_safe_text(value.stage)}</b>", signature_meta_style),
-         Paragraph(f"Applied: {_safe_text(value.applied_at)}", signature_meta_style),
-         Paragraph(f"Intent: {_safe_text(value.intent)}", signature_meta_style), ""],
-    ], colWidths=widths, splitByRow=1, splitInRow=0, hAlign="LEFT")
+        [Paragraph(
+            f'{_safe_text(heading)} &bull; <font name="{signature_font}">{_safe_text(value.signer)}</font>',
+            signature_summary_style,
+        ), Paragraph(_signature_applied_at(value.applied_at).replace("<br/>", " "), signature_date_style)],
+        [Paragraph(
+            f'{_safe_text(value.signature_type.upper())} &bull; Signature ID: '
+            f'<font name="Courier">{_safe_text(value.signature_id)}</font>',
+            signature_meta_style,
+        ), ""],
+        [Paragraph(f"<b>Intent:</b> {_safe_text(value.intent)}", signature_meta_style), ""],
+    ], colWidths=widths, splitByRow=1, splitInRow=1, hAlign="LEFT")
     block.setStyle(TableStyle([
-        ("SPAN", (0, 0), (-1, 0)),
-        ("SPAN", (0, 1), (-1, 1)),
-        ("SPAN", (0, 2), (1, 2)), ("SPAN", (2, 2), (3, 2)),
-        ("SPAN", (0, 3), (1, 3)), ("SPAN", (2, 3), (3, 3)),
-        ("SPAN", (2, 4), (3, 4)),
-        ("BACKGROUND", (0, 0), (-1, 1), colors.HexColor("#eaf5ef")),
-        ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#83b99a")),
-        ("LINEBELOW", (0, 0), (0, 0), .5, colors.HexColor("#a8cdb5")),
-        ("LINEABOVE", (0, 4), (-1, 4), .35, colors.HexColor("#c9dadd")),
+        ("SPAN", (0, 1), (-1, 1)), ("SPAN", (0, 2), (-1, 2)),
+        ("LINEABOVE", (0, 0), (-1, 0), .4, colors.HexColor("#cddcdf")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (0, 0), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, 0), 6),
+        ("BOTTOMPADDING", (0, -1), (-1, -1), 6),
     ]))
-    # A signature is one audit record. Reserve enough room for the entire card
+    # A signature is one audit record. Reserve enough room for the entire row
     # before rendering it so the stage/timestamp/intent cannot be orphaned on
     # the next page. CondPageBreak avoids ReportLab 4.2.5's KeepTogether/Table
     # pagination loop.
-    return [CondPageBreak(50 * mm), block]
+    _, card_height = block.wrap(available_width, A4[1])
+    return [CondPageBreak(card_height), block]
 
 
 def _signature_notice_block(available_width: float) -> Table:
     """One document-level digital-signature notice, never one per signer."""
     notice_style = ParagraphStyle(
         "DocumentSignatureNotice", parent=_body_style,
-        fontName="Helvetica-Bold", fontSize=8.5, leading=11,
-        textColor=colors.HexColor("#245b3d"),
+        fontSize=7, leading=9,
+        textColor=colors.HexColor("#526c72"),
     )
     block = Table(
         [[Paragraph(
@@ -525,12 +523,11 @@ def _signature_notice_block(available_width: float) -> Table:
         colWidths=[available_width], hAlign="LEFT",
     )
     block.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f3faf6")),
-        ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#83b99a")),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("LINEABOVE", (0, 0), (-1, -1), .4, colors.HexColor("#cddcdf")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
     ]))
     return block
 
@@ -552,6 +549,7 @@ def build_request_detail_pdf(
     history: Sequence[HistoryRow], generated_by: str, generated_at: str,
     history_note: Optional[str] = None,
     history_title: Optional[str] = "Workflow / Approval History",
+    verification_context: Optional[tuple] = None,
 ) -> io.BytesIO:
     sections = list(sections)
     # ApprovalDecisionButtons is shared by Functional, SAST, DAST,
@@ -592,7 +590,7 @@ def build_request_detail_pdf(
     elements: List = [
         Paragraph(_safe_text(title), _styles["Title"]),
         Paragraph(_safe_text(subtitle), _styles["Normal"]),
-        Paragraph(_safe_text(f"Generated by {generated_by} on {generated_at}"), _meta_style),
+        Paragraph(_safe_text(f"Generated by {generated_by} on {display_timestamp(generated_at)}"), _meta_style),
         Spacer(1, 10),
     ]
 
@@ -617,7 +615,7 @@ def build_request_detail_pdf(
             elif isinstance(value, SignatureValue):
                 flush_rows()
                 elements.extend(_signature_block(label, value, content_width))
-                elements.append(Spacer(1, 7))
+                elements.append(Spacer(1, 3))
             else:
                 pending_rows.append([Paragraph(_safe_text(label), _label_style), _field_content(value)])
         flush_rows()
@@ -655,12 +653,23 @@ def build_request_detail_pdf(
         # One consolidated statement at the bottom of the exported document.
         # The evidence cards above stay focused on each signer/stage without
         # repeating identical legal copy after every signature.
-        elements.extend([
-            Spacer(1, 12),
-            CondPageBreak(18 * mm),
-            _signature_notice_block(content_width),
-        ])
+        notice = _signature_notice_block(content_width)
+        _, notice_height = notice.wrap(content_width, A4[1])
+        elements.extend([Spacer(1, 4), CondPageBreak(notice_height), notice])
+        if verification_context:
+            elements.append(Paragraph(
+                "Verify this PDF: Portal / Governance / Verify Signature", _meta_style,
+            ))
 
     doc.build(elements, onFirstPage=_page_footer, onLaterPages=_page_footer)
+    if has_digital_signatures and verification_context:
+        from .signature_integrity import protect_pdf
+        db, entity_type, entity_id = verification_context
+        signature_ids = {
+            value.signature_id for _, fields in sections for _, value in fields
+            if isinstance(value, SignatureValue)
+        }
+        return protect_pdf(buf.getvalue(), db=db, entity_type=entity_type,
+                           entity_id=entity_id, signature_ids=signature_ids)
     buf.seek(0)
     return buf

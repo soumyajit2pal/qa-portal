@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useId } from 'react'
 import type { RepeatableGroupField, RepeatableGroupRow } from './Common'
 import { Field } from './Common'
 
@@ -37,6 +37,7 @@ export default function SastRepositoryDetails({
   onHashChange: (value: string) => void
   sectionNumber?: string
 }) {
+  const fieldHelpId = useId()
   const data = rows.length ? rows : [blankSastComponent()]
 
   function setAt(index: number, key: string, value: string) {
@@ -79,10 +80,13 @@ export default function SastRepositoryDetails({
                     required
                     value={repository[field.key] || ''}
                     placeholder={field.placeholder || field.label}
+                    aria-describedby={field.key === 'repository_url' ? `${fieldHelpId}-${index}` : undefined}
                     onChange={(event) => setAt(index, field.key, event.target.value)}
                   />
                   {field.key === 'repository_url' && (
-                    <small className="muted">Use a Git clone URL ending in .git.</small>
+                    repository.repository_url?.trim() && !isGitRepositoryUrl(repository.repository_url)
+                      ? <small id={`${fieldHelpId}-${index}`} className="security-repository-url-warning" role="status">Warning: this does not match the usual Git clone URL format ending in .git. Confirm the repository reference; you can still continue and submit.</small>
+                      : <small id={`${fieldHelpId}-${index}`} className="muted">A Git clone URL ending in .git is recommended.</small>
                   )}
                 </label>
               ))}

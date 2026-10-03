@@ -1,12 +1,11 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react'
 import { api, mapWithConcurrency } from '../api'
-import { formatDateIST, formatDateTimeIST } from '../time'
+import { formatDateIST, formatDateTimeIST, portalDate } from '../time'
 import { useAuth } from '../context/AuthContext'
 import { activeWorkspaceId, formatRoleLabels, isViewOnly, uniqueWorkspaceAccess } from '../constants'
 import { ApprovalActionOut, RequestDocumentOut } from '../types'
 import { EmptyState, ErrorText } from './Common'
 import {
-  RICH_TEXT_MAX_IMAGES,
   editorContentToMarkdown,
   safeRichTextLink,
   useRichTextImages,
@@ -19,12 +18,18 @@ import {
   insertRichTextImages,
   decodeRichImageName,
   pasteStructuredRichText,
+  PendingRichImage,
+  RICH_TEXT_IMAGE_TYPES,
+  richTextImageFilename,
 } from './RichTextEditor'
 import { decodeMergedRichTable } from '../richTableCodec'
 import { isMarkdownTableSeparator, parseMarkdownHeading, splitMarkdownTableRow } from '../markdownSyntax'
 import { isActivityReadOnly } from '../activityAccess'
+import { ACTIVITY_MAX_ATTACHMENTS, activityAttachmentError, activityAttachmentKind, activityImageBlob } from '../activityAttachments'
+import { ActivityAttachmentCard, ActivityAttachmentPicker, PendingActivityAttachment } from './ActivityAttachments'
 
 type ActivityFilter = 'all' | 'comments' | 'history'
+const INLINE_IMAGE_PATTERN = /^!\[([^\]]*)\]\(attachment:([^)]+)\)$/
 
 const COMMENT_WORKFLOW_ROLES = new Set([
   'REQUESTER', 'DEVELOPER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER', 'SM',
@@ -42,7 +47,7 @@ function actorLabel(item: ApprovalActionOut): string {
 }
 
 function relativeTime(value: string): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000))
+  const seconds = Math.max(0, Math.floor((Date.now() - portalDate(value).getTime()) / 1000))
   if (seconds < 60) return 'just now'
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}m ago`
@@ -130,7 +135,7 @@ export function MarkdownComment({ value, attachmentUrls = {} }: { value: string;
       index += 1
       continue
     }
-    const image = line.match(/^!\[([^\]]*)\]\(attachment:([^)]+)\)$/)
+    const image = line.match(INLINE_IMAGE_PATTERN)
     if (image) {
       const name = decodeRichImageName(image[2])
       const url = attachmentUrls[name]
@@ -152,7 +157,7 @@ export function MarkdownComment({ value, attachmentUrls = {} }: { value: string;
       const header = cells(line)
       index += 2
       const rows: string[][] = []
-      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) rows.push(cells(lines[index++]))
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim() && !INLINE_IMAGE_PATTERN.test(lines[index])) rows.push(cells(lines[index++]))
       blocks.push(<div className="jira-markdown-table-wrap" key={`table-${index}`}><table><thead><tr>{header.map((cell, cellIndex) => <th key={cellIndex}>{inlineMarkdown(cell, `th-${index}-${cellIndex}`)}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{inlineMarkdown(cell, `td-${index}-${rowIndex}-${cellIndex}`)}</td>)}</tr>)}</tbody></table></div>)
       continue
     }
@@ -176,7 +181,7 @@ export function MarkdownComment({ value, attachmentUrls = {} }: { value: string;
     }
     const paragraph: string[] = [line]
     index += 1
-    while (index < lines.length && lines[index].trim() && !decodeMergedRichTable(lines[index]) && !isTableStart(index) && !/^\s*(?:#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s?)/.test(lines[index])) paragraph.push(lines[index++])
+    while (index < lines.length && lines[index].trim() && !decodeMergedRichTable(lines[index]) && !isTableStart(index) && !INLINE_IMAGE_PATTERN.test(lines[index]) && !/^\s*(?:#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s?)/.test(lines[index])) paragraph.push(lines[index++])
     blocks.push(<p key={`p-${index}`}>{paragraph.map((entry, paragraphIndex) => <React.Fragment key={paragraphIndex}>{inlineMarkdown(entry, `p-${index}-${paragraphIndex}`)}{paragraphIndex < paragraph.length - 1 && <br />}</React.Fragment>)}</p>)
   }
   return <div className="jira-markdown">{blocks}</div>
@@ -187,14 +192,19 @@ export function AuthenticatedMarkdown({ value, basePath }: { value: string; base
   useEffect(() => {
     let active = true
     const createdUrls: string[] = []
+    setAttachmentUrls({})
     api.get<RequestDocumentOut[]>(basePath).then(async (documents) => {
-      const loaded = await mapWithConcurrency(documents, 3, async (document) => {
-        const blob = await api.getBlob(`${basePath}/${document.id}/download`)
-        const url = URL.createObjectURL(blob); createdUrls.push(url)
-        return [document.file_name, url] as const
+      if (!active) return
+      const loaded = await mapWithConcurrency(documents.filter(document => activityAttachmentKind(document) === 'image'), 3, async (document) => {
+        if (!active) return null
+        try {
+          const blob = await api.getBlob(`${basePath}/${document.id}/download`)
+          if (!active) return null
+          const url = URL.createObjectURL(activityImageBlob(document, blob)); createdUrls.push(url)
+          return [document.file_name, url] as const
+        } catch { return null }
       })
-      if (active) setAttachmentUrls(Object.fromEntries(loaded))
-      else loaded.forEach(([, url]) => URL.revokeObjectURL(url))
+      if (active) setAttachmentUrls(Object.fromEntries(loaded.filter((entry): entry is readonly [string, string] => entry !== null)))
     }).catch(() => undefined)
     return () => { active = false; createdUrls.forEach((url) => URL.revokeObjectURL(url)) }
   }, [basePath])
@@ -204,50 +214,127 @@ export function AuthenticatedMarkdown({ value, basePath }: { value: string; base
 function CommentContent({ commentId, value }: { commentId: number; value: string }) {
   const [documents, setDocuments] = useState<RequestDocumentOut[]>([])
   const [urls, setUrls] = useState<Record<number, string>>({})
+  const [loadingIds, setLoadingIds] = useState<number[]>([])
+  const [error, setError] = useState<unknown>(null)
+  const [loadError, setLoadError] = useState('')
+  const [reload, setReload] = useState(0)
+  const generation = useRef(0)
+  const createdUrls = useRef(new Set<string>())
+  const pdfUrls = useRef(new Map<number, string>())
+  const pendingPopups = useRef(new Set<Window>())
+  const busyIds = useRef(new Set<number>())
+  const basePath = `/api/approvals/comments/${commentId}/attachments`
 
   useEffect(() => {
-    let active = true
-    const createdUrls: string[] = []
+    const version = ++generation.current
+    const active = () => generation.current === version
+    setDocuments([]); setUrls({}); setLoadingIds([]); setLoadError(''); setError(null)
     async function load() {
       try {
-        const docs = await api.get<RequestDocumentOut[]>(`/api/approvals/comments/${commentId}/attachments`)
-        if (!active) return
+        const docs = await api.get<RequestDocumentOut[]>(basePath)
+        if (!active()) return
         setDocuments(docs)
-        const loaded = await mapWithConcurrency(docs, 3, async (document) => {
-          const blob = await api.getBlob(`/api/approvals/comments/${commentId}/attachments/${document.id}/download`)
-          const url = URL.createObjectURL(blob)
-          createdUrls.push(url)
-          return [document.id, url] as const
+        // Only image bytes are needed to render the feed. Documents stay metadata-only.
+        const loaded = await mapWithConcurrency(docs.filter(document => activityAttachmentKind(document) === 'image'), 3, async document => {
+          if (!active()) return null
+          try {
+            const blob = await api.getBlob(`${basePath}/${document.id}/download`)
+            if (!active()) return null
+            const url = URL.createObjectURL(activityImageBlob(document, blob))
+            createdUrls.current.add(url)
+            return [document.id, url] as const
+          } catch {
+            if (active()) setLoadError('Some comment images could not be loaded.')
+            return null
+          }
         })
-        if (active) setUrls(Object.fromEntries(loaded))
-        else loaded.forEach(([, url]) => URL.revokeObjectURL(url))
+        if (active()) setUrls(Object.fromEntries(loaded.filter((entry): entry is readonly [number, string] => entry !== null)))
       } catch {
-        // A missing legacy attachment endpoint should not hide the comment.
+        if (active()) setLoadError('Comment attachments could not be loaded.')
       }
     }
-    load()
-    return () => { active = false; createdUrls.forEach((url) => URL.revokeObjectURL(url)) }
-  }, [commentId])
+    void load()
+    return () => {
+      generation.current += 1
+      createdUrls.current.forEach(url => URL.revokeObjectURL(url)); createdUrls.current.clear()
+      pdfUrls.current.clear(); busyIds.current.clear()
+      pendingPopups.current.forEach(popup => { if (!popup.closed) popup.close() }); pendingPopups.current.clear()
+    }
+  }, [basePath, reload])
 
-  const attachmentUrls = Object.fromEntries(documents.filter((document) => urls[document.id]).map((document) => [document.file_name, urls[document.id]]))
-  const referenced = new Set(Array.from(value.matchAll(/!\[[^\]]*\]\(attachment:([^)]+)\)/g)).map((match) => decodeRichImageName(match[1])))
-  const unplaced = documents.filter((document) => !referenced.has(document.file_name))
-  return (
-    <>
-      <div className="jira-activity-message comment-box"><MarkdownComment value={value} attachmentUrls={attachmentUrls} /></div>
-      {unplaced.length > 0 && <div className="jira-comment-attachments">
-      {unplaced.map((document) => urls[document.id] && (
-        <button key={document.id} type="button" className="jira-comment-image" title={`Open ${document.file_name}`} onClick={() => window.open(urls[document.id], '_blank', 'noopener,noreferrer')}>
-          <img src={urls[document.id]} alt={document.file_name} />
-          <span>{document.file_name}</span>
-        </button>
-      ))}
-      </div>}
-    </>
-  )
+  function markBusy(id: number, loading: boolean) {
+    if (loading) busyIds.current.add(id)
+    else busyIds.current.delete(id)
+    setLoadingIds([...busyIds.current])
+  }
+
+  async function download(attachment: RequestDocumentOut) {
+    if (busyIds.current.has(attachment.id)) return
+    const version = generation.current
+    markBusy(attachment.id, true); setError(null)
+    try {
+      const blob = await api.getBlob(`${basePath}/${attachment.id}/download`, 600_000)
+      if (generation.current !== version) return
+      const url = URL.createObjectURL(blob); createdUrls.current.add(url)
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = attachment.file_name
+      anchor.click()
+      setTimeout(() => { URL.revokeObjectURL(url); createdUrls.current.delete(url) }, 1000)
+    } catch (err) { if (generation.current === version) setError(err) }
+    finally { if (generation.current === version) markBusy(attachment.id, false) }
+  }
+
+  async function preview(attachment: RequestDocumentOut) {
+    if (busyIds.current.has(attachment.id)) return
+    if (activityAttachmentKind(attachment) === 'image') {
+      if (urls[attachment.id]) window.open(urls[attachment.id], '_blank', 'noopener,noreferrer')
+      return
+    }
+    // Open on the user's click, before the authenticated fetch can trigger popup blocking.
+    const popup = window.open('about:blank', '_blank')
+    if (!popup) { setError(new Error('The preview tab was blocked. Allow pop-ups for this portal or use Download.')); return }
+    popup.opener = null
+    pendingPopups.current.add(popup)
+    const version = generation.current
+    markBusy(attachment.id, true); setError(null)
+    try {
+      let url = pdfUrls.current.get(attachment.id)
+      if (!url) {
+        const blob = await api.getBlob(`${basePath}/${attachment.id}/download`, 600_000)
+        if (generation.current !== version || popup.closed) return
+        if (await blob.slice(0, 5).text() !== '%PDF-') throw new Error('This attachment cannot be previewed as a PDF. Use Download to review the file.')
+        if (generation.current !== version || popup.closed) return
+        url = URL.createObjectURL(blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' }))
+        createdUrls.current.add(url); pdfUrls.current.set(attachment.id, url)
+      }
+      if (!popup.closed) popup.location.replace(url)
+    } catch (err) {
+      if (!popup.closed) popup.close()
+      if (generation.current === version) setError(err)
+    } finally {
+      pendingPopups.current.delete(popup)
+      if (generation.current === version) markBusy(attachment.id, false)
+    }
+  }
+
+  const inlineDocuments = new Map(documents.filter(document => urls[document.id]).map(document => [document.file_name, document]))
+  const attachmentUrls = Object.fromEntries([...inlineDocuments].map(([name, document]) => [name, urls[document.id]]))
+  const referenced = new Set(normalizeStoredRichText(value).split('\n').flatMap(line => {
+    const image = line.match(INLINE_IMAGE_PATTERN)
+    return image ? [decodeRichImageName(image[2])] : []
+  }))
+  // A filename is not a unique document ID. Hide only the actual rendered
+  // image; keep duplicate names and non-rendered legacy references accessible.
+  const inlineIds = new Set([...referenced].map(name => inlineDocuments.get(name)?.id))
+  const unplaced = documents.filter(document => !inlineIds.has(document.id))
+  return <>
+    {value && <div className="jira-activity-message comment-box"><MarkdownComment value={value} attachmentUrls={attachmentUrls} /></div>}
+    {unplaced.length > 0 && <div className="jira-comment-files" aria-label="Comment attachments">{unplaced.map(attachment => <ActivityAttachmentCard key={attachment.id} attachment={attachment} imageUrl={urls[attachment.id]} busy={loadingIds.includes(attachment.id)} onPreview={() => void preview(attachment)} onDownload={() => void download(attachment)} />)}</div>}
+    {loadError && <div className="activity-attachment-load-error" role="status">{loadError} <button type="button" onClick={() => setReload(current => current + 1)}>Retry loading attachments</button></div>}
+    <ErrorText error={error} title="Attachment could not be opened" guidance="Try Preview PDF or Download again. Your comment remains available." />
+  </>
 }
 
-export default function JiraActivity({ entityType, entityId, items, onPosted, workflowHistory, readOnly = false, ownerWorkspaceId }: {
+export interface JiraActivityProps {
   readOnly?: boolean
   ownerWorkspaceId?: number | null
   workflowHistory?: Record<string, any>[]
@@ -255,7 +342,14 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
   entityId: number
   items: ApprovalActionOut[]
   onPosted: (item: ApprovalActionOut) => void
-}) {
+}
+
+export default function JiraActivity(props: JiraActivityProps) {
+  const { user } = useAuth()
+  return <JiraActivityContent key={`${props.entityType}:${props.entityId}:${props.ownerWorkspaceId ?? ''}:${activeWorkspaceId(user) ?? ''}`} {...props} />
+}
+
+export function JiraActivityContent({ entityType, entityId, items, onPosted, workflowHistory, readOnly = false, ownerWorkspaceId }: JiraActivityProps) {
   const { user } = useAuth()
   const selectedWorkspaceId = activeWorkspaceId(user)
   const activeWorkspaceAccess = uniqueWorkspaceAccess(user).find(
@@ -277,18 +371,28 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
   const [filter, setFilter] = useState<ActivityFilter>('all')
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
+  const posting = useRef(false)
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const [attachments, setAttachments] = useState<PendingActivityAttachment[]>([])
+  const attachmentsRef = useRef<PendingActivityAttachment[]>([])
+  const attachmentSequence = useRef(0)
+  const inlineImagesRef = useRef<PendingRichImage[]>([])
+  const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
   const [characterCount, setCharacterCount] = useState(0)
 
   const { images, addImages, removeImage, clearImages, pasteImages } = useRichTextImages({
     filenamePrefix: 'pasted-image',
+    maxImages: ACTIVITY_MAX_ATTACHMENTS - attachments.length,
     messages: {
       tooLarge: (name) => `“${name}” exceeds the 10 MB image limit.`,
-      tooMany: () => `A comment can contain at most ${RICH_TEXT_MAX_IMAGES} images.`,
+      tooMany: () => `A comment can contain at most ${ACTIVITY_MAX_ATTACHMENTS} files, including inline images.`,
     },
     onError: setError,
   })
   const { showLink, linkUrl, setLinkUrl, linkInputRef, beginLink, applyLink, cancelLink } = useRichTextLink(editorRef, setError)
+  useEffect(() => { inlineImagesRef.current = images }, [images])
 
   const timeline = useMemo(() => {
     const entries: (ApprovalActionOut & { workflowEvent?: Record<string, any> })[] = items.map(item => ({ ...item }))
@@ -297,7 +401,7 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
       const match = entries.filter(item => !item.workflowEvent && item.decision !== 'Commented'
         && item.actor_id === event.user_id && item.decision === (event.to || event.kind)
         && item.previous_state === event.from && item.comments === summary)
-        .sort((a, b) => Math.abs(Date.parse(a.created_at) - Date.parse(event.at)) - Math.abs(Date.parse(b.created_at) - Date.parse(event.at)))[0]
+        .sort((a, b) => Math.abs(portalDate(a.created_at).getTime() - portalDate(event.at).getTime()) - Math.abs(portalDate(b.created_at).getTime() - portalDate(event.at).getTime()))[0]
       if (match) match.workflowEvent = event
       else entries.push({ id: -(index + 1), entity_type: entityType, entity_id: entityId,
         actor_id: event.user_id, actor_name: event.user_name, decision: event.to || event.kind,
@@ -308,7 +412,7 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
   const visible = useMemo(() => timeline.filter((item) => {
     const comment = item.decision === 'Commented'
     return filter === 'all' || (filter === 'comments' ? comment : !comment)
-  }).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()), [timeline, filter])
+  }).sort((a, b) => portalDate(b.created_at).getTime() - portalDate(a.created_at).getTime()), [timeline, filter])
 
   const commentCount = items.filter((item) => item.decision === 'Commented').length
 
@@ -317,12 +421,14 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
   }
 
   function runCommand(command: string, value?: string) {
+    if (posting.current || isReadOnly) return
     editorRef.current?.focus()
     document.execCommand(command, false, value)
     syncEditor()
   }
 
   function insertTable() {
+    if (posting.current || isReadOnly) return
     editorRef.current?.focus()
     document.execCommand('insertHTML', false,
       '<table><thead><tr><th>Column 1</th><th>Column 2</th><th>Column 3</th></tr></thead>' +
@@ -331,19 +437,39 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
   }
 
   function clearComposer() {
+    if (posting.current) return
     if (editorRef.current) editorRef.current.innerHTML = ''
     clearImages()
+    inlineImagesRef.current = []
+    attachmentsRef.current = []; setAttachments([]); setDragging(false)
     setCharacterCount(0); setExpanded(false); setError(''); cancelLink()
   }
 
   function onPaste(event: React.ClipboardEvent<HTMLDivElement>) {
+    if (posting.current || isReadOnly) { event.preventDefault(); return }
     if (pasteStructuredRichText(event, editorRef.current)) { setExpanded(true); syncEditor(); return }
+    const hasSpreadsheetData = /<table\b|urn:schemas-microsoft-com:office:excel|\bmso-/i.test(event.clipboardData.getData('text/html')) || /\t/.test(event.clipboardData.getData('text/plain'))
+    const clipboardImages = hasSpreadsheetData ? [] : Array.from(event.clipboardData.items)
+      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .map(item => item.getAsFile()).filter((file): file is File => file !== null)
+    const unsupported = clipboardImages.find(file => !RICH_TEXT_IMAGE_TYPES.has(file.type.toLowerCase()))
+    if (unsupported) {
+      event.preventDefault(); setError(`“${unsupported.name || 'Pasted image'}” is not supported. Use PNG, JPEG, GIF, or WebP.`); return
+    }
+    const validationError = activityAttachmentError(clipboardImages.map(file => ({
+      name: richTextImageFilename('pasted-image', file.name, file.type, 'clipboard'), size: file.size,
+    })), inlineImagesRef.current.length + attachmentsRef.current.length)
+    if (validationError) {
+      event.preventDefault(); setError(validationError); return
+    }
     const accepted = pasteImages(event)
+    inlineImagesRef.current = [...inlineImagesRef.current, ...accepted]
     insertRichTextImages(editorRef.current, accepted)
     if (accepted.length) { setExpanded(true); syncEditor() }
   }
 
   function pickImages() {
+    if (posting.current || isReadOnly) return
     const selection = window.getSelection()
     imageInsertRange.current = selection?.rangeCount && editorRef.current?.contains(selection.anchorNode)
       ? selection.getRangeAt(0).cloneRange() : null
@@ -351,36 +477,64 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
   }
 
   function addInlineImages(files: File[]) {
+    if (posting.current || isReadOnly) return
+    const validationError = activityAttachmentError(files, inlineImagesRef.current.length + attachmentsRef.current.length)
+    if (validationError) { setError(validationError); return }
     const accepted = addImages(files)
+    inlineImagesRef.current = [...inlineImagesRef.current, ...accepted]
     insertRichTextImages(editorRef.current, accepted, imageInsertRange.current)
     imageInsertRange.current = null
     if (accepted.length) syncEditor()
   }
 
   function removeInlineImage(previewUrl: string) {
-    const image = images.find((item) => item.previewUrl === previewUrl)
+    if (posting.current || isReadOnly) return
+    const image = inlineImagesRef.current.find((item) => item.previewUrl === previewUrl)
     if (image && editorRef.current) editorRef.current.querySelectorAll(`[data-rich-image-name="${CSS.escape(image.file.name)}"]`).forEach((node) => node.parentElement?.remove())
+    inlineImagesRef.current = inlineImagesRef.current.filter(item => item.previewUrl !== previewUrl)
     removeImage(previewUrl); syncEditor()
   }
 
+  function addAttachments(files: File[]) {
+    if (posting.current || isReadOnly || !files.length) return
+    const validationError = activityAttachmentError(files, inlineImagesRef.current.length + attachmentsRef.current.length)
+    if (validationError) { setError(validationError); return }
+    const next = [...attachmentsRef.current, ...files.map(file => ({ id: String(++attachmentSequence.current), file }))]
+    attachmentsRef.current = next; setAttachments(next); setExpanded(true); setError('')
+  }
+
+  function removeAttachment(id: string) {
+    if (posting.current || isReadOnly) return
+    const next = attachmentsRef.current.filter(file => file.id !== id)
+    attachmentsRef.current = next; setAttachments(next)
+  }
+
   async function postComment() {
+    if (posting.current || isReadOnly) return
     const body = editorContentToMarkdown(editorRef.current)
-    if (!body && images.length === 0) { setError('Enter a comment or paste an image before posting.'); return }
+    const files = [...inlineImagesRef.current.map(image => image.file), ...attachmentsRef.current.map(attachment => attachment.file)]
+    if (!body && files.length === 0) { setError('Enter a comment or attach a file before posting.'); return }
     if (body.length > 5000) { setError('Comment cannot exceed 5,000 characters.'); return }
+    const validationError = activityAttachmentError(files)
+    if (validationError) { setError(validationError); return }
+    posting.current = true
     setBusy(true); setError('')
     try {
       const created = await api.uploadFormFiles<ApprovalActionOut>(
         `/api/approvals/${entityType}/${entityId}/rich-comments`,
-        { body }, images.map((image) => image.file), 'files'
+        { body }, files, 'files', files.length ? 600_000 : undefined
       )
+      if (!mounted.current) return
       onPosted(created)
+      posting.current = false
       clearComposer(); setFilter('all')
     } catch (err: any) {
+      if (!mounted.current) return
       const message = err?.message || ''
       if (message === 'Not Found') setError('The rich comments API is not available on the running backend. Restart or redeploy the backend service, then try again.')
       else if (message === 'Record not found') setError('This record no longer exists or the page is using a stale record ID. Close this detail view, refresh the list, and reopen it.')
       else setError(message || 'Could not post the comment.')
-    } finally { setBusy(false) }
+    } finally { posting.current = false; if (mounted.current) setBusy(false) }
   }
 
   return (
@@ -400,9 +554,12 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
         </div>
       )}
 
-      {!isReadOnly && <div className={`jira-comment-composer ${expanded ? 'expanded' : ''}`}>
+      {!isReadOnly && <div className={`jira-comment-composer ${expanded ? 'expanded' : ''} ${dragging ? 'is-dragging' : ''}`}
+        onDragOver={event => { if (Array.from(event.dataTransfer.types).includes('Files')) { event.preventDefault(); if (!posting.current) setDragging(true) } }}
+        onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false) }}
+        onDrop={event => { if (Array.from(event.dataTransfer.types).includes('Files')) { event.preventDefault(); setDragging(false); addAttachments(Array.from(event.dataTransfer.files)) } }}>
         <div className="jira-avatar current">{initials(user?.full_name)}</div>
-        <div className="jira-composer-body">
+        <fieldset className="jira-composer-body" disabled={busy}>
           {expanded && (
             <>
               <RichTextToolbar
@@ -446,9 +603,10 @@ export default function JiraActivity({ entityType, entityId, items, onPosted, wo
             suppressContentEditableWarning
           />
           <RichTextPastedImages images={images} onRemove={removeInlineImage} />
-          {expanded && <div className="jira-composer-actions"><div><button className="btn btn-primary btn-sm" disabled={busy || characterCount > 5000 || (characterCount === 0 && images.length === 0)} onClick={postComment}>{busy ? 'Posting…' : 'Comment'}</button><button className="btn btn-sm" onClick={clearComposer}>Cancel</button></div><span className={characterCount > 5000 ? 'over-limit' : ''}>{characterCount}/5000 · Rich text · Paste images with Ctrl/Cmd+V</span></div>}
-          <ErrorText error={error} title="Comment could not be posted" guidance="Correct the issue described above, then post the comment again. Your draft and pasted images remain available." />
-        </div>
+          <ActivityAttachmentPicker files={attachments} inlineImageCount={images.length} disabled={busy} onFiles={addAttachments} onRemove={removeAttachment} />
+          {expanded && <div className="jira-composer-actions"><div><button className="btn btn-primary btn-sm" disabled={busy || characterCount > 5000 || (characterCount === 0 && images.length === 0 && attachments.length === 0)} onClick={postComment}>{busy ? 'Posting…' : 'Comment'}</button><button className="btn btn-sm" disabled={busy} onClick={clearComposer}>Cancel</button></div><span className={characterCount > 5000 ? 'over-limit' : ''}>{characterCount}/5000 · Rich text · Paste images with Ctrl/Cmd+V</span></div>}
+          <ErrorText error={error} title="Comment could not be posted" guidance="Correct the issue described above, then post the comment again. Your draft, images and attached files remain available." />
+        </fieldset>
       </div>}
 
       <div className="jira-activity-feed">
@@ -500,7 +658,7 @@ function WorkflowEventDetails({ event, basePath }: { event: Record<string, any>;
   async function download(doc: { id: number; file_name: string }) {
     try {
       setError(null)
-      const blob = await api.getBlob(`${basePath}/${doc.id}/download`)
+      const blob = await api.getBlob(`${basePath}/${doc.id}/download`, 600_000)
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a'); anchor.href = url; anchor.download = doc.file_name
       anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)

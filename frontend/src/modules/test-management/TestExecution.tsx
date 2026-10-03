@@ -8,7 +8,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import ProjectSelect from '../../components/ProjectSelect'
-import { ENVIRONMENTS, defectBlocksExecution, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
+import { ENVIRONMENTS, defectBlocksExecution, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, QA_STATUS_LABELS, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
 import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOption, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
@@ -21,6 +21,7 @@ import { defectEvidenceError, DEFECT_EVIDENCE_EXTENSIONS } from '../../defectEvi
 import { resolvePreferredProjectId } from '../../projectPreferences'
 import { lazyModule } from '../../lazyModule'
 import ModuleBoundary from '../../components/ModuleBoundary'
+import { cycleCompletionRequestGate, REQUIRED_LINKED_REQUEST_COMPLETION_STATUS } from '../../cycleCompletion'
 
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
@@ -518,6 +519,17 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
   const [completionFilter, setCompletionFilter] = useState<'all' | 'blocker' | 'target'>('all')
   const [completionPage, setCompletionPage] = useState(1)
   const [selectedCompletionDefect, setSelectedCompletionDefect] = useState<string | null>(null)
+  const requestCompletionGate = cycleCompletionRequestGate(cycle)
+  const linkedRequestCompletionBlocked = !requestCompletionGate.allowed
+  const requiredRequestStatusLabel = QA_STATUS_LABELS[REQUIRED_LINKED_REQUEST_COMPLETION_STATUS] || 'Execution In Progress'
+  const linkedRequestStatusLabel = requestCompletionGate.currentStatus
+    ? QA_STATUS_LABELS[requestCompletionGate.currentStatus] || requestCompletionGate.currentStatus
+    : 'Status unavailable'
+  const linkedRequestIdentity = cycle.linked_request_key || `Linked QA Request #${cycle.linked_request_id}`
+  const linkedRequestCompletionReason = linkedRequestCompletionBlocked
+    ? `${linkedRequestIdentity} is currently ${linkedRequestStatusLabel}. Test Cycle completion requires the linked request to be ${requiredRequestStatusLabel}.`
+    : ''
+  const linkedRequestGateDescriptionId = `cycle-${cycle.id}-linked-request-completion-gate`
 
   useEffect(() => {
     if (!showComplete) return
@@ -542,6 +554,14 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
   }, [showComplete, cycle.id])
 
   async function transition(status: string, reason = '', transitionRemarks = '') {
+    // This is an explanatory UI guard only. The PATCH endpoint remains the
+    // authoritative authorization and rechecks the request under its lock.
+    if (status === 'Completed' && linkedRequestCompletionBlocked) {
+      const completionError = new Error(linkedRequestCompletionReason)
+      if (showComplete) setDialogError(completionError)
+      else onError(completionError)
+      return
+    }
     setBusy(true); setDialogError(null)
     try {
       const saved = await api.patch<TestCycleOut>(`/api/test-execution/cycles/${cycle.id}`, {
@@ -597,7 +617,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
   const visibleCompletionDefects = filteredCompletionDefects.slice((safeCompletionPage - 1) * completionPageSize, safeCompletionPage * completionPageSize)
   const firstVisibleDefect = filteredCompletionDefects.length ? (safeCompletionPage - 1) * completionPageSize + 1 : 0
   const lastVisibleDefect = Math.min(safeCompletionPage * completionPageSize, filteredCompletionDefects.length)
-  const hasCompletionBlockers = (conditionalCompletion
+  const hasCompletionBlockers = linkedRequestCompletionBlocked || (conditionalCompletion
     ? executedCount === 0 || !canCompleteWithResidualRisk
     : failedCount > 0 || blockedCount > 0 || notExecutedCount > 0 || severeBlockers.length > 0)
     || targetReleaseMissing.length > 0 || (residualDefects.length > 0 && !canCompleteWithResidualRisk)
@@ -651,7 +671,9 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
             key={action.status}
             type="button"
             className={`btn btn-sm ${action.status === 'Completed' ? 'btn-primary' : ''}`}
-            disabled={busy}
+            disabled={busy || (action.status === 'Completed' && linkedRequestCompletionBlocked)}
+            aria-describedby={action.status === 'Completed' && linkedRequestCompletionBlocked ? linkedRequestGateDescriptionId : undefined}
+            title={action.status === 'Completed' && linkedRequestCompletionBlocked ? linkedRequestCompletionReason : undefined}
             onClick={() => {
               if (action.status === 'Blocked') setShowBlock(true)
               else if (action.status === 'Completed') { setConditionalCompletion(false); setShowComplete(true) }
@@ -661,7 +683,8 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
             {busy ? 'Updating…' : action.label}
           </button>
         ))}
-        {cycle.status === 'In Progress' && canCompleteWithResidualRisk && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { setConditionalCompletion(true); setShowComplete(true) }}>Complete for Conditional Clearance</button>}
+        {cycle.status === 'In Progress' && canCompleteWithResidualRisk && <button type="button" className="btn btn-sm" disabled={busy || linkedRequestCompletionBlocked} aria-describedby={linkedRequestCompletionBlocked ? linkedRequestGateDescriptionId : undefined} title={linkedRequestCompletionBlocked ? linkedRequestCompletionReason : undefined} onClick={() => { setConditionalCompletion(true); setShowComplete(true) }}>Complete for Conditional Clearance</button>}
+        {cycle.status === 'In Progress' && linkedRequestCompletionBlocked && <small id={linkedRequestGateDescriptionId} className="tm-cycle-completion-request-block" role="status">{linkedRequestCompletionReason}</small>}
         {cycle.status === 'Ready' && cycle.linked_request_key && (
           <small className="muted">Start execution on {cycle.linked_request_key} first. The linked request must be Execution In Progress before this cycle can start.</small>
         )}
@@ -697,7 +720,9 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
                 <div>
                   <strong>{hasCompletionBlockers ? 'This cycle is not ready to complete' : needsResidualJustification ? 'Residual-risk approval details required' : 'This cycle satisfies the completion checks'}</strong>
                   <p>
-                    {conditionalCompletion
+                    {linkedRequestCompletionBlocked
+                      ? linkedRequestCompletionReason
+                      : conditionalCompletion
                       ? executedCount === 0 ? 'Record at least one test result before conditional completion.'
                         : targetReleaseMissing.length > 0 ? `Add Target Releases to ${targetReleaseMissing.length} residual defect(s).`
                         : 'Review the failed, blocked, and unexecuted tests and open defects, then record why conditional review is appropriate.'
@@ -721,6 +746,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
                 {severitySummary.map((item) => <div key={item.severity} data-severity={item.severity.toLowerCase()}><small>{item.severity}</small><strong>{item.count}</strong><span>{conditionalCompletion ? 'Requires conditional review when open' : ['Critical', 'High'].includes(item.severity) ? 'Blocks completion when open' : 'Residual risk when open'}</span></div>)}
               </div>
               <section className="tm-completion-readiness" aria-label="Completion readiness">
+                {requestCompletionGate.linked && <div className={linkedRequestCompletionBlocked ? 'failed' : 'passed'}><i>{linkedRequestCompletionBlocked ? '×' : '✓'}</i><span><strong>Linked QA Request</strong><small>{linkedRequestIdentity} · Current: {linkedRequestStatusLabel} · Required: {requiredRequestStatusLabel}</small></span></div>}
                 <div className={notExecutedCount || failedCount || blockedCount ? 'failed' : 'passed'}><i>{notExecutedCount || failedCount || blockedCount ? '×' : '✓'}</i><span><strong>Execution results</strong><small>{executedCount} of {executionTotal} recorded · {failedCount} failed · {blockedCount} blocked</small></span></div>
                 <div className={severeBlockers.length ? 'failed' : 'passed'}><i>{severeBlockers.length ? '×' : '✓'}</i><span><strong>Critical/High defect gate</strong><small>{severeBlockers.length ? `${severeBlockers.length} open Critical/High defect(s)` : 'No open Critical/High defects'}</small></span></div>
                 <div className={targetReleaseMissing.length ? 'failed' : 'passed'}><i>{targetReleaseMissing.length ? '×' : '✓'}</i><span><strong>Target Releases</strong><small>{targetReleaseMissing.length ? `${targetReleaseMissing.length} missing` : 'All required releases set'}</small></span></div>

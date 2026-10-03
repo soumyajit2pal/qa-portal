@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from .time_format import format_datetime_ist
 
 from sqlalchemy.orm import Session, selectinload
 
@@ -114,7 +115,7 @@ def user_access_workbook(db: Session, actor: models.User) -> io.BytesIO:
             "Yes" if user.admin_managed_only else "No",
             "Yes" if user.show_in_user_dropdowns else "No",
             preferred.name if preferred else "", len(accessible_ids),
-            user.created_at.isoformat(sep=" ") if user.created_at else "",
+            format_datetime_ist(user.created_at) if user.created_at else "",
         ])
         for workspace_id in sorted(accessible_ids, key=lambda value: (workspaces[value].name.casefold(), value)):
             workspace = workspaces[workspace_id]
@@ -135,7 +136,7 @@ def user_access_workbook(db: Session, actor: models.User) -> io.BytesIO:
                 membership.role, "Active" if membership.is_active else "Inactive",
                 "Active" if workspace and workspace.is_active else "Inactive",
                 "Yes" if membership.is_active and membership.workspace_id in accessible_ids else "No",
-                membership.created_at.isoformat(sep=" ") if membership.created_at else "",
+                format_datetime_ist(membership.created_at) if membership.created_at else "",
             ])
         for assignment in sorted(user.department_coordinator_assignments, key=lambda row: row.id):
             workspace = workspaces.get(assignment.workspace_id)

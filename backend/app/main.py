@@ -41,7 +41,7 @@ from .routers import (
     sast_dast, suppression, performance,
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, test_reports, audit, checklist_config, request_type_config,
-    pending_approvals, defects, jobs, qa_workspaces,
+    pending_approvals, defects, jobs, qa_workspaces, system_settings, signatures,
 )
 
 
@@ -103,7 +103,7 @@ app = FastAPI(
     title="QualityOps API",
     description="Backend for the Bank of Maharashtra QualityOps Enterprise "
                 "Quality Operations Platform.",
-    version="1.0.0",
+    version="1.0.2",
     docs_url=None if settings.app_env in {"uat", "prod", "production"} else "/docs",
     redoc_url=None if settings.app_env in {"uat", "prod", "production"} else "/redoc",
     openapi_url=None if settings.app_env in {"uat", "prod", "production"} else "/openapi.json",
@@ -254,6 +254,7 @@ _MODULE_PATH_PREFIXES = [
     ("/api/performance-requests", "PERFORMANCE_REQUEST"),
     ("/api/approvals", "APPROVAL"),
     ("/api/signoffs", "SIGNOFF"),
+    ("/api/signatures", "SIGNATURE_VERIFICATION"),
     ("/api/dashboard", "DASHBOARD"),
     ("/api/reports", "REPORT"),
     ("/api/export", "EXPORT"),
@@ -413,6 +414,7 @@ _DOCUMENT_PORTAL_ALLOWED_API_PATHS = {
     "/api/auth/renew",
     "/api/auth/me",
     "/api/auth/me/email",
+    "/api/system-settings/maintenance-window/current",
     "/api/health",
 }
 
@@ -727,6 +729,7 @@ app.include_router(suppression.router)
 app.include_router(performance.router)
 app.include_router(approvals.router)
 app.include_router(signoff.router)
+app.include_router(signatures.router)
 app.include_router(dashboard.router)
 app.include_router(reports.router)
 app.include_router(export.router)
@@ -743,6 +746,7 @@ app.include_router(checklist_config.router)
 app.include_router(request_type_config.router)
 app.include_router(pending_approvals.router)
 app.include_router(jobs.router)
+app.include_router(system_settings.router)
 if DOCUMENT_PORTAL_EMBEDDED:
     app.include_router(document_portal.router)
     logger.warning(

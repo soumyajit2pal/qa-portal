@@ -385,6 +385,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   const [scanNotice, setScanNotice] = useState('')
   const [scanResults, setScanResults] = useState<SecurityScanResultOut[]>([])
   const [scanSummary, setScanSummary] = useState<SecurityScanSummaryOut | null>(null)
+  const scanRequests = useRef(createLatestRequestGate()).current
 
   const load = useCallback(async () => {
     try {
@@ -394,6 +395,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
 
   useEffect(() => { load() }, [load])
   const loadScan = useCallback(async () => {
+    const generation = scanRequests.begin()
     try {
       // Commit the related responses together. On the first scan, publishing
       // results before the refreshed summary creates a transient invalid UI
@@ -402,14 +404,20 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
         api.get<SecurityScanResultOut[]>(`/api/dast-requests/${req.id}/scan-results`),
         api.get<SecurityScanSummaryOut>(`/api/dast-requests/${req.id}/scan-summary`),
       ])
+      if (!scanRequests.isCurrent(generation)) return
       setScanResults(results)
       setScanSummary(summary)
     } catch {
+      if (!scanRequests.isCurrent(generation)) return
       setScanResults([])
       setScanSummary(null)
     }
-  }, [req.id])
-  useEffect(() => { loadScan() }, [loadScan])
+  }, [req.id, scanRequests])
+  useEffect(() => {
+    setScanResults([]); setScanSummary(null)
+    void loadScan()
+    return () => scanRequests.invalidate()
+  }, [loadScan, scanRequests])
   useEffect(() => { setReassignAnalystReason('') }, [req.id, req.security_analyst_id])
 
   async function toggleChecklistItem(item: ChecklistItemOut) {
@@ -442,7 +450,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   async function startScan(scans: { target_id: number; application_name: string; application_version: string }[]) {
     setBusy(true); setScanError(null)
     try {
-      const response = await api.post<{ request: DASTOut; scan_results: SecurityScanResultOut[] }>(`/api/dast-requests/${req.id}/start-scan`, { scans })
+      const response = await api.post<{ request: DASTOut; scan_results: SecurityScanResultOut[] }>(`/api/dast-requests/${req.id}/start-scan`, { scans }, 600_000)
       onChanged(response.request)
       setShowStartScan(false)
       setTab('findings')
@@ -458,7 +466,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   async function rescan(scans: { target_id: number; application_name: string; application_version: string }[]) {
     setBusy(true); setScanError(null)
     try {
-      const response = await api.post<{ request: DASTOut; scan_results: SecurityScanResultOut[] }>(`/api/dast-requests/${req.id}/rescan`, { scans })
+      const response = await api.post<{ request: DASTOut; scan_results: SecurityScanResultOut[] }>(`/api/dast-requests/${req.id}/rescan`, { scans }, 600_000)
       onChanged(response.request)
       setShowRescan(false)
       await loadScan()
@@ -1279,7 +1287,7 @@ export default function DAST() {
       </Card>
       {selected && (
         <DASTDetail
-          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); reload() }}
+          key={selected.id} req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(current => current?.id === u.id ? u : current); reload() }}
           users={users}
         />
       )}

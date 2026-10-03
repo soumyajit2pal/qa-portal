@@ -1779,7 +1779,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         actor = db.get(models.User, h.actor_id) if h.actor_id else None
         history.append((h.step_name or "—", h.decision or "—", actor.full_name if actor else "—",
                          format_role_labels(h.actor_role) or "—", h.comments or "—",
-                         h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
+                         h.created_at if h.created_at else "—"))
 
     buf = build_request_detail_pdf(
         title=f"{obj.request_id} — {obj.application_name}",
@@ -1787,6 +1787,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         sections=sections, history=history,
         generated_by=current_user.full_name,
         generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
+        verification_context=(db, "FUNCTIONAL_REQUEST", req_id),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",

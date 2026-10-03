@@ -12,7 +12,8 @@ from .constants import Role, format_role_labels
 
 _SAFE_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 _VIEW_ONLY_SELF_SERVICE_PATHS = {"/api/auth/logout", "/api/auth/renew", "/api/auth/me/email"}
-_VIEW_ONLY_READ_OPERATION_POST_PATHS = {"/api/document-portal/download-selection"}
+_SIGNATURE_READ_OPERATION_POST_PATHS = {"/api/signatures/check", "/api/signatures/verify-pdf"}
+_VIEW_ONLY_READ_OPERATION_POST_PATHS = {"/api/document-portal/download-selection"} | _SIGNATURE_READ_OPERATION_POST_PATHS
 _VIEW_ONLY_ROLE_GATED_READ_PREFIXES = (
     "/api/qa-requests",
     "/api/functional-requests",
@@ -38,6 +39,7 @@ _NO_WORKSPACE_SELF_SERVICE_PATHS = {
     "/api/auth/me/email",
     "/api/auth/logout",
     "/api/auth/renew",
+    "/api/system-settings/maintenance-window/current",
 }
 
 
@@ -59,6 +61,10 @@ def _enforce_view_only_request(
     if request.method.upper() in _SAFE_READ_METHODS:
         return
     if request.url.path in _VIEW_ONLY_SELF_SERVICE_PATHS:
+        return
+    # Both operations inspect evidence without storing the uploaded PDF or
+    # changing an approval. The entity read policy still applies in the route.
+    if request.method.upper() == "POST" and request.url.path in _SIGNATURE_READ_OPERATION_POST_PATHS:
         return
     if Role.SCALE_6_PLUS in user.roles:
         if request.url.path == "/api/workspaces/preference/current" or request.url.path.endswith("/export-xlsx/jobs"):
@@ -93,7 +99,7 @@ def _enforce_view_only_request(
     ):
         return
     if (
-        request.url.path in _VIEW_ONLY_READ_OPERATION_POST_PATHS
+        (request.method.upper() == "POST" and request.url.path in _VIEW_ONLY_READ_OPERATION_POST_PATHS)
         or request.url.path.endswith("/export-xlsx/jobs")
     ):
         return
@@ -110,7 +116,9 @@ def _enforce_parent_workspace_viewer_request(request: Request, access_mode: str 
     if request.url.path in (
         _VIEW_ONLY_SELF_SERVICE_PATHS
         | {"/api/workspaces/preference/current"}
-    ) or request.url.path.endswith("/export-xlsx/jobs"):
+    ) or request.url.path.endswith("/export-xlsx/jobs") or (
+        request.method.upper() == "POST" and request.url.path in _SIGNATURE_READ_OPERATION_POST_PATHS
+    ):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -118,7 +126,7 @@ def _enforce_parent_workspace_viewer_request(request: Request, access_mode: str 
     )
 
 
-def _resolve_current_user(request: Request, user_id: int, db: Session) -> models.User:
+def _resolve_current_user(request: Request, user_id: int, db: Session, *, read_operation: bool = False) -> models.User:
     """Resolve an authenticated user while the supplied session is open."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -213,7 +221,8 @@ def _resolve_current_user(request: Request, user_id: int, db: Session) -> models
     _enforce_view_only_request(request, user, db)
     _enforce_parent_workspace_viewer_request(request, access_mode)
     from .workflow_authority import configure_request
-    configure_request(db, user, request, workflow=bool(getattr(request.state, "workflow_operation", False)))
+    configure_request(db, user, request, workflow=bool(getattr(request.state, "workflow_operation", False)),
+                      read_operation=read_operation)
     from .project_workspace_ownership import bind_actor, guard_request
     bind_actor(db, user)
     guard_request(db, user, request)
@@ -301,6 +310,19 @@ async def get_workflow_user(
     from .workflow_authority import workflow_context
     auth_session = await run_in_threadpool(resolve_session, request, db)
     user = await run_in_threadpool(_resolve_current_user, request, auth_session.user_id, db)
+    with workspace_context(user.active_qa_workspace_id, user.active_workspace_scope_ids), workflow_context(user):
+        yield user
+
+
+async def get_workflow_read_user(request: Request, db: Session = Depends(get_db)):
+    """Read authority for signature inspection POSTs, with no mutation grant."""
+    request.state.workflow_operation = True
+    from .workspace_service import workspace_context
+    from .workflow_authority import workflow_context
+    auth_session = await run_in_threadpool(resolve_session, request, db)
+    read_operation = request.method.upper() == "POST" and request.url.path in _SIGNATURE_READ_OPERATION_POST_PATHS
+    user = await run_in_threadpool(_resolve_current_user, request, auth_session.user_id, db,
+                                 read_operation=read_operation)
     with workspace_context(user.active_qa_workspace_id, user.active_workspace_scope_ids), workflow_context(user):
         yield user
 

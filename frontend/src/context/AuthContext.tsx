@@ -10,6 +10,7 @@ import {
 import { UserOut } from '../types'
 import { uniqueWorkspaceAccess } from '../constants'
 import { isWorkspaceSelectionStorageChange } from '../workspaceTransition'
+import { clearMaintenanceAcknowledgements } from '../maintenanceWindow'
 
 interface LoginResult {
   authenticated: true
@@ -265,6 +266,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       (error) => setBootstrapIssue({ kind: 'administrator', reference: issueReference(error) }),
     )
     syncWorkspaceSelection(me)
+    // A re-login after session expiry can happen without the explicit logout
+    // path. Treat every successful login as a fresh acknowledgement session.
+    clearMaintenanceAcknowledgements()
     setUser(me)
     setJustLoggedIn(true)
     return res
@@ -274,6 +278,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Clear the UI immediately, but retain a non-secret retry marker until
     // the server confirms revocation of the HttpOnly session.
     setToken(null)
+    // A shared browser can immediately sign in as another person. Notice
+    // acknowledgement is scoped to a login session, so do not let the prior
+    // account's dismissal suppress the next successful login notification.
+    clearMaintenanceAcknowledgements()
     try {
       localStorage.setItem('qa_logout_pending', '1')
       // Notify other same-origin tabs without placing credentials in storage.

@@ -12,6 +12,7 @@ COPY app ./app
 ENV UPLOAD_STORAGE_ROOT=/data/qualityops/uploads
 ENV DOCUMENT_PORTAL_STORAGE_HOST_PATH=/data/qualityops/uploads/document-portal
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV TZ=Asia/Kolkata
 
 # All runtime uploads live below one stable container path. Docker Compose
 # supplies the explicit durable bind mount. Do not declare an image VOLUME

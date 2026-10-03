@@ -7,7 +7,7 @@ import { internalNavigationPath } from './requestNavigation'
 import RequestViewer from './components/RequestViewer'
 import DepartmentPrompt from './components/DepartmentPrompt'
 import EmailCompletionPrompt from './components/EmailCompletionPrompt'
-import PendingApprovalsNotice from './components/PendingApprovalsNotice'
+import { LoginNoticeCoordinator, MaintenanceWindowBanner, MaintenanceWindowProvider } from './components/MaintenanceWindowNotice'
 import { UserOut } from './types'
 import { hasWorkspaceRole, isViewOnly, uniqueWorkspaceAccess } from './constants'
 import { ADMIN_ACCESS_DENIED_EVENT, HttpError, api } from './api'
@@ -43,6 +43,7 @@ const DAST = lazyModule(() => import('./modules/security/DAST'), { displayName: 
 const Suppression = lazyModule(() => import('./modules/security/Suppression'), { displayName: 'Suppression' })
 const Performance = lazyModule(() => import('./modules/specialised-testing/Performance'), { displayName: 'Performance' })
 const SignOff = lazyModule(() => import('./modules/governance/SignOff'), { displayName: 'SignOff' })
+const SignatureVerification = lazyModule(() => import('./modules/governance/SignatureVerification'), { displayName: 'SignatureVerification' })
 const PendingApprovals = lazyModule(() => import('./modules/governance/PendingApprovals'), { displayName: 'PendingApprovals' })
 const Approvals = lazyModule(() => import('./modules/governance/Approvals'), { displayName: 'Approvals' })
 const Reports = lazyModule(() => import('./modules/governance/Reports'), { displayName: 'Reports' })
@@ -219,21 +220,35 @@ const TestReports = lazyModule(() => import('./modules/test-management/TestRepor
 // blocking modal still runs dashboard/navigation effects and requests data
 // that the backend correctly denies until access approval is complete.
 function AuthenticatedChrome({ user, children }: { user: UserOut; children: ReactNode }) {
+  let onboarding: ReactNode | null = null
   if (user.needs_department_selection) {
-    return <main className="access-pending-page" aria-label="Complete account setup"><DepartmentPrompt /></main>
+    onboarding = <main className="access-pending-page" aria-label="Complete account setup"><DepartmentPrompt /></main>
   }
-  if (isWorkspaceAccessMissing(user)) return <WorkspaceAccessRequired />
-  if (isAccessApprovalPending(user)) return <AccessApprovalPending />
-  if (isLdapEmailCompletionRequired(user)) {
-    return <main className="access-pending-page" aria-label="Complete notification email"><EmailCompletionPrompt /></main>
+  else if (isWorkspaceAccessMissing(user)) onboarding = <WorkspaceAccessRequired />
+  else if (isAccessApprovalPending(user)) onboarding = <AccessApprovalPending />
+  else if (isLdapEmailCompletionRequired(user)) {
+    onboarding = <main className="access-pending-page" aria-label="Complete notification email"><EmailCompletionPrompt /></main>
+  }
+  if (onboarding) {
+    return (
+      <MaintenanceWindowProvider>
+        <div className="maintenance-onboarding-shell">
+          <MaintenanceWindowBanner />
+          {onboarding}
+          <LoginNoticeCoordinator includePendingApprovals={false} />
+        </div>
+      </MaintenanceWindowProvider>
+    )
   }
   return (
-    <RequestViewer>
-      <Layout>
-        {children}
-        <PendingApprovalsNotice />
-      </Layout>
-    </RequestViewer>
+    <MaintenanceWindowProvider>
+      <RequestViewer>
+        <Layout>
+          {children}
+          <LoginNoticeCoordinator />
+        </Layout>
+      </RequestViewer>
+    </MaintenanceWindowProvider>
   )
 }
 
@@ -432,6 +447,7 @@ export default function App() {
 
           {/* Governance module */}
           <Route path="/signoff" element={<ModuleBoundary moduleName="Governance"><SignOff /></ModuleBoundary>} />
+          <Route path="/verify-signature" element={<ModuleBoundary moduleName="Governance"><SignatureVerification /></ModuleBoundary>} />
           <Route path="/pending-approvals" element={<ModuleBoundary moduleName="Governance"><PendingApprovals /></ModuleBoundary>} />
           <Route path="/approvals" element={<ModuleBoundary moduleName="Governance"><Approvals /></ModuleBoundary>} />
           <Route path="/reports" element={<ModuleBoundary moduleName="Governance"><Reports /></ModuleBoundary>} />

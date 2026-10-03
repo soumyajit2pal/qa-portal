@@ -373,7 +373,7 @@ def _can_edit_details(obj: "models.SuppressionRequest", user: models.User,
     return False
 
 
-def _require_linked_request(db: Session, data: dict, current_user: models.User):
+def _require_linked_request(db: Session, data: dict, current_user: models.User, *, lock: bool = False):
     """Every field on the New/Edit Suppression form is now mandatory --
     including the SAST/DAST Request ID link itself (previously optional,
     allowing a "standalone" finding with no linked scan). Enforced here
@@ -399,11 +399,17 @@ def _require_linked_request(db: Session, data: dict, current_user: models.User):
     if bool(data.get("sast_request_id")) == bool(data.get("dast_request_id")):
         raise HTTPException(400, "Exactly one of SAST or DAST Request ID must be selected")
     if data.get("sast_request_id"):
-        linked = db.get(models.SASTRequest, data["sast_request_id"])
-        kind = "SAST"
+        model, request_id, kind = models.SASTRequest, data["sast_request_id"], "SAST"
     else:
-        linked = db.get(models.DASTRequest, data["dast_request_id"])
-        kind = "DAST"
+        model, request_id, kind = models.DASTRequest, data["dast_request_id"], "DAST"
+    if lock:
+        # Creation/relinking and scan completion share the parent-row lock.
+        # Refresh any cached parent after acquiring it: a concurrent clean
+        # validation may have closed the request while this mutation waited.
+        # one_or_none avoids Oracle's FETCH FIRST / FOR UPDATE incompatibility.
+        linked = db.query(model).filter_by(id=request_id).populate_existing().with_for_update().one_or_none()
+    else:
+        linked = db.get(model, request_id)
     if not linked:
         raise HTTPException(400, f"Linked {kind} request not found")
     _require_linked_request_workspace(db, linked, kind, current_user)
@@ -585,7 +591,7 @@ def create_suppression(payload: schemas.SuppressionCreate, db: Session = Depends
     additional_department_ids = data.pop("additional_department_ids", [])
     if not items_data:
         raise HTTPException(400, "At least one finding/issue is required")
-    linked, kind = _require_linked_request(db, data, current_user)
+    linked, kind = _require_linked_request(db, data, current_user, lock=True)
     _require_requester_of_linked(linked, current_user)
     _require_no_existing_pending_suppression(db, linked, kind)
     _apply_linked_request_identity(data, linked, kind)
@@ -697,7 +703,7 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
     additional_department_ids = data.pop("additional_department_ids", [])
     if not items_data:
         raise HTTPException(400, "At least one finding/issue is required")
-    linked, kind = _require_linked_request(db, data, current_user)
+    linked, kind = _require_linked_request(db, data, current_user, lock=True)
     # Relinking is a separate requester/Admin action because it must
     # invalidate every prior workflow decision and restart from Draft. Never
     # let the general edit endpoint become a way around that reset.
@@ -775,7 +781,7 @@ def relink_suppression(sup_id: int, payload: schemas.SuppressionRelinkIn, db: Se
             "A reviewer must return it to the requester first.",
         )
     data = payload.model_dump()
-    linked, kind = _require_linked_request(db, data, current_user)
+    linked, kind = _require_linked_request(db, data, current_user, lock=True)
     same_target = (
         kind == "SAST"
         and obj.sast_request_id == data.get("sast_request_id")
@@ -1162,7 +1168,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
     for h in history_rows:
         history.append((h.step_name or "—", h.decision or "—", uname(h.actor_id) or "—",
                          format_role_labels(h.actor_role) or "—", h.comments or "—",
-                         h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
+                         h.created_at if h.created_at else "—"))
 
     buf = build_request_detail_pdf(
         title=f"{obj.suppression_id} — {obj.application_name}",
@@ -1170,6 +1176,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
         sections=sections, history=history,
         generated_by=current_user.full_name,
         generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
+        verification_context=(db, "SUPPRESSION", sup_id),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",

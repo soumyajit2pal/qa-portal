@@ -441,6 +441,8 @@ def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
         values.update({field: sum(int(getattr(row, field) or 0) for row in batch) for field in count_fields})
         values["filters"] = representative.filters
         values["targets"] = [target for row in batch for target in row.targets]
+        values["current_results"] = batch
+        values["scan_history"] = list(reversed(request_rows))
         latest[request_id] = SimpleNamespace(**values)
     return latest
 
@@ -458,16 +460,25 @@ def sast_scan_report(date_from: str | None = None, date_to: str | None = None, d
     if scope is not None:
         q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
              .filter(models.QARequest.department.in_(scope))
-    rows = _in_period(q, models.SASTRequest.created_at, date_from, date_to).all()
+    rows = _in_period(q.options(selectinload(models.SASTRequest.components)), models.SASTRequest.created_at, date_from, date_to).all()
     latest_scans = _latest_scan_by_request(db, "SAST", [r.id for r in rows])
-    return [{
-        "Request ID": r.request_id, "Application": r.application_name, "Build": r.build_number,
-        "Status": r.status,
-        # Latest imported Fortify SSC scan's open finding count -- 0 for a
-        # request that's never been scanned yet, same as an empty findings
-        # list used to render.
-        "Findings": latest_scans[r.id].total_count if r.id in latest_scans else 0,
-    } for r in rows]
+    from ..security_scan_state import repository_states
+    out = []
+    for request in rows:
+        scan = latest_scans.get(request.id)
+        states = repository_states(request, scan.scan_history if scan else [])
+        clear = sum(row['state'] == 'CLEAR' for row in states)
+        out.append({
+            "Request ID": request.request_id, "Application": request.application_name, "Build": request.build_number,
+            "Status": request.status, "Findings": scan.total_count if scan else None,
+            "Repository Coverage": f"{clear}/{len(states)} clear",
+            "Unscanned Repositories": sum(row['state'] == 'NOT_SCANNED' for row in states),
+            "Awaiting Validation": sum(row['state'] == 'AWAITING_VALIDATION' for row in states),
+            "Waiting For Fix": sum(row['state'] == 'WAITING_FOR_FIX' for row in states),
+            "Ready For Rescan": sum(row['state'] == 'READY_FOR_RESCAN' for row in states),
+            "Stale Repositories": sum(row['state'] == 'STALE' for row in states),
+        })
+    return out
 
 
 @router.get("/dast-scan")
@@ -527,6 +538,7 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
     start, end = _period_bounds(date_from, date_to)
     scan_numbers: dict[int, int] = {}
     batch_numbers: dict[tuple[int, str], int] = {}
+    seen_targets: dict[int, set[int]] = defaultdict(set)
     out = []
     for scan in scans:
         batch_key = scan.execution_key or f"legacy-{scan.id}"
@@ -534,6 +546,9 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
         if lookup not in batch_numbers:
             scan_numbers[scan.request_id] = scan_numbers.get(scan.request_id, 0) + 1
             batch_numbers[lookup] = scan_numbers[scan.request_id]
+        target_ids = {target.get('id') for target in (scan.targets or []) if target.get('id') is not None}
+        initial_target_scan = bool(target_ids) and not (target_ids & seen_targets[scan.request_id])
+        seen_targets[scan.request_id].update(target_ids)
         if start and scan.imported_at < start:
             continue
         if end and scan.imported_at > end:
@@ -568,7 +583,7 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
                 "Department": request.department,
                 "Workflow Status": request.status,
                 "Scan No": scan_no,
-                "Scan Execution": "Initial Scan" if scan_no == 1 else "Rescan",
+                "Scan Execution": ("Initial Scan" if initial_target_scan else "Rescan") if kind == 'SAST' and target_ids else ("Initial Scan" if scan_no == 1 else "Rescan"),
                 "Observation View": observation.get("title") or "Unnamed Filter",
                 "Active Critical": int(observation.get("critical_count") or 0),
                 "Active High": int(observation.get("high_count") or 0),
@@ -591,6 +606,8 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
             if kind == "SAST":
                 row.update({
                     "Repository URLs": "\n".join(target_labels) or "Not captured (legacy scan)",
+                    "Repository Branches": "\n".join(str(target.get('git_branch') or 'Not captured') for target in scan_targets) or "Not captured",
+                    "Repository Commit IDs": "\n".join(str(target.get('commit_id') or 'Not captured') for target in scan_targets) or "Not captured",
                     "Build": request.build_number,
                     "CR Number/EPIC Number": request.cr_number or request.epic_number,
                 })

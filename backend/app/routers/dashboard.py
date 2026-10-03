@@ -747,6 +747,11 @@ def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
     count_fields = ("critical_count", "high_count", "medium_count", "low_count", "total_count",
                     "suppressed_critical_count", "suppressed_high_count", "suppressed_medium_count",
                     "suppressed_low_count", "suppressed_total_count")
+    sast_requests = {}
+    if kind == "SAST" and grouped:
+        sast_requests = {request.id: request for request in db.query(models.SASTRequest)
+                         .filter(models.SASTRequest.id.in_(list(grouped)))
+                         .options(selectinload(models.SASTRequest.components)).all()}
     for request_id, request_rows in grouped.items():
         representative = request_rows[-1]
         from ..security_scan_state import current_scan_results
@@ -755,6 +760,12 @@ def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
         values.update({field: sum(int(getattr(row, field) or 0) for row in batch) for field in count_fields})
         values["filters"] = representative.filters
         values["targets"] = [target for row in batch for target in row.targets]
+        if kind == "SAST":
+            from ..security_scan_state import repository_states
+            request = sast_requests.get(request_id)
+            states = repository_states(request, list(reversed(request_rows))) if request else []
+            values["repository_states"] = states
+            values["all_repositories_clear"] = bool(states) and all(row["state"] == "CLEAR" for row in states)
         latest[request_id] = SimpleNamespace(**values)
     return latest
 
@@ -2165,6 +2176,12 @@ def dashboard_attention_detail(
 
 
 # ---------------- 4.9.5 / 4.9.6 Security Dashboards ----------------
+def _security_remediation_status(kind: str, scan) -> str:
+    resolved = (bool(getattr(scan, "all_repositories_clear", False))
+                if kind == "SAST" else scan.total_count == 0)
+    return "Resolved" if resolved else "Open"
+
+
 @router.get("/security/sast")
 def security_sast(date_from: str | None = Query(None), date_to: str | None = Query(None),
                   db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -2183,14 +2200,12 @@ def security_sast(date_from: str | None = Query(None), date_to: str | None = Que
         severity_totals["High"] += scan.high_count
         severity_totals["Medium"] += scan.medium_count
         severity_totals["Low"] += scan.low_count
-    # "Current disposition of identified findings" -- of the requests that
-    # have actually been scanned, how many now show 0 open findings on
-    # their latest scan (Resolved) vs still have some (Open). Requests
-    # never scanned yet have no findings to have a disposition about, so
-    # they're left out of this one distribution (they still count in
-    # total_requests above).
+    # A zero imported batch only clears its selected repositories. Missing,
+    # stale or unvalidated coverage keeps the request Open even with zero
+    # recorded findings. Entirely unscanned requests remain outside this
+    # distribution, and still count in total_requests.
     remediation_status = Counter(
-        "Resolved" if scan.total_count == 0 else "Open"
+        _security_remediation_status("SAST", scan)
         for scan in latest_scans.values()
     )
     return {
@@ -2272,10 +2287,13 @@ def _security_insight_detail(kind, metric, value, reqs, latest_scans, params):
         if value not in ("Open", "Resolved"):
             raise HTTPException(400, "Select Open or Resolved remediation status")
         selected = [r for r in reqs if r.id in latest_scans and
-                    ("Resolved" if latest_scans[r.id].total_count == 0 else "Open") == value]
+                    _security_remediation_status(kind, latest_scans[r.id]) == value]
         total = len(selected)
         title = f"{kind} Remediation: {value}"
-        description = "Scanned requests with zero current findings are Resolved; those with remaining findings are Open. Requests without an imported scan are excluded."
+        description = ("Resolved requires a current, validated zero-finding scan for every configured repository. "
+                       "Open includes findings and repositories awaiting scanning, validation or rescan. "
+                       "Requests without an imported scan are excluded." if kind == "SAST" else
+                       "Scanned requests with zero current findings are Resolved; those with remaining findings are Open. Requests without an imported scan are excluded.")
     elif metric == "compliance":
         selected = [r for r in reqs if r.status == value]
         total = len(selected)
@@ -2516,6 +2534,19 @@ SAST_DAST_PENDING_WITH = {
     "ASSIGNED_TO_LEAD": "Security Analyst", "RESCAN": "Security Analyst",
     "SECURITY_COMPLETE": "Security Analyst", "REPORT_READY": "Security Analyst",
 }
+
+
+def _sast_pending_with(request, scan) -> str:
+    pending_with = SAST_DAST_PENDING_WITH.get(request.status, "Security Analyst")
+    if request.status not in {"SCANNING", "FINDING_VALIDATION", "REMEDIATION", "ASSIGNED_TO_REQUESTER",
+                              "WAITING_FOR_FIX", "ASSIGNED_TO_LEAD", "RESCAN"}:
+        return pending_with
+    states = {row["state"] for row in getattr(scan, "repository_states", [])}
+    requester_work = bool(states & {"WAITING_FOR_FIX", "STALE"})
+    analyst_work = bool(states & {"NOT_SCANNED", "AWAITING_VALIDATION", "READY_FOR_RESCAN", "STALE"})
+    return "Requester / Security Analyst" if requester_work and analyst_work else pending_with
+
+
 PERFORMANCE_PENDING_WITH = {
     "DRAFT": "Requester", "SUBMITTED": "SM", "SM_APPROVAL_PENDING": "SM",
     "RETURNED_BY_SM": "Requester", "SM_REJECTED": "Requester",
@@ -2557,17 +2588,19 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             "priority": r.priority, "status": r.status, "source": "Functional Testing Request",
         })
 
-    for r in _join_qa_department(
+    sast_requests = _join_qa_department(
             _in_period(db.query(models.SASTRequest), models.SASTRequest.updated_at, date_from, date_to).filter(
                 models.SASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)),
-            models.SASTRequest, scope, db, current_user).all():
+            models.SASTRequest, scope, db, current_user).all()
+    sast_scans = _latest_scan_by_request(db, "SAST", [r.id for r in sast_requests])
+    for r in sast_requests:
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
             "application_name": r.application_name,
             "pending_stage": f"SAST - {SAST_DAST_STATUS_LABELS.get(r.status, r.status)}",
             "responsible_team": r.department or "Unassigned Department",
-            "pending_with": SAST_DAST_PENDING_WITH.get(r.status, "Security Analyst"), "owner": None,
+            "pending_with": _sast_pending_with(r, sast_scans.get(r.id)), "owner": None,
             "department": r.department,
             "pending_since": r.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": r.risk_category, "status": r.status, "source": "SAST Request",

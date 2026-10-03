@@ -15,6 +15,7 @@ from typing import Any
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
+from .time_format import IST
 
 
 MAX_CERTIFICATE_BYTES = 1024 * 1024
@@ -174,10 +175,10 @@ def normalize_certificate_bundle(
             "issuer": certificate.issuer.rfc4514_string(),
             "not_valid_before": _certificate_time(
                 certificate, "not_valid_before"
-            ).isoformat(),
+            ).astimezone(IST).isoformat(),
             "not_valid_after": _certificate_time(
                 certificate, "not_valid_after"
-            ).isoformat(),
+            ).astimezone(IST).isoformat(),
         })
     return "".join(normalized_parts), metadata
 

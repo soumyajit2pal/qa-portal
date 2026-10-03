@@ -1,8 +1,10 @@
 import os
+import zipfile
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from starlette.datastructures import Headers
 from sqlalchemy.orm import Session
 
 from .. import models, schemas, pagination
@@ -14,6 +16,7 @@ from ..deps import (
 )
 from .. import documents as doc_store
 from ..constants import GatewayStatus, Role, format_role_labels
+from ..upload_limits import validate_document_file_types
 
 router = APIRouter(prefix="/api/approvals", tags=["approval-workflow-engine"])
 
@@ -98,7 +101,8 @@ def _invited_suppression_ids(db: Session, current_user: models.User, entity_ids)
 
 
 def _filtered_approval_rows(db: Session, current_user: models.User, entity_type: Optional[str],
-                            entity_id: Optional[int] = None) -> List[models.ApprovalAction]:
+                            entity_id: Optional[int] = None,
+                            approval_action_id: Optional[int] = None) -> List[models.ApprovalAction]:
     """Shared by `list_approvals` and `list_approval_history` (see each of
     their own docstrings for why there are two endpoints over the same
     underlying feed).
@@ -130,11 +134,26 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
     stays a pull-2000-then-filter-in-Python shape rather than a real SQL
     WHERE clause."""
     q = db.query(models.ApprovalAction)
+    if approval_action_id is not None:
+        q = q.filter(models.ApprovalAction.id == approval_action_id)
     if entity_type:
         q = q.filter(models.ApprovalAction.entity_type == entity_type)
     if entity_id is not None:
         q = q.filter(models.ApprovalAction.entity_id == entity_id)
     rows = q.order_by(models.ApprovalAction.created_at.desc()).limit(2000).all()
+    # Discussion events follow the record's exact policy, just like their
+    # attachments. Keep legacy/orphaned workflow audit visibility unchanged.
+    comment_visibility = {}
+    def comment_visible(row):
+        key = (row.entity_type, row.entity_id)
+        if key not in comment_visibility:
+            try:
+                _comment_target_or_404(db, *key, current_user)
+                comment_visibility[key] = True
+            except HTTPException:
+                comment_visibility[key] = False
+        return comment_visibility[key]
+    rows = [row for row in rows if row.decision != "Commented" or comment_visible(row)]
     if not current_user.has_role(Role.ADMIN):
         draft_qa_ids = {r.entity_id for r in rows if r.entity_type == "QA_REQUEST"}
         if draft_qa_ids:
@@ -146,7 +165,7 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
                 ).all()
             }
             if hidden_ids:
-                rows = [r for r in rows if not (r.entity_type == "QA_REQUEST" and r.entity_id in hidden_ids)]
+                rows = [r for r in rows if r.decision == "Commented" or not (r.entity_type == "QA_REQUEST" and r.entity_id in hidden_ids)]
     invited_suppression_ids = _invited_suppression_ids(
         db,
         current_user,
@@ -155,7 +174,7 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         from ..workflow_authority import record_department
-        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope
+        rows = [r for r in rows if r.decision == "Commented" or resolve_entity_department(db, r.entity_type, r.entity_id) in scope
                 or (r.entity_type == "SUPPRESSION" and r.entity_id in invited_suppression_ids)
                 or (r.entity_type == 'DEFECT' and record_department(db, r, current_user)[1] in scope)]
     # Always run the entity visibility resolver. For ordinary business users
@@ -163,6 +182,8 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
     # (notably restricted Test Cycle folders) still applies.
     visibility = {}
     def visible(row):
+        if row.decision == "Commented":
+            return comment_visible(row)
         key = (row.entity_type, row.entity_id)
         if key not in visibility:
             try:
@@ -298,9 +319,16 @@ _COMMENT_ENTITY_MODELS = {
     "DEFECT": models.Defect,
 }
 
-_COMMENT_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
-_COMMENT_IMAGE_LIMIT = 8
-_COMMENT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+_COMMENT_ATTACHMENT_MIMES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf",
+    ".doc": "application/msword", ".xls": "application/vnd.ms-excel",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".csv": "text/csv", ".txt": "text/plain", ".log": "text/plain",
+}
+_COMMENT_ATTACHMENT_LIMIT = 8
+_COMMENT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
 
 
 def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, current_user: models.User):
@@ -324,17 +352,26 @@ def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, curren
             require_entity_workspace_visibility(db, current_user, normalized_type, entity_id)
     else:
         require_entity_workspace_visibility(db, current_user, normalized_type, entity_id)
-        if (
-            normalized_type == "SUPPRESSION"
-            and entity_id in _invited_suppression_ids(db, current_user, (entity_id,))
-        ):
-            return normalized_type
-        requester_id = getattr(obj, "requester_id", None) or getattr(obj, "created_by_id", None)
-        require_department_visibility(
-            current_user, resolve_entity_department(db, normalized_type, entity_id),
-            requester_id=requester_id,
-            entity_workspace_id=resolve_entity_workspace_id(db, normalized_type, entity_id),
-        )
+        # Activity is part of the same record. Reuse its actual read policy,
+        # including private drafts, verified delegates and invited reviewers.
+        if normalized_type == "QA_REQUEST":
+            from .qa_requests import _require_gateway_visibility
+            _require_gateway_visibility(db, obj, current_user)
+        elif normalized_type == "FUNCTIONAL_REQUEST":
+            from .functional import _require_visible
+            _require_visible(db, obj, current_user)
+        elif normalized_type in {"SAST", "DAST"}:
+            from .sast_dast import _require_visible
+            _require_visible(db, obj, current_user)
+        elif normalized_type == "PERFORMANCE":
+            from .performance import _require_visible
+            _require_visible(db, obj, current_user)
+        elif normalized_type == "SUPPRESSION":
+            from .suppression import _require_visible
+            _require_visible(db, obj, current_user)
+        elif normalized_type == "SIGNOFF":
+            from .signoff import _get_visible_or_404
+            _get_visible_or_404(db, entity_id, current_user)
     return normalized_type
 
 
@@ -347,21 +384,48 @@ def _validated_comment_body(body: str, allow_empty: bool = False) -> str:
     return text
 
 
-def _validate_comment_images(files: List[UploadFile]) -> None:
-    if len(files) > _COMMENT_IMAGE_LIMIT:
-        raise HTTPException(400, f"A comment can contain at most {_COMMENT_IMAGE_LIMIT} images")
-    for image in files:
-        if (image.content_type or "").lower() not in _COMMENT_IMAGE_TYPES:
-            raise HTTPException(
-                400,
-                f"'{image.filename or 'pasted image'}' is not a supported image. "
-                "Use PNG, JPEG, GIF, or WebP.",
-            )
-        image.file.seek(0, os.SEEK_END)
-        size = image.file.tell()
-        image.file.seek(0)
-        if size > _COMMENT_IMAGE_MAX_BYTES:
-            raise HTTPException(400, f"'{image.filename or 'pasted image'}' exceeds the 10 MB image limit")
+def _validate_comment_attachments(files: List[UploadFile]) -> None:
+    if not files:
+        return
+    if len(files) > _COMMENT_ATTACHMENT_LIMIT:
+        raise HTTPException(400, f"A comment can contain at most {_COMMENT_ATTACHMENT_LIMIT} attachments")
+    for upload in files:
+        filename = upload.filename or ""
+        extension = os.path.splitext(filename)[1].lower()
+        if (not filename or len(filename) > 255 or any(char in filename for char in ("/", "\\", "\x00"))
+                or extension not in _COMMENT_ATTACHMENT_MIMES):
+            raise HTTPException(415, f"'{filename or 'Unnamed file'}' is not a supported attachment. Use PDF, Word, Excel, CSV, TXT, LOG, PNG, JPEG, GIF, or WebP.")
+        position = upload.file.tell()
+        try:
+            upload.file.seek(0, os.SEEK_END)
+            size = upload.file.tell()
+            if size == 0:
+                raise HTTPException(400, f"'{filename}' is empty. Attach a file containing evidence.")
+            if size > _COMMENT_ATTACHMENT_MAX_BYTES:
+                raise HTTPException(413, f"'{filename}' exceeds the 10 MB attachment limit")
+        finally:
+            upload.file.seek(position)
+    # Sniff actual bytes using the common evidence boundary, rather than
+    # accepting the client-provided Content-Type or extension alone.
+    validate_document_file_types(files)
+    for upload in files:
+        extension = os.path.splitext(upload.filename)[1].lower()
+        if extension in {".docx", ".xlsx"}:
+            position = upload.file.tell()
+            try:
+                upload.file.seek(0)
+                with zipfile.ZipFile(upload.file) as package:
+                    names = set(package.namelist())
+                required_part = "word/document.xml" if extension == ".docx" else "xl/workbook.xml"
+                if "[Content_Types].xml" not in names or required_part not in names:
+                    raise ValueError("Office document parts missing")
+            except (zipfile.BadZipFile, OSError, ValueError) as exc:
+                raise HTTPException(415, f"'{upload.filename}' is not a valid {'Word' if extension == '.docx' else 'Excel'} document") from exc
+            finally:
+                upload.file.seek(position)
+        # Storage reads UploadFile.content_type from these headers. Normalize
+        # it now so attachment metadata and later previews use a safe type.
+        upload.headers = Headers({**dict(upload.headers), "content-type": _COMMENT_ATTACHMENT_MIMES[extension]})
 
 
 def _create_comment(db: Session, normalized_type: str, entity_id: int, body: str,
@@ -400,11 +464,11 @@ def add_comment(entity_type: str, entity_id: int, payload: schemas.CommentCreate
 def add_rich_comment(entity_type: str, entity_id: int, body: str = Form(""),
                      files: List[UploadFile] = File(default=[]), db: Session = Depends(get_db),
                      current_user: models.User = Depends(get_current_user)):
-    """Post formatted comment text plus images pasted or selected in the
+    """Post formatted comment text plus files pasted or selected in the
     shared Jira-style editor. Formatting is stored as safe Markdown text;
-    images are immutable authenticated attachments owned by the comment."""
+    files are immutable authenticated attachments owned by the comment."""
     normalized_type = _comment_target_or_404(db, entity_type, entity_id, current_user)
-    _validate_comment_images(files)
+    _validate_comment_attachments(files)
     text = _validated_comment_body(body, allow_empty=bool(files))
     row = _create_comment(
         db, normalized_type, entity_id, text, current_user, commit=not files
@@ -449,9 +513,12 @@ def download_comment_attachment(comment_id: int, document_id: int, db: Session =
     _visible_comment_or_404(db, comment_id, current_user)
     document = doc_store.get_document_or_404(db, "COMMENT_IMAGE", comment_id, document_id)
     path = doc_store.full_path(document)
-    if not os.path.exists(path):
-        raise HTTPException(404, "Comment image is missing from storage")
-    return FileResponse(path, filename=document.file_name, media_type=document.content_type or "application/octet-stream")
+    if not os.path.isfile(path):
+        raise HTTPException(404, "Comment attachment is missing from storage")
+    extension = os.path.splitext(document.file_name)[1].lower()
+    return FileResponse(path, filename=document.file_name,
+        media_type=_COMMENT_ATTACHMENT_MIMES.get(extension, "application/octet-stream"),
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
 
 
 @router.get("/pending-mine", response_model=List[schemas.ApprovalActionOut])
@@ -459,4 +526,18 @@ def my_recent_actions(db: Session = Depends(get_db), current_user: models.User =
     rows = (db.query(models.ApprovalAction)
             .filter(models.ApprovalAction.actor_id == current_user.id)
             .order_by(models.ApprovalAction.created_at.desc()).limit(100).all())
-    return [_to_out(db, r) for r in rows]
+    visible = {}
+    result = []
+    for row in rows:
+        if row.decision == "Commented":
+            key = (row.entity_type, row.entity_id)
+            if key not in visible:
+                try:
+                    _comment_target_or_404(db, *key, current_user)
+                    visible[key] = True
+                except HTTPException:
+                    visible[key] = False
+            if not visible[key]:
+                continue
+        result.append(_to_out(db, row))
+    return result

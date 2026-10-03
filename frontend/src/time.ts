@@ -1,7 +1,7 @@
 /** The QA Portal has one business timezone, independent of a user's browser. */
 export const PORTAL_TIME_ZONE = 'Asia/Kolkata'
 const IST_OFFSET = '+05:30'
-const NAIVE_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/
+const NAIVE_DATETIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/
 
 /**
  * API database columns are IST wall-clock values.  Oracle returns these
@@ -9,10 +9,11 @@ const NAIVE_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/
  */
 export function portalDate(value: string | Date): Date {
   if (value instanceof Date) return value
+  value = value.trim().replace(/ IST$/i, IST_OFFSET).replace(/ UTC$/i, 'Z')
   if (NAIVE_DATETIME.test(value) && !/(Z|[+-]\d{2}:?\d{2})$/i.test(value)) {
-    return new Date(`${value}${IST_OFFSET}`)
+    return new Date(`${value.replace(' ', 'T')}${IST_OFFSET}`)
   }
-  return new Date(value)
+  return new Date(NAIVE_DATETIME.test(value) ? value.replace(' ', 'T') : value)
 }
 
 export function formatDateTimeIST(value: string | Date): string {

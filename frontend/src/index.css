@@ -844,6 +844,46 @@ samp,
    of how tall the page's own content grows. */
 .content { padding: 24px; flex: 1; min-height: 0; overflow-y: auto; animation: fade-in .18s var(--ease); }
 
+/* Server-authoritative planned-downtime notice. It sits outside .content so
+   it remains visible while a long page scrolls, like the top bar itself. */
+.maintenance-window-banner {
+  flex-shrink:0;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  min-height:58px;
+  padding:9px 22px;
+  border-bottom:1px solid #e7c875;
+  background:#fff8df;
+  color:#62490b;
+  box-shadow:0 3px 12px rgba(76,58,11,.08);
+}
+.maintenance-window-banner.in-progress { border-color:#e7a2a2; background:#fff0f0; color:#842727; }
+.maintenance-window-banner-icon { width:31px; height:31px; flex:0 0 31px; display:grid; place-items:center; border-radius:50%; background:rgba(173,123,7,.12); }
+.maintenance-window-banner.in-progress .maintenance-window-banner-icon { background:rgba(180,35,45,.12); }
+.maintenance-window-banner-copy { min-width:0; flex:1; display:grid; gap:1px; }
+.maintenance-window-banner-copy strong { font-size:12.5px; }
+.maintenance-window-banner-copy span { white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; line-height:1.4; }
+.maintenance-window-banner-time { flex:0 0 auto; display:grid; gap:1px; padding-left:16px; border-left:1px solid currentColor; text-align:right; }
+.maintenance-window-banner-time small { opacity:.72; font-size:9px; font-weight:750; letter-spacing:.06em; text-transform:uppercase; }
+.maintenance-window-banner-time span { font-size:10.5px; font-weight:700; white-space:nowrap; }
+.maintenance-window-login-notice { display:flex; align-items:flex-start; gap:13px; }
+.maintenance-window-login-icon { width:39px; height:39px; flex:0 0 39px; display:grid; place-items:center; border-radius:10px; color:#8a6405; background:#fff4ca; }
+.maintenance-window-login-notice > div { min-width:0; }
+.maintenance-window-login-notice p { white-space:pre-wrap; overflow-wrap:anywhere; }
+.maintenance-window-login-notice > div > strong { color:var(--text); font-size:15px; }
+.maintenance-window-login-notice dl { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:12px 0; }
+.maintenance-window-login-notice dl > div { display:grid; gap:2px; padding:9px 11px; border:1px solid var(--border); border-radius:8px; background:var(--bg); }
+.maintenance-window-login-notice dt { color:var(--muted); font-size:9px; font-weight:750; text-transform:uppercase; }
+.maintenance-window-login-notice dd { margin:0; color:var(--text); font-size:11px; font-weight:700; }
+@media (max-width:700px) {
+  .maintenance-window-banner { align-items:flex-start; flex-wrap:wrap; padding:9px 12px; }
+  .maintenance-window-banner-copy { flex-basis:calc(100% - 45px); }
+  .maintenance-window-banner-time { width:100%; padding:7px 0 0 43px; border-left:0; border-top:1px solid rgba(98,73,11,.2); text-align:left; }
+  .maintenance-window-banner-time span { white-space:normal; }
+  .maintenance-window-login-notice dl { grid-template-columns:1fr; }
+}
+
 /* Reported request: the "Developed by ..." credit used to live in the
    sidebar's own footer (.portal-credit) -- easy to miss, and disappeared
    entirely once the sidebar was collapsed. Moved to a slim page footer
@@ -2221,6 +2261,8 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
     radial-gradient(circle at 88% 88%, rgba(32, 82, 145, .10), transparent 34%),
     #f3f7f8;
 }
+.maintenance-onboarding-shell { min-height:100vh; display:flex; flex-direction:column; background:#f3f7f8; }
+.maintenance-onboarding-shell > .access-pending-page { min-height:0; flex:1; }
 .access-pending-card {
   width: min(520px, 100%);
   padding: 34px 38px 38px;
@@ -3359,6 +3401,30 @@ tbody tr:hover { background: #f8f9fc; }
 .jira-comment-image:hover { border-color: #aca7df; box-shadow: 0 3px 10px rgba(45,48,70,.08); }
 .jira-comment-image img { display: block; width: 100%; height: 130px; object-fit: cover; background: #eef0f4; }
 .jira-comment-image span { display: block; padding: 6px 8px; overflow: hidden; color: #626a7c; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.jira-comment-composer .jira-composer-body { min-width: 0; margin: 0; padding: 0; border: 0; }
+.jira-comment-composer.is-dragging .jira-composer-body { outline: 2px dashed #2684ff; outline-offset: 6px; border-radius: 8px; }
+.activity-attachment-picker { margin-top: 10px; padding: 10px 12px; border: 1px dashed #c7d3e2; border-radius: 8px; background: #f8fafc; }
+.activity-attachment-picker-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.activity-attachment-picker-actions > span { color: #626f83; font-size: 11px; }
+.activity-attach-button { display: inline-flex; align-items: center; gap: 6px; color: #174c87; border-color: #b8cce4; background: #fff; font-weight: 700; }
+.activity-attach-button > span { font-size: 17px; }
+.activity-attachment-help { margin: 7px 0 0; color: #69778c; font-size: 10px; line-height: 1.5; }
+.activity-draft-files,.jira-comment-files { display: grid; grid-template-columns: repeat(auto-fit,minmax(245px,1fr)); gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.jira-comment-files { max-width: 860px; }
+.activity-file-card { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 10px; border: 1px solid #dce3ec; border-radius: 8px; background: #fff; }
+.activity-file-icon { display: grid; place-items: center; flex: 0 0 42px; height: 44px; padding: 3px; border-radius: 7px; color: #476180; background: #edf3fa; font-size: 9px; font-weight: 800; overflow-wrap: anywhere; }
+.activity-file-info { display: grid; gap: 4px; min-width: 0; flex: 1; }
+.activity-file-info strong { color: #273c57; font-size: 11px; overflow-wrap: anywhere; }
+.activity-file-info small { color: #68768b; font-size: 10px; }
+.activity-file-remove { flex: 0 0 25px; height: 25px; padding: 0; border: 0; border-radius: 5px; background: #f0f3f7; color: #5e6c80; font-size: 18px; cursor: pointer; }
+.activity-file-remove:hover { color: #ac343b; background: #fff0f1; }
+.activity-file-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 3px; }
+.activity-file-actions button,.activity-attachment-load-error button { padding: 0; border: 0; color: #1b66b1; background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
+.activity-file-actions button:disabled { cursor: wait; color: #76879d; }
+.activity-file-image { flex: 0 0 75px; padding: 0; overflow: hidden; border: 1px solid #e0e6ee; border-radius: 6px; background: #f2f5f8; cursor: zoom-in; }
+.activity-file-image img { display: block; width: 75px; height: 65px; object-fit: cover; }
+.activity-attachment-load-error { margin-top: 8px; color: #866223; font-size: 11px; line-height: 1.5; }
+@media (max-width: 480px) { .activity-draft-files,.jira-comment-files { grid-template-columns: minmax(0,1fr); } }
 .jira-activity-empty { padding: 28px; border: 1px dashed #dfe2e9; border-radius: 8px; color: #949baa; background: #fafbfc; font-size: 10px; text-align: center; }
 @media (max-width: 620px) {
   .jira-activity-head { align-items: flex-start; flex-direction: column; }
@@ -3880,6 +3946,7 @@ tbody tr:hover { background: #f2f8f8; }
 .security-dast-target-grid { padding: 13px; display: grid; grid-template-columns: repeat(12,minmax(0,1fr)); gap: 12px; align-items: start; }
 .security-control { min-width: 0; display: flex; flex-direction: column; }
 .security-control > small { margin-top: 5px; color: #7a8c90; font-size: 9px; line-height: 1.4; }
+.security-control > .security-repository-url-warning { color: #8a5a0b; }
 .security-control-repository-url { grid-column: span 6; }
 .security-control-git-branch,
 .security-control-commit-id { grid-column: span 3; }
@@ -4400,6 +4467,49 @@ td { padding: 12px; }
 .access-empty-search strong { color: #355159; font-size: 14px; }
 .access-empty-search span { margin-bottom: 9px; color: #7b8e92; font-size: 11.5px; }
 .access-departments-section { margin-top: 0; }
+
+/* Admin > System tools > Planned downtime. */
+.maintenance-admin-layout { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(290px,.75fr); gap:14px; align-items:start; }
+.maintenance-admin-card { padding:18px; }
+.maintenance-admin-intro { display:flex; align-items:flex-start; gap:11px; margin:0 0 16px; padding:12px 13px; border:1px solid #d7e4e6; border-radius:10px; background:#f5f9fa; }
+.maintenance-admin-icon { width:34px; height:34px; flex:0 0 34px; display:grid; place-items:center; border-radius:9px; color:#936b0c; background:#fff1bf; }
+.maintenance-admin-intro div { display:grid; gap:2px; }
+.maintenance-admin-intro strong { color:#304b52; font-size:12px; }
+.maintenance-admin-intro p { margin:0; color:#74888d; font-size:11px; line-height:1.45; }
+.maintenance-admin-load-failure { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; padding:12px; border:1px solid #efb2b5; border-radius:9px; background:#fff4f4; color:#8c2730; }
+.maintenance-admin-load-failure > div { display:grid; gap:2px; }
+.maintenance-admin-load-failure span { font-size:10.5px; }
+.maintenance-admin-form fieldset { min-width:0; margin:0; padding:0; border:0; display:grid; gap:13px; }
+.maintenance-admin-form fieldset:disabled { opacity:.65; }
+.maintenance-admin-form textarea { min-height:112px; white-space:pre-wrap; }
+.maintenance-admin-time-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.maintenance-admin-actions { display:flex; align-items:center; gap:8px; margin-top:16px; padding-top:14px; border-top:1px solid var(--border); }
+.maintenance-admin-saved { display:flex; align-items:center; gap:7px; margin:13px 0 0; color:#21704f; font-size:11.5px; font-weight:700; }
+.maintenance-admin-side { display:grid; gap:12px; }
+.maintenance-admin-status,.maintenance-admin-preview { padding:15px; border:1px solid #dce6e8; border-radius:12px; background:#fff; box-shadow:var(--shadow-xs); }
+.maintenance-admin-status header { display:flex; align-items:center; justify-content:space-between; gap:10px; padding-bottom:10px; border-bottom:1px solid var(--border); }
+.maintenance-admin-status header span,.maintenance-admin-preview > span { color:#71878c; font-size:9px; font-weight:800; letter-spacing:.08em; }
+.maintenance-admin-status header strong { padding:4px 8px; border-radius:999px; color:#0b6375; background:#e8f4f5; font-size:10px; }
+.maintenance-admin-status dl,.maintenance-admin-preview dl { display:grid; gap:0; margin:8px 0; }
+.maintenance-admin-status dl > div,.maintenance-admin-preview dl > div { display:grid; grid-template-columns:82px minmax(0,1fr); gap:8px; padding:7px 0; border-bottom:1px solid #edf1f2; }
+.maintenance-admin-status dl > div:last-child,.maintenance-admin-preview dl > div:last-child { border-bottom:0; }
+.maintenance-admin-status dt,.maintenance-admin-preview dt { color:#819196; font-size:9.5px; }
+.maintenance-admin-status dd,.maintenance-admin-preview dd { min-width:0; margin:0; color:#344d53; font-size:10.5px; font-weight:650; overflow-wrap:anywhere; }
+.maintenance-admin-status dd span { display:block; margin-top:3px; color:#7e3d43; font-weight:500; white-space:pre-wrap; }
+.maintenance-admin-status > p { margin:12px 0; color:var(--muted); font-size:11px; }
+.maintenance-admin-status > small,.maintenance-admin-preview > small { display:block; color:#87979b; font-size:9.5px; line-height:1.45; }
+.maintenance-admin-cancelled { color:#8c2730; }
+.maintenance-admin-preview { border-color:#dfd7b8; background:#fffdf5; }
+.maintenance-admin-preview > strong { display:block; margin-top:9px; color:#554512; font-size:13px; }
+.maintenance-admin-preview > p { margin:5px 0 10px; color:#6f6441; font-size:11px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
+.maintenance-cancel-form > p { margin-top:0; color:var(--muted); font-size:12px; }
+.maintenance-cancel-form textarea { min-height:96px; }
+@media (max-width:900px) { .maintenance-admin-layout { grid-template-columns:1fr; } }
+@media (max-width:620px) {
+  .maintenance-admin-time-grid { grid-template-columns:1fr; }
+  .maintenance-admin-actions,.maintenance-admin-load-failure { align-items:stretch; flex-direction:column; }
+  .maintenance-admin-actions .btn,.maintenance-admin-load-failure .btn { width:100%; }
+}
 
 .organization-detail-tabs,.workspace-detail-tabs {
   display:grid;
@@ -5766,6 +5876,7 @@ td { padding: 12px; }
   .defect-case-state { display: none; }
 }
 .tm-governed-defect { color: #b54708 !important; }
+.tm-cycle-completion-request-block { flex-basis: 100%; max-width: 760px; padding: 7px 9px; border: 1px solid #efc1c4; border-radius: 7px; background: #fff4f4; color: #8b2831; font-size: 10px; line-height: 1.45; }
 .tm-cycle-completion-review { display: flex; flex-direction: column; gap: 14px; }
 .tm-cycle-completion-review > .muted { margin: 0; }
 .tm-completion-state { padding: 13px 15px; display: flex; align-items: center; gap: 12px; border: 1px solid; border-radius: 11px; }
@@ -8953,6 +9064,25 @@ td { padding: 12px; }
 .security-scan-target-choice { display: flex; align-items: flex-start; gap: 10px; }
 .security-scan-target-choice span { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .security-scan-target-choice small { color: var(--muted); }
+.security-scan-target-choice > input[type="checkbox"] { flex: 0 0 auto; width: 17px; height: 17px; margin: 2px 0; }
+.sast-repository-progress { margin-bottom: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
+.sast-repository-progress > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+.sast-repository-progress > header strong { font-size: 15px; }
+.sast-repository-progress > header p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.sast-repository-progress > header > span { flex: 0 0 auto; padding: 5px 10px; border-radius: 20px; background: #fff7e8; color: #8c5b12; font-size: 12px; font-weight: 750; }
+.sast-repository-progress > header > span.complete { background: #edf8f1; color: #247344; }
+.sast-repository-progress-scroll { overflow-x: auto; }
+.sast-repository-progress table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 11px; }
+.sast-repository-progress th,.sast-repository-progress td { padding: 10px 9px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.sast-repository-progress thead th { color: var(--muted); font-size: 10px; }
+.sast-repository-progress thead th small { display: block; margin-top: 4px; font-weight: 400; text-transform: none; letter-spacing: normal; }
+.sast-repository-progress tbody th { max-width: 280px; overflow-wrap: anywhere; font-weight: 650; }
+.sast-repository-progress td small { display: block; margin-top: 4px; max-width: 200px; color: var(--muted); overflow-wrap: anywhere; }
+.sast-repository-state { display: inline-block; padding: 4px 7px; border-radius: 6px; color: #566476; background: #eef1f5; white-space: nowrap; }
+.sast-repository-state.state-clear { color: #247344; background: #edf8f1; }
+.sast-repository-state.state-ready_for_rescan,.sast-repository-state.state-awaiting_validation { color: #29568c; background: #eef4fc; }
+.sast-repository-state.state-waiting_for_fix,.sast-repository-state.state-stale { color: #8c5b12; background: #fff7e8; }
+@media (max-width: 600px) { .sast-repository-progress > header { flex-direction: column; gap: 8px; } }
 .security-scan-coverage { margin: 14px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
 .security-scan-coverage > div { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
 .security-scan-coverage > div span { max-width: 100%; padding: 5px 9px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); overflow-wrap: anywhere; }

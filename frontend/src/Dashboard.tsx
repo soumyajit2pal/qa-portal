@@ -989,7 +989,7 @@ function SecurityTab({ range }: { range: RaisedRange }) {
         <Card title="DAST Vulnerability Trends"><BarChart data={dast.vulnerability_trends} onBarClick={(severity) => openDetails('dast', 'severity', severity)} /></Card>
       </div>
       <div className="grid grid-2" style={{ marginTop: 16 }}>
-        <Card title="SAST Remediation Status" subtitle="Scanned requests with remaining findings or zero open findings"><BarChart data={sast.remediation_status} onBarClick={(status) => openDetails('sast', 'remediation', status)} /></Card>
+        <Card title="SAST Remediation Status" subtitle="Resolved only when every repository has a current, validated clear result"><BarChart data={sast.remediation_status} onBarClick={(status) => openDetails('sast', 'remediation', status)} /></Card>
         <Card title="DAST Compliance Status" subtitle="Requests by workflow and compliance state"><BarChart data={dast.compliance_status} onBarClick={(status) => openDetails('dast', 'compliance', status)} /></Card>
       </div>
       {selection && <Modal key={detail?.total_rows ? 'records' : 'summary'}

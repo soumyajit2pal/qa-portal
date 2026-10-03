@@ -8,17 +8,18 @@ import { createLatestRequestGate } from '../../latestRequest'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel, EmptyState } from '../../components/Common'
-import SastRepositoryDetails, { SAST_COMPONENT_FIELDS, SastRepositoryRow, isGitRepositoryUrl } from '../../components/SastRepositoryDetails'
+import SastRepositoryDetails, { SAST_COMPONENT_FIELDS, SastRepositoryRow } from '../../components/SastRepositoryDetails'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import RequestDelegation from '../../components/RequestDelegation'
 import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_REQUESTER_CONTROLLED_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasWorkflowRole as hasRole, hasDepartment, hasWorkspaceRole, isViewOnly, canManageReadinessEvidence } from '../../constants'
-import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOption, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
+import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOption, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, SecurityTargetScanIn, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
-import { SecurityFindingsNextAction, SecurityRemediationAssignment, SecurityFixDialog, SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
+import { SecurityFindingsNextAction, SASTRepositoryProgress, SecurityFixDialog, SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
+import { allSASTRepositoriesClear, canRetrieveSASTResults, repositoriesForAction, sastRepositoryProgress, SAST_ACTIVE_SCAN_STATUSES, SAST_REVERIFICATION_STATUSES } from './sastRepositoryWorkflow'
 import { NewSuppressionModal } from './Suppression'
 
 // One "SAST component" = one repository, with its own branch/commit/tech
@@ -100,9 +101,6 @@ function SASTFormModal({
     const incomplete = form.components.some((c) => SAST_COMPONENT_FIELDS.some((f) => !c[f.key]?.trim()))
     if (incomplete) missing.push('Repository Details (every field, for every repository row)')
     if (missing.length > 0) return `Please fill in: ${missing.join(', ')}`
-    if (form.components.some((component) => !isGitRepositoryUrl(component.repository_url))) {
-      return 'Repository URL must be a Git clone URL ending in .git. Example: https://git.example.com/team/repository.git'
-    }
     return null
   }
 
@@ -363,6 +361,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   const [scanNotice, setScanNotice] = useState('')
   const [scanResults, setScanResults] = useState<SecurityScanResultOut[]>([])
   const [scanSummary, setScanSummary] = useState<SecurityScanSummaryOut | null>(null)
+  const scanRequests = useRef(createLatestRequestGate()).current
 
   const load = useCallback(async () => {
     try {
@@ -371,6 +370,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   }, [req.id])
 
   const loadScan = useCallback(async () => {
+    const generation = scanRequests.begin()
     try {
       // Commit the related responses together. On the first scan, publishing
       // results before the refreshed summary creates a transient invalid UI
@@ -379,16 +379,22 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
         api.get<SecurityScanResultOut[]>(`/api/sast-requests/${req.id}/scan-results`),
         api.get<SecurityScanSummaryOut>(`/api/sast-requests/${req.id}/scan-summary`),
       ])
+      if (!scanRequests.isCurrent(generation)) return
       setScanResults(results)
       setScanSummary(summary)
     } catch {
+      if (!scanRequests.isCurrent(generation)) return
       setScanResults([])
       setScanSummary(null)
     }
-  }, [req.id])
+  }, [req.id, scanRequests])
 
   useEffect(() => { load() }, [load])
-  useEffect(() => { loadScan() }, [loadScan])
+  useEffect(() => {
+    setScanResults([]); setScanSummary(null)
+    void loadScan()
+    return () => scanRequests.invalidate()
+  }, [loadScan, scanRequests])
   useEffect(() => { setReassignAnalystReason('') }, [req.id, req.security_analyst_id])
 
   async function toggleChecklistItem(item: ChecklistItemOut) {
@@ -418,14 +424,14 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
     } finally { setBusy(false) }
   }
 
-  async function startScan(scans: { target_id: number; application_name: string; application_version: string }[]) {
+  async function startScan(scans: SecurityTargetScanIn[]) {
     setBusy(true); setScanError(null)
     try {
-      const response = await api.post<{ request: SASTOut; scan_results: SecurityScanResultOut[] }>(`/api/sast-requests/${req.id}/start-scan`, { scans })
+      const response = await api.post<{ request: SASTOut; scan_results: SecurityScanResultOut[] }>(`/api/sast-requests/${req.id}/start-scan`, { scans }, 600_000)
       onChanged(response.request)
       setShowStartScan(false)
       setTab('findings')
-      setScanNotice(`Scan validated successfully. Fortify SSC findings were imported and are shown below.`)
+      setScanNotice(`${scans.length} repository result${scans.length === 1 ? '' : 's'} imported. Select these repositories for findings validation; other repositories remain unchanged.`)
       await loadScan()
       await load()
     } catch (err) { setScanError(err) } finally { setBusy(false) }
@@ -433,12 +439,13 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   // 2026-08 "Findings Validation" doc -- re-imports fresh Fortify SSC
   // results into a NEW scan record (see routers/sast_dast.py::_rescan_scan);
   // status is unchanged by this call, only the scan data refreshes.
-  async function rescan(scans: { target_id: number; application_name: string; application_version: string }[]) {
+  async function rescan(scans: SecurityTargetScanIn[]) {
     setBusy(true); setScanError(null)
     try {
-      const response = await api.post<{ request: SASTOut; scan_results: SecurityScanResultOut[] }>(`/api/sast-requests/${req.id}/rescan`, { scans })
+      const response = await api.post<{ request: SASTOut; scan_results: SecurityScanResultOut[] }>(`/api/sast-requests/${req.id}/rescan`, { scans }, 600_000)
       onChanged(response.request)
       setShowRescan(false)
+      setScanNotice(`${scans.length} repository rescan result${scans.length === 1 ? '' : 's'} imported and awaiting validation. Other repositories remain unchanged.`)
       await loadScan()
       await load()
     } catch (err) { setScanError(err) } finally { setBusy(false) }
@@ -449,13 +456,11 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   // the backend endpoint (_mark_scan_complete) is left in place, unused,
   // matching this file's existing convention for superseded-but-not-deleted
   // legacy actions.
-  async function validateFindings() {
-    const updated = await act('validate-findings')
+  async function validateFindings(targetIds: number[]) {
+    const updated = await act('validate-findings', { target_ids: targetIds })
     if (!updated) return
     setTab('findings')
-    setScanNotice(updated.status === 'WAITING_FOR_FIX'
-      ? 'Findings validated successfully. Open findings were automatically assigned to the requester for remediation.'
-      : 'Findings validated successfully. No unresolved finding requires requester action.')
+    setScanNotice(`${targetIds.length} repository result${targetIds.length === 1 ? '' : 's'} validated. Repositories with unresolved findings are assigned for fixes; remaining repositories keep their current progress.`)
     await loadScan()
   }
   // Keep the originating SAST detail open and layer the shared suppression
@@ -576,85 +581,24 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   const canAssignSecurityAnalyst =
     (isInitialAnalystAssignment ? isAssignedQALead : canReassignSecurityAnalyst) &&
     SAST_DAST_ANALYST_REASSIGNABLE_STATUSES.includes(status)
-  const canStartScan = isAssignedAnalyst && status === 'CONFIGURATION'
-  // Reported directly, full requirement doc pasted with a status-flow
-  // diagram: this session had earlier built a flatter model (Rescan/Mark
-  // Scan Complete/Assign to Requester all reachable directly from
-  // Scanning). That's superseded here -- Finding Validation is a mandatory,
-  // explicit gate again: Scanning -> Validate Findings (canValidateFindings)
-  // -> Security Complete or Remediation -> Assign to Requester
-  // (canAssignToRequester) -> Waiting For Fix -> Mark Fixed -> Rescan status
-  // -> Rescan (canRescan) -> back to Scanning. Each gate now checks the ONE
-  // specific status it's valid from, mirroring sast_dast.py's
-  // _validate_findings/_assign_to_requester/_rescan_scan exactly, instead
-  // of a broad "somewhere in the active-scan window" set.
-  const canValidateFindings = isAssignedAnalyst && status === 'SCANNING'
-  const canAssignToRequester = isAssignedAnalyst && status === 'REMEDIATION'
-  const canRescan = isAssignedAnalyst && status === 'RESCAN'
-  // Reported directly: "suppression requests CAN ONLY be raised by
-  // requester, so this should be enable for requester, not QA team." --
-  // the requester's own action. Narrowed to Waiting For Fix only (was the
-  // whole active-scan window under the earlier flatter model) -- the
-  // requirement doc's Section 4 frames raising a suppression as one of two
-  // things the requester chooses between only once they're actually
-  // holding the request ("After reviewing the findings, the requester may
-  // choose..." -- Option A: fix, Option B: suppress), not any time during
-  // the analyst's own Scanning/Remediation phases.
-  //
-  // Reported directly (follow-up): "requester delegated, to qa ... Full
-  // stand-in for requester" briefly used requesterInputEditor here (like
-  // canMarkFixed below), extending suppression-raising to the active
-  // delegate too.
-  //
-  // Reported directly (reversed): "INITIATE SUPPRESSION REQUEST SHOULD BE
-  // FROM REQUESTER SIDE, NOT QA SIDE" -- the concrete case was a requester
-  // who'd delegated this Waiting For Fix request to a Security Analyst
-  // (ordinary "full stand-in" use), and that analyst could then raise a
-  // suppression against their own team's finding. Suppression is now
-  // carved OUT of delegate stand-in entirely -- uses plain `isRequester`
-  // (the literal original requester, or Admin) instead of
-  // requesterInputEditor, unlike canMarkFixed below which is still fully
-  // delegable. Since the delegate can no longer act here, the original
-  // requester is deliberately NOT blocked by !req.active_delegation either
-  // (isRequester already ignores delegation status) -- mirrors
-  // suppression.py's _require_requester_of_linked exactly.
-  const canInitiateSuppression = isRequester && status === 'WAITING_FOR_FIX'
-  // Reported directly (follow-up): "why still mark fixed is visible? why
-  // you are not going through the codebase and not fixing all and not
-  // checking edge cases." Two fixes, mirroring sast_dast.py's _mark_fixed
-  // exactly:
-  // (1) `isAssignedAnalyst` used to also grant Mark Fixed -- a leftover
-  //     from the pre-turn-based design (section 51/52) that no longer
-  //     matches "after fix requester will reassign": Mark Fixed is now
-  //     strictly the requester's action, same as Rescan/Assign to Requester
-  //     are strictly the analyst's (section 130).
-  // (2) `req.active_delegation` guard was entirely missing -- once
-  //     WAITING_FOR_FIX became delegatable (section 126), a requester who'd
-  //     delegated this request out could still Mark Fixed themselves while
-  //     the delegate's assignment was still open.
-  //
-  // Reported directly (another follow-up): "requester delegated, to qa.
-  // but as status is Waiting For Fix, in qa side rescan button and all
-  // eligble button not visible." Blocking Mark Fixed outright while
-  // delegated (as just above) left the delegate with nothing reachable at
-  // all -- SAST/DAST has no editable surface during Waiting For Fix
-  // (Documents/Checklist are locked solid post-readiness, the edit form is
-  // pre-approval-only). Asked directly: delegate should be a full stand-in
-  // for the requester, including Mark Fixed itself. Now uses
-  // requesterInputEditor (isActiveDelegate OR (isRequester and NOT
-  // delegated)) instead of `isRequester && !req.active_delegation` --
-  // the delegate can Mark Fixed directly; the original requester is still
-  // locked out while someone else holds the delegation. Mirrors
-  // sast_dast.py's _mark_fixed exactly, which also auto-closes the
-  // delegation once Mark Fixed succeeds.
-  const canMarkFixed = requesterInputEditor && status === 'WAITING_FOR_FIX'
-  const canMarkReportReady = isAssignedAnalyst && status === 'SECURITY_COMPLETE'
+  const repositoryStates = sastRepositoryProgress(req.components, scanSummary)
+  const activeRepositoryWorkflow = SAST_ACTIVE_SCAN_STATUSES.includes(status)
+  const allRepositoriesClear = allSASTRepositoriesClear(repositoryStates, scanSummary)
+  // Repository actions remain independent of the parent aggregate queue status.
+  const canStartScan = isAssignedAnalyst && canRetrieveSASTResults(status, repositoryStates)
+  const requiresReverification = SAST_REVERIFICATION_STATUSES.includes(status) && repositoriesForAction(repositoryStates, 'start').length > 0
+  const canValidateFindings = isAssignedAnalyst && activeRepositoryWorkflow && repositoriesForAction(repositoryStates, 'validate').length > 0
+  const canRescan = isAssignedAnalyst && activeRepositoryWorkflow && repositoriesForAction(repositoryStates, 'rescan').length > 0
+  const canMarkFixed = requesterInputEditor && activeRepositoryWorkflow && repositoriesForAction(repositoryStates, 'fix').length > 0
+  // Suppression stays with the original requester, including mixed repository queues.
+  const canInitiateSuppression = isRequester && activeRepositoryWorkflow && repositoryStates.some(row => row.state === 'WAITING_FOR_FIX')
+  const canMarkReportReady = isAssignedAnalyst && status === 'SECURITY_COMPLETE' && allRepositoriesClear
   // Report Ready -> Closed. Usually reached automatically as part of Mark
   // Scan Complete's clean-scan chain, but this manual action covers the case
   // where that auto-chain stopped at Report Ready's suppression gate and the
   // analyst needs to finish the last hop themselves once the linked
   // suppression(s) are Done.
-  const canCloseRequest = isAssignedAnalyst && status === 'REPORT_READY'
+  const canCloseRequest = isAssignedAnalyst && status === 'REPORT_READY' && allRepositoriesClear
   // Reported directly (bug): "Supression request is now rejected, but
   // still user not able to create supression request." Excludes both
   // SUPPRESSION_TERMINAL_STATUSES (Done AND Rejected), not just Done --
@@ -687,7 +631,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
                 findings come from the SAST/DAST API, which made
                 req.findings permanently empty. */}
             {t === 'findings'
-              ? `Findings (${scanResults[0]?.total_count ?? 0} active · ${scanResults[0]?.suppressed_total_count ?? 0} suppressed)`
+              ? `Findings (${scanSummary?.open_findings ?? 0} active · ${scanSummary?.suppressed_findings ?? 0} suppressed)`
               : t === 'history' ? 'Activity' : t[0].toUpperCase() + t.slice(1)}
           </button>
         ))}
@@ -696,12 +640,13 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'overview' && (
         <div>
-          {scanResults.length > 0 && (
+          {(scanResults.length > 0 || activeRepositoryWorkflow || requiresReverification) && (
             <SecurityFindingsNextAction
               status={status}
-              activeCount={scanResults[0]?.total_count ?? 0}
-              suppressedCount={scanResults[0]?.suppressed_total_count ?? 0}
-              hasWorkflowAction={canValidateFindings || canAssignToRequester || canMarkFixed || canRescan || canInitiateSuppression}
+              activeCount={scanSummary?.open_findings ?? 0}
+              suppressedCount={scanSummary?.suppressed_findings ?? 0}
+              repositoryProgress={{ clear: repositoryStates.filter(row => row.state === 'CLEAR').length, total: repositoryStates.length }}
+              hasWorkflowAction={canStartScan || canValidateFindings || canMarkFixed || canRescan || canInitiateSuppression}
               onOpen={() => setTab('findings')}
             />
           )}
@@ -816,6 +761,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
                 request={req}
                 users={users}
                 disabled={busy}
+                requesterWork={activeRepositoryWorkflow && repositoriesForAction(repositoryStates, 'fix').length > 0}
                 onChanged={async (updated) => { onChanged(updated); await load() }}
               />
               {canSubmit && (
@@ -951,7 +897,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
                   </button>
                 </>
               )}
-              {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => setShowStartScanConfirm(true)}>Start Scan</button>}
+              {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => setShowStartScanConfirm(true)}>{requiresReverification ? 'Reverify Repository Results' : 'Retrieve Repository Results'}</button>}
               {/* Rescan / Mark Scan Complete now live in the Findings tab's
                   Scan Summary panel (SecurityScanResults, section 4.4 of the
                   "Findings Validation" doc) instead of here -- they act on
@@ -1043,14 +989,9 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'findings' && (
         <div>
-          {status === 'WAITING_FOR_FIX' && (
-            <SecurityRemediationAssignment
-              requesterName={userName(users, req.requester_id) || 'the requester'}
-              activeCount={scanResults[0]?.total_count ?? 0}
-              viewerOwnsAction={canMarkFixed}
-            />
-          )}
-          {scanNotice && status !== 'WAITING_FOR_FIX' && (
+          <SASTRepositoryProgress states={repositoryStates} results={scanSummary?.current_results || []} allClear={allRepositoriesClear} canStart={canStartScan} canValidate={canValidateFindings} reverification={requiresReverification} busy={busy} onStart={() => setShowStartScanConfirm(true)} onValidate={validateFindings} />
+          {repositoriesForAction(repositoryStates, 'fix').length > 0 && <p className="muted small">{userName(users, req.requester_id) || 'The requester'}{req.active_delegation ? ' or the active delegate' : ''} can submit fixes for selected repositories while the analyst works on other ready scans. {canMarkFixed ? 'Use Submit Repository Fixes below.' : ''}</p>}
+          {scanNotice && (
             <div className="execution-start-notice linked" role="status">
               <strong>Success</strong><span>{scanNotice}</span>
             </div>
@@ -1065,9 +1006,9 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
             kind="SAST"
             results={scanResults}
             summary={scanSummary}
-            canValidateFindings={canValidateFindings}
+            canValidateFindings={false}
             canRescan={canRescan}
-            canAssignToRequester={canAssignToRequester}
+            canAssignToRequester={false}
             canInitiateSuppression={canInitiateSuppression}
             canMarkFixed={canMarkFixed}
             busy={busy}
@@ -1076,7 +1017,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
             requesterActionSuppressionIds={requesterActionSuppressionIds}
             hasDoneSuppression={hasDoneSuppression}
             doneSuppressionIds={doneSuppressionIds}
-            onValidateFindings={validateFindings}
+            onValidateFindings={() => {}}
             onRescan={() => setShowRescanConfirm(true)}
             onAssignToRequester={() => act('assign-to-requester')}
             onMarkFixed={() => setShowMarkFixed(true)}
@@ -1094,12 +1035,15 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
 
       {showMarkFixed && <SecurityFixDialog
         kind="SAST" targets={req.components.map(component => ({ id: component.id, label: component.repository_url || 'Repository URL not recorded', previousCommit: component.commit_id }))} currentScans={scanSummary?.current_results || []}
+        repositoryStates={repositoryStates}
         onClose={() => setShowMarkFixed(false)}
         onSubmit={async targets => {
           const updated = await api.post<SASTOut>(`/api/sast-requests/${req.id}/mark-fixed`, { targets })
           onChanged(updated)
           setShowMarkFixed(false)
           await load()
+          await loadScan()
+          setScanNotice(`${targets.length} repository fix${targets.length === 1 ? '' : 'es'} submitted for rescan. Other repositories remain unchanged.`)
         }}
       />}
 
@@ -1119,8 +1063,8 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
           reached without it. */}
       {showStartScanConfirm && (
         <ConfirmModal
-          title="Start Scan"
-          message="Has the scan in Fortify SSC finished running? Starting the import now will retrieve whatever results are currently available for this application/version -- if the scan is still in progress, the results may be incomplete."
+          title={requiresReverification ? 'Reverify Repository Results' : 'Retrieve Repository Results'}
+          message={requiresReverification ? 'Have the Fortify scans finished for the repositories needing current evidence? Retrieving new results will reopen this SAST request for findings validation. Next, select only the repositories needing current evidence.' : 'Have the Fortify scans finished for the repositories you want to retrieve? Next, select those repositories and enter their Application Name and Version. In-progress results may be incomplete.'}
           confirmLabel="Yes, retrieve results"
           cancelLabel="Not yet"
           onConfirm={() => { setShowStartScanConfirm(false); setScanError(null); setShowStartScan(true) }}
@@ -1129,21 +1073,22 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
       )}
       {showRescanConfirm && (
         <ConfirmModal
-          title="Rescan"
-          message="Has the rescan in Fortify SSC finished running? Retrieving results now will import whatever is currently available for this application/version -- if the scan is still in progress, the results may be incomplete."
+          title="Retrieve Repository Rescans"
+          message="Have the Fortify rescans finished for the repositories you want to retrieve? Next, select only those ready repositories. Other repositories and their pending work remain unchanged."
           confirmLabel="Yes, retrieve results"
           cancelLabel="Not yet"
           onConfirm={() => { setShowRescanConfirm(false); setScanError(null); setShowRescan(true) }}
           onCancel={() => setShowRescanConfirm(false)}
         />
       )}
-      {showStartScan && <SecurityScanDialog kind="SAST" initialApplicationName={req.application_name} targets={req.components.filter(component => component.repository_url).map(component => ({ id: component.id, label: component.repository_url!, detail: [component.git_branch, component.commit_id].filter(Boolean).join(' · ') || null }))} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
+      {showStartScan && <SecurityScanDialog kind="SAST" reverification={requiresReverification} repositoryStates={repositoryStates} initialScans={scanSummary?.current_results || []} initialApplicationName={req.application_name} targets={req.components.filter(component => component.repository_url).map(component => ({ id: component.id, label: component.repository_url!, detail: [component.git_branch, component.commit_id].filter(Boolean).join(' · ') || null }))} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
       {showRescan && (
         <SecurityScanDialog
           kind="SAST" mode="rescan"
           initialApplicationName={scanResults[0]?.application_name || req.application_name}
           targets={req.components.filter(component => component.repository_url).map(component => ({ id: component.id, label: component.repository_url!, detail: [component.git_branch, component.commit_id].filter(Boolean).join(' · ') || null }))}
           initialScans={scanSummary?.current_results || []}
+          repositoryStates={repositoryStates}
           busy={busy} error={scanError}
           onClose={() => setShowRescan(false)}
           onStart={rescan}
@@ -1292,7 +1237,7 @@ export default function SAST() {
       </Card>
       {selected && (
         <SASTDetail
-          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); reload() }}
+          key={selected.id} req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(current => current?.id === u.id ? u : current); reload() }}
           users={users}
         />
       )}

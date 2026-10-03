@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .. import models, pagination, schemas
 from ..database import get_db
+from ..time_format import as_ist
 from ..project_workspace_ownership import workspace_can_contribute
 from ..workflow_authority import workflow_endpoint, is_system_admin, admin_department_allowed
 from ..deps import (
@@ -76,8 +77,10 @@ def _pending_sort_key(item: dict):
     submitted_at = item.get("submitted_at")
     if submitted_at is None:
         submitted_at = datetime.datetime.min
-    elif submitted_at.tzinfo is not None:
-        submitted_at = submitted_at.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    else:
+        # Oracle returns IST wall clocks without an offset; normalize aware
+        # sources to the same clock before comparing heterogeneous queue rows.
+        submitted_at = as_ist(submitted_at).replace(tzinfo=None)
     return submitted_at, item["category"], item["entity_type"], item["entity_id"]
 
 

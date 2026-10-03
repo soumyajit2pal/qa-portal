@@ -38,7 +38,7 @@ from .routers import document_portal
 app = FastAPI(
     title="QualityOps Document Portal API",
     description="Isolated authenticated file repository service for QualityOps.",
-    version="1.0.0",
+    version="1.0.2",
     docs_url=None if settings.app_env in {"uat", "prod", "production"} else "/docs",
     redoc_url=None if settings.app_env in {"uat", "prod", "production"} else "/redoc",
     openapi_url=None if settings.app_env in {"uat", "prod", "production"} else "/openapi.json",

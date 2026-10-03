@@ -1,4 +1,4 @@
-import { QARequestForm, SAST_COMPONENT_FIELDS, isGitRepositoryUrl } from './types'
+import { QARequestForm, SAST_COMPONENT_FIELDS } from './types'
 import { validEnvironmentPromotion, validTargetPromotionOptions } from '../constants'
 
 // Mandatory text fields on the "Application & Change Details" / "Release &
@@ -105,9 +105,6 @@ export function sastStepError(f: QARequestForm, existingSast: boolean): string |
   const incomplete = f.sast_components.some((c) => SAST_COMPONENT_FIELDS.some((field) => !c[field.key]?.trim()))
   if (incomplete) {
     return 'Please fill in every field (Repository URL, Branch, Commit ID, Tech Stack, Build Number) for each repository row.'
-  }
-  if (f.sast_components.some((component) => !isGitRepositoryUrl(component.repository_url))) {
-    return 'Repository URL must be a Git clone URL ending in .git. Example: https://git.example.com/team/repository.git'
   }
   return null
 }

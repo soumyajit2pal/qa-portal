@@ -1,5 +1,4 @@
 import datetime
-import re
 from typing import Optional, List, Dict, Literal
 from pydantic import (
     Field,
@@ -11,6 +10,7 @@ from pydantic import (
     model_validator,
 )
 from .login_encryption import EncryptedLogin
+from .time_format import as_ist
 
 RICH_TEXT_MAX_LENGTH = 10000
 
@@ -57,22 +57,33 @@ def _serialize_ist_datetime(value: datetime.datetime) -> str:
     values; other sources may already be timezone-aware.  This preserves the
     instant in either case and prevents browsers from guessing a timezone.
     """
-    ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=ist)
-    else:
-        value = value.astimezone(ist)
-    return value.isoformat()
+    return as_ist(value).isoformat()
 
 
-class ORMModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+def _normalize_output_datetimes(value):
+    """Convert output objects without mutating stored evidence or date values."""
+    if isinstance(value, datetime.datetime):
+        return as_ist(value)
+    if isinstance(value, dict):
+        return {key: _normalize_output_datetimes(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_output_datetimes(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_normalize_output_datetimes(item) for item in value)
+    return value
+
+
+class ISTResponseModel(BaseModel):
 
     @field_serializer("*", mode="wrap", when_used="json", check_fields=False)
     def _serialize_datetime_fields(self, value, handler):
         if isinstance(value, datetime.datetime):
             return _serialize_ist_datetime(value)
-        return handler(value)
+        return handler(_normalize_output_datetimes(value))
+
+
+class ORMModel(ISTResponseModel):
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ---------------- Auth / Users ----------------
@@ -352,7 +363,7 @@ class LDAPSettingsUpdate(BaseModel):
         return self
 
 
-class LDAPCACertificateMetadata(BaseModel):
+class LDAPCACertificateMetadata(ISTResponseModel):
     fingerprint_sha256: str
     subject: str
     issuer: str
@@ -360,7 +371,7 @@ class LDAPCACertificateMetadata(BaseModel):
     not_valid_after: datetime.datetime
 
 
-class LDAPSettingsOut(BaseModel):
+class LDAPSettingsOut(ISTResponseModel):
     enabled: bool
     server_uri: str
     use_ssl: bool
@@ -391,6 +402,109 @@ class LDAPSettingsTest(LDAPSettingsUpdate):
 class LDAPSettingsTestResult(BaseModel):
     ok: bool
     message: str
+
+
+MAINTENANCE_TITLE_MAX_LENGTH = 150
+MAINTENANCE_MESSAGE_MAX_LENGTH = 2000
+MAINTENANCE_CANCEL_REASON_MAX_LENGTH = 500
+
+
+def _plain_maintenance_text(value: str, *, label: str) -> str:
+    """Normalize operator-entered notice text without accepting control data.
+
+    These values are plain text, not HTML or Markdown. Newlines and tabs are
+    useful in the notice body/reason, but the remaining C0 controls have no
+    legitimate display use and can make audit exports misleading.
+    """
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{label} cannot be blank")
+    if any(ord(character) < 32 and character not in "\n\r\t" for character in normalized):
+        raise ValueError(f"{label} contains unsupported control characters")
+    return normalized
+
+
+class MaintenanceWindowUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    title: str = Field(min_length=1, max_length=MAINTENANCE_TITLE_MAX_LENGTH)
+    message: str = Field(min_length=1, max_length=MAINTENANCE_MESSAGE_MAX_LENGTH)
+    starts_at: datetime.datetime
+    ends_at: datetime.datetime
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        normalized = _plain_maintenance_text(value, label="Title")
+        if "\n" in normalized or "\r" in normalized:
+            raise ValueError("Title must be a single line")
+        return normalized
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, value: str) -> str:
+        return _plain_maintenance_text(value, label="Message")
+
+    @field_validator("starts_at", "ends_at")
+    @classmethod
+    def require_offset_aware_datetime(cls, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Maintenance timestamps must include a UTC offset")
+        ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        return value.astimezone(ist)
+
+    @model_validator(mode="after")
+    def validate_window_order(self):
+        if self.ends_at <= self.starts_at:
+            raise ValueError("Maintenance end time must be after the start time")
+        return self
+
+
+class MaintenanceWindowCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=MAINTENANCE_CANCEL_REASON_MAX_LENGTH)
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        return _plain_maintenance_text(value, label="Cancellation reason")
+
+
+class MaintenanceWindowNotice(ISTResponseModel):
+    revision: int
+    title: str
+    message: str
+    starts_at: datetime.datetime
+    ends_at: datetime.datetime
+    display_from: datetime.datetime
+
+
+class MaintenanceWindowCurrentOut(BaseModel):
+    visible: bool
+    phase: Optional[Literal["UPCOMING", "IN_PROGRESS"]] = None
+    notice: Optional[MaintenanceWindowNotice] = None
+
+
+class MaintenanceWindowAdminDetail(MaintenanceWindowNotice):
+    phase: Optional[Literal["UPCOMING", "IN_PROGRESS"]] = None
+    cancelled_at: Optional[datetime.datetime] = None
+    cancel_reason: Optional[str] = None
+    created_at: datetime.datetime
+    created_by_id: Optional[int] = None
+    created_by_name: Optional[str] = None
+    updated_at: datetime.datetime
+    updated_by_id: Optional[int] = None
+    updated_by_name: Optional[str] = None
+    cancelled_by_id: Optional[int] = None
+    cancelled_by_name: Optional[str] = None
+
+
+class MaintenanceWindowAdminOut(BaseModel):
+    configured: bool
+    window: Optional[MaintenanceWindowAdminDetail] = None
 
 
 class AuditLogOut(ORMModel):
@@ -537,8 +651,8 @@ class SASTComponentIn(BaseModel):
 
     @field_validator("repository_url", mode="before")
     @classmethod
-    def validate_repository_url(cls, value):
-        """Accept Git clone URLs only, with the repository's `.git` suffix.
+    def normalize_repository_url(cls, value):
+        """Normalize the repository reference; URL format is advisory in the UI.
 
         Blank values remain valid at schema level because an unrelated QA
         Request draft carries an unused blank SAST row. The SAST submission
@@ -546,25 +660,7 @@ class SASTComponentIn(BaseModel):
         """
         if value is None:
             return None
-        normalized = str(value).strip()
-        if not normalized:
-            return normalized
-        url_style = re.fullmatch(
-            r"(?:https?|ssh|git)://[^\s/]+/[^\s]+\.git",
-            normalized,
-            flags=re.IGNORECASE,
-        )
-        scp_style = re.fullmatch(
-            r"[^\s@/:]+@[^\s/:]+:[^\s]+\.git",
-            normalized,
-            flags=re.IGNORECASE,
-        )
-        if not (url_style or scp_style):
-            raise ValueError(
-                "Repository URL must be a Git clone URL ending in .git "
-                "(for example, https://git.example.com/team/repository.git)"
-            )
-        return normalized
+        return str(value).strip()
 
 
 class SASTComponentOut(ORMModel):
@@ -1208,6 +1304,15 @@ class SecurityTargetScanIn(BaseModel):
     target_id: int
     application_name: str
     application_version: str
+    # Assigned analysts may capture missing legacy code references at scan
+    # retrieval; populated request references cannot be replaced here.
+    git_branch: Optional[str] = Field(default=None, max_length=500)
+    commit_id: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("git_branch", "commit_id", mode="before")
+    @classmethod
+    def normalize_code_reference(cls, value):
+        return (value.strip() or None) if isinstance(value, str) else value
 
     @field_validator("application_name", "application_version")
     @classmethod
@@ -1237,6 +1342,9 @@ class SecurityScanTargetOut(BaseModel):
     id: int
     label: str
     detail: Optional[str] = None
+    repository_url: Optional[str] = None
+    git_branch: Optional[str] = None
+    commit_id: Optional[str] = None
 
 
 class SecurityScanFilterOut(BaseModel):
@@ -1284,6 +1392,29 @@ class SecurityScanResultOut(ORMModel):
     status: str = "Completed"
 
 
+class SecurityRepositoryStateOut(ISTResponseModel):
+    target_id: int
+    label: str
+    state: str
+    commit_id: Optional[str] = None
+    git_branch: Optional[str] = None
+    latest_scan_id: Optional[int] = None
+    open_findings: int = 0
+    fix_submitted_at: Optional[datetime.datetime] = None
+    fix_submitted_by_id: Optional[int] = None
+
+
+class SecurityFindingsValidationIn(BaseModel):
+    target_ids: Optional[List[int]] = None
+
+    @field_validator("target_ids")
+    @classmethod
+    def valid_targets(cls, value):
+        if value is not None and (not value or any(item <= 0 for item in value) or len(value) != len(set(value))):
+            raise ValueError("Select each valid repository once")
+        return value
+
+
 class SecurityScanSummaryOut(ORMModel):
     """Backs the "Findings Validation" doc's 4.1 Scan Summary section."""
     initial: Optional[SecurityScanResultOut] = None
@@ -1293,6 +1424,12 @@ class SecurityScanSummaryOut(ORMModel):
     total_rescans: int = 0
     open_findings: int = 0
     suppressed_findings: int = 0
+    repository_states: List[SecurityRepositoryStateOut] = []
+    total_repositories: int = 0
+    clear_repositories: int = 0
+    ready_for_rescan: int = 0
+    unscanned_repositories: int = 0
+    all_repositories_clear: bool = False
 
 
 class CommentIn(BaseModel):
@@ -1366,7 +1503,7 @@ class SASTUpdate(BaseModel):
             for index, component in enumerate(self.components, start=1):
                 if not component.repository_url:
                     raise ValueError(
-                        f"Repository {index} URL is required and must be a Git clone URL ending in .git"
+                        f"Repository {index} URL is required"
                     )
         return self
 
@@ -3510,6 +3647,7 @@ class TestCycleOut(ORMModel):
     linked_request_type: Optional[str] = None
     linked_request_id: Optional[int] = None
     linked_request_key: Optional[str] = None
+    linked_request_status: Optional[str] = None
     linked_request_change_allowed: bool = False
     linked_request_qa_lead_unlink_allowed: bool = False
     reexecution_of_cycle_id: Optional[int] = None
@@ -3877,7 +4015,7 @@ class DefectQualityResolverOut(BaseModel):
     reopen_events: int
 
 
-class DefectQualityItemOut(BaseModel):
+class DefectQualityItemOut(ISTResponseModel):
     defect_id: int
     defect_key: str
     title: str
@@ -3938,7 +4076,7 @@ class VersionImpactOut(BaseModel):
     items: List[VersionImpactItemOut]
 
 
-class RequirementTraceabilityRowOut(BaseModel):
+class RequirementTraceabilityRowOut(ISTResponseModel):
     """One repository testcase in one cycle, or its uncovered repository row."""
     row_id: str
     test_case_id: int
@@ -4013,7 +4151,7 @@ class PendingApprovalCount(BaseModel):
     count: int
 
 
-class PendingApprovalItem(BaseModel):
+class PendingApprovalItem(ISTResponseModel):
     """One row in the logged-in user's Pending Approvals feed -- a single
     checkpoint, on a single entity, that is genuinely awaiting THIS user's
     decision right now (see routers/pending_approvals.py's own module

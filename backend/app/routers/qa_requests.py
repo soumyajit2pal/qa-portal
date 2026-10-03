@@ -816,7 +816,12 @@ def _child_delegation_target(db: Session, qa_request_id: int, target_type: str,
     model, requester_statuses, audit_entity_type = config
     query = db.query(model).filter(model.id == target_id, model.qa_request_id == qa_request_id)
     if lock:
-        query = query.with_for_update()
+        # Permission/context lookups may already have cached the parent.
+        # Re-read its state and relationships after taking the same lock as
+        # fix submission, so a completed handoff cannot gain a new delegate.
+        query = query.populate_existing().with_for_update()
+        if model is models.SASTRequest:
+            query = query.options(selectinload(models.SASTRequest.components))
     # ORA-02014 when lock=True -- see assign_for_input's comment in this same
     # file for the full explanation. .one_or_none() instead of .first() is
     # identical here (model.id is the primary key, so at most one row either
@@ -886,7 +891,13 @@ def assign_child_for_input(qa_request_id: int, target_type: str, target_id: int,
     _require_child_delegation_visibility(db, target, current_user)
     if target.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can delegate this request")
-    if target.status not in requester_statuses:
+    repository_input_pending = False
+    if normalized == 'SAST' and target.status in {'CONFIGURATION', 'SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'ASSIGNED_TO_LEAD', 'RESCAN'}:
+        from ..security_scan_state import repository_states
+        scans = db.query(models.SecurityScanResult).filter_by(request_type='SAST', request_id=target.id).order_by(
+            models.SecurityScanResult.imported_at.desc(), models.SecurityScanResult.id.desc()).all()
+        repository_input_pending = any(row['state'] in {'WAITING_FOR_FIX', 'STALE'} for row in repository_states(target, scans))
+    if target.status not in requester_statuses and not repository_input_pending:
         raise HTTPException(400, "Delegation is available only while this request is with the requester for input or correction")
     if _active_child_delegation(db, normalized, target.id, lock=True):
         raise HTTPException(400, "This request already has an active delegation")
@@ -1639,12 +1650,11 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     # this call.
     checked_items, sast_components, dast_components, performance_details, performance_checked_items, classification_details, sast_checked_items, dast_checked_items = _unstash_draft_details(obj.draft_child_details)
     # Revalidate the stashed SAST rows at the irreversible Draft -> Raised
-    # boundary. Besides protecting direct API clients, this catches drafts
-    # saved before the `.git` URL rule existed instead of creating a child
-    # SAST request with an invalid repository reference.
+    # boundary. Repository references remain mandatory, but their format
+    # is advisory and must not prevent a request from being raised.
     if "SAST" in request_types:
         if not sast_components:
-            raise HTTPException(400, "Cannot raise -- add at least one SAST repository with a Git clone URL ending in .git.")
+            raise HTTPException(400, "Cannot raise -- add at least one SAST repository with a Repository URL.")
         validated_sast_components = []
         for index, component in enumerate(sast_components, start=1):
             try:
@@ -1655,8 +1665,10 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
             if not validated.repository_url:
                 raise HTTPException(
                     400,
-                    f"Repository {index} URL is required and must be a Git clone URL ending in .git.",
+                    f"Repository {index} URL is required.",
                 )
+            if not (validated.git_branch or '').strip() or not (validated.commit_id or '').strip():
+                raise HTTPException(400, f"Repository {index} Branch and Commit ID are required before raising a SAST request.")
             validated_sast_components.append(validated.model_dump())
         sast_components = validated_sast_components
     # Every linked child now lands straight at SM_APPROVAL_PENDING with no
@@ -1844,7 +1856,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
         actor = db.get(models.User, h.actor_id) if h.actor_id else None
         history.append((h.step_name or "—", h.decision or "—", actor.full_name if actor else "—",
                          format_role_labels(h.actor_role) or "—", h.comments or "—",
-                         h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
+                         h.created_at if h.created_at else "—"))
 
     # request_id isn't assigned until the gateway is actually raised (see its
     # column comment) -- a still-Draft export (only ever reachable by its own
@@ -1856,6 +1868,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
         sections=sections, history=history,
         generated_by=current_user.full_name,
         generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
+        verification_context=(db, "QA_REQUEST", req_id),
 
     )
     return StreamingResponse(

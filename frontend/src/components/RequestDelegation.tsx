@@ -26,6 +26,7 @@ interface RequestDelegationProps<T extends DelegatableRequest> {
   onReturned?: () => void | Promise<void>
   disabled?: boolean
   showActiveBadge?: boolean
+  requesterWork?: boolean
 }
 
 const REQUESTER_STATUSES: Record<DelegationTarget, Set<string>> = {
@@ -60,6 +61,7 @@ export function requestDelegationCapabilities(
   targetType: DelegationTarget,
   request: DelegatableRequest,
   user: UserOut | null | undefined,
+  requesterWork = false,
 ) {
   const parentId = targetType === 'QA_REQUEST' ? request.id : request.qa_request?.id
   const active = request.active_delegation?.status === 'ACTIVE' ? request.active_delegation : null
@@ -67,7 +69,8 @@ export function requestDelegationCapabilities(
   return {
     parentId,
     active,
-    canAssign: !!parentId && canManage && !active && REQUESTER_STATUSES[targetType].has(request.status),
+    canAssign: !!parentId && canManage && !active && (REQUESTER_STATUSES[targetType].has(request.status)
+      || (targetType === 'SAST' && requesterWork && ['CONFIGURATION', 'SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'RESCAN'].includes(request.status))),
     canReturn: !!parentId && active?.assigned_to_id === user?.id,
     canRecall: !!parentId && !!active && canManage,
   }
@@ -82,6 +85,7 @@ export default function RequestDelegation<T extends DelegatableRequest>({
   onReturned,
   disabled = false,
   showActiveBadge = true,
+  requesterWork = false,
 }: RequestDelegationProps<T>) {
   const { user } = useAuth()
   const [dialog, setDialog] = useState<'assign' | 'return' | 'recall' | null>(null)
@@ -89,7 +93,7 @@ export default function RequestDelegation<T extends DelegatableRequest>({
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
-  const { parentId, active, canAssign, canReturn, canRecall } = requestDelegationCapabilities(targetType, request, user)
+  const { parentId, active, canAssign, canReturn, canRecall } = requestDelegationCapabilities(targetType, request, user, requesterWork)
 
   const candidates = useMemo(
     () => users.filter((candidate) => isSelectableUser(candidate) && candidate.id !== request.requester_id),

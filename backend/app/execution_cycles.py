@@ -120,3 +120,21 @@ def require_request_execution_started(request) -> None:
             f"Cannot start this Test Cycle. Linked request {request.request_id} is {label}. "
             "Start execution on the linked request first; its status must be Execution In Progress.",
         )
+
+
+def require_request_cycle_completable(request) -> None:
+    """A linked cycle can finish only inside the request's execution stage.
+
+    The Functional Request is the workflow authority for a linked cycle. A
+    request that has moved backward, entered defect/retest handling, or
+    already advanced beyond execution must be resolved there before its
+    evidence boundary can be closed.
+    """
+    from .constants import QAStatus, QA_REQUEST_STATUS_LABELS
+    if request.status != QAStatus.EXECUTION_IN_PROGRESS:
+        label = QA_REQUEST_STATUS_LABELS.get(request.status, request.status or "Unknown")
+        raise HTTPException(
+            400,
+            f"Cannot complete this Test Cycle. Linked Functional QA Request "
+            f"{request.request_id} is {label}. Its status must be Execution In Progress.",
+        )

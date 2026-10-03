@@ -128,6 +128,7 @@ class Settings(BaseSettings):
     app_env_file: str = ""
     database_url: str | None = None
     secret_key: str = ""
+    signature_integrity_key: str = ""
     login_encryption_private_key_file: str | None = None
     access_token_expire_minutes: int = 30
     session_max_minutes: int = 480
@@ -164,6 +165,8 @@ class Settings(BaseSettings):
             raise ValueError("SESSION_IDLE_MINUTES cannot exceed SESSION_MAX_MINUTES")
         if len(self.secret_key) < 32:
             raise ValueError("SECRET_KEY must be a deployment secret of at least 32 characters")
+        if self.signature_integrity_key and len(self.signature_integrity_key) < 32:
+            raise ValueError("SIGNATURE_INTEGRITY_KEY must contain at least 32 characters")
         if self.app_env in {"uat", "prod", "production"}:
             if not self.database_url:
                 raise ValueError("DATABASE_URL is required outside development")

@@ -26,8 +26,8 @@ const allowedApiFamilies = new Set([
   'dashboard', 'dast-requests', 'defects', 'departments', 'document-portal',
   'export', 'functional-requests', 'jobs', 'pending-approvals',
   'performance-requests', 'qa-requests', 'reports', 'request-type-config',
-  'sast-requests', 'signoffs', 'suppressions', 'test-execution',
-  'test-projects', 'test-reports', 'test-repository', 'workspaces',
+  'sast-requests', 'signoffs', 'signatures', 'suppressions', 'test-execution',
+  'system-settings', 'test-projects', 'test-reports', 'test-repository', 'workspaces',
 ])
 
 async function filesBelow(directory) {

@@ -47,6 +47,17 @@ def _storage_relative_path(value: str, label: str) -> str:
         for component in normalized.split("/")
     ))
 
+
+def _bounded_disk_file_name(stem: str, extension: str, suffix: str = "") -> str:
+    """Keep physical names within the filesystem's 255-byte component limit.
+
+    Display names remain untouched in RequestDocument. UTF-8 truncation is
+    applied only to the stem, leaving the type and collision suffix intact.
+    """
+    budget = 255 - len((suffix + extension).encode("utf-8"))
+    bounded_stem = stem.encode("utf-8")[:budget].decode("utf-8", errors="ignore") or "file"
+    return f"{bounded_stem}{suffix}{extension}"
+
 # Shares the same physical uploads folder as QARequest's own documents.
 # Request folders are always the top-level boundary; module/type is nested
 # inside them so one request does not create several sibling folders.
@@ -164,6 +175,7 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
                 os.path.basename(f.filename or "unnamed_file"), "file name"
             )
             stem, ext = os.path.splitext(original_name)
+            original_name = _bounded_disk_file_name(stem, ext)
             # Reserve the name atomically. An exists() check followed by open()
             # races when two workers upload the same original filename.
             while True:
@@ -172,7 +184,7 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
                     output = open(dest_path, "xb")
                     break
                 except FileExistsError:
-                    original_name = f"{stem}_{uuid.uuid4().hex}{ext}"
+                    original_name = _bounded_disk_file_name(stem, ext, f"_{uuid.uuid4().hex}")
             with output as out:
                 written_paths.append(dest_path)
                 shutil.copyfileobj(f.file, out)

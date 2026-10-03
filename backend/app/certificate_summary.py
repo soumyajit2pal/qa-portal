@@ -128,9 +128,15 @@ def require_linked_security_resolved(db, source):
         siblings = db.query(model).filter_by(qa_request_id=source.qa_request_id).order_by(model.id).all()
         if label in selected and not siblings:
             pending.append(f'{label} child request missing')
-        pending.extend(f'{label} {item.request_id or "(no ID)"} ({item.status or "no status"})'
-                       for item in siblings
-                       if item.status not in SAST_DAST_CLEARANCE_RESOLVED_STATUSES)
+        for item in siblings:
+            if item.status not in SAST_DAST_CLEARANCE_RESOLVED_STATUSES:
+                pending.append(f'{label} {item.request_id or "(no ID)"} ({item.status or "no status"})')
+            elif label == 'SAST' and item.status == 'CLOSED':
+                from .security_scan_state import all_repositories_clear
+                scans = db.query(models.SecurityScanResult).filter_by(request_type='SAST', request_id=item.id).order_by(
+                    models.SecurityScanResult.imported_at.desc(), models.SecurityScanResult.id.desc()).all()
+                if not all_repositories_clear(item, scans):
+                    pending.append(f'SAST {item.request_id or "(no ID)"} (repository coverage is incomplete, stale or awaiting validation)')
     if pending:
         raise HTTPException(409,
             'QA Clearance cannot be raised until every linked SAST/DAST request is '
@@ -143,13 +149,14 @@ def require_linked_security_closed(db, source):
     return require_linked_security_resolved(db, source)
 
 
-def security_scan_counts(results):
+def security_scan_counts(results, kind=None):
     """Oldest-first snapshots: initial Auditor totals and latest suppressions per target."""
-    from .security_scan_state import current_scan_results
+    from .security_scan_state import current_scan_results, initial_repository_results
     if not results:
         return {'initial_findings': None, 'current_findings': None, 'suppression_count': None}
-    first_key = results[0].execution_key or f'legacy-{results[0].id}'
-    initial = [row for row in results if (row.execution_key or f'legacy-{row.id}') == first_key]
+    kind = kind or getattr(results[0], 'request_type', None)
+    initial = (current_scan_results(results) if kind == 'DAST'
+               else initial_repository_results(results))
     def auditor_total(row):
         # Filter sets overlap. Use only the Auditor view, never their sum.
         auditor = next((entry for entry in row.filters
@@ -184,6 +191,10 @@ def security_assessment_table(snapshot):
         return 'No linked security assessment recorded; this is not a Pass result.'
     table = '\n'.join([cells(headers), cells(['---'] * len(headers)), *[cells(row) for row in rows]])
     note = 'Status and counts are frozen at evidence capture. Findings use the Security Auditor View across all targets; suppression request IDs list all linked requests.'
+    coverage = [f"{row['request_id']}: {row['repository_coverage']['clear']}/{row['repository_coverage']['total']} repositories clear"
+                for row in snapshot.get('security', []) if row.get('repository_coverage')]
+    if coverage:
+        note += ' Repository coverage: ' + '; '.join(coverage) + '.'
     if any('Not captured' in row for row in rows):
         note += ' Missing values require evidence refresh and full reapproval.'
     return table + '\n\n' + note
@@ -271,7 +282,20 @@ def capture(db, obj):
                 suppression_column == item.id).order_by(models.SuppressionRequest.id).all()]
             result['security'].append({'type': label, 'request_id': item.request_id,
                 'status': item.status, 'findings': len(item.findings), 'risk_level': item.risk_category or 'Not recorded',
-                'suppression_request_ids': suppression_ids, **security_scan_counts(scans)})
+                'suppression_request_ids': suppression_ids, **security_scan_counts(scans, label)})
+            if label == 'SAST':
+                from .security_scan_state import repository_states
+                states = repository_states(item, list(reversed(scans)))
+                # Freeze coverage and code identity beside the scan counts.
+                # Historic certificate reads never recalculate this evidence.
+                result['security'][-1]['repositories'] = [
+                    {key: row[key] for key in ('target_id', 'label', 'state', 'git_branch', 'commit_id', 'latest_scan_id', 'open_findings')}
+                    for row in states
+                ]
+                result['security'][-1]['repository_coverage'] = {
+                    'total': len(states), 'clear': sum(row['state'] == 'CLEAR' for row in states),
+                    'all_clear': bool(states) and all(row['state'] == 'CLEAR' for row in states),
+                }
     result.update(captured_at=models.now().isoformat(), application_name=source.qa_request.application_name,
                   change_request_ids=obj.change_request_ids or ' / '.join(filter(None, [source.qa_request.cr_number, source.qa_request.epic_number])),
                   change_description=source.qa_request.change_description or '',

@@ -1,7 +1,7 @@
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { resolveRequestId } from '../../requestNavigation'
 import { formatDateTimeIST } from '../../time'
@@ -1003,13 +1003,14 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
       </div>
       <div className="clearance-tab-panel" role="tabpanel" id="clearance-panel-activity" aria-labelledby="clearance-tab-activity" hidden={detailTab !== 'activity'} tabIndex={0}>
       {signatures.length > 0 && <>
-        <div className="clearance-section-heading"><div><span>Approval record</span><h3>Electronic signatures</h3><p>Latest valid signature for each approval stage</p></div></div>
+        <div className="clearance-section-heading"><div><span>Approval record</span><h3>Electronic signatures</h3><p>Latest recorded signature for each approval stage</p></div></div>
         <div className="signoff-signature-list">
           {signatures.map((signature) => <article className="signoff-signature-card" key={signature.signatureId}>
             <header><span>✓</span><div><small>{signature.stage}</small><strong>Electronically signed</strong></div></header>
             <div className={`signoff-signature-mark signature-style-${signature.style}`}>{signature.signer}</div>
             <dl><div><dt>Signer</dt><dd>{signature.signer}</dd></div><div><dt>Signed at</dt><dd>{formatDateTimeIST(signature.appliedAt)}</dd></div><div className="signature-id"><dt>Signature ID</dt><dd><code>{signature.signatureId}</code></dd></div></dl>
             <p>{signature.intent}</p>
+            <Link className="btn btn-sm" to={`/verify-signature?id=${encodeURIComponent(signature.signatureId)}`}>Verify this signature</Link>
           </article>)}
         </div>
       </>}

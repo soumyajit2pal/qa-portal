@@ -10,6 +10,7 @@ services:
 
     environment:
       APP_ENV_FILE: /run/config/qualityops.env
+      TZ: Asia/Kolkata
 
     command: ["alembic", "upgrade", "head"]
 
@@ -44,6 +45,7 @@ services:
 
     environment:
       APP_ENV_FILE: /run/config/qualityops.env
+      TZ: Asia/Kolkata
       UPLOAD_STORAGE_ROOT: /data/qualityops/uploads
       DOCUMENT_PORTAL_EMBEDDED: "false"
       DOCUMENT_PORTAL_STORAGE_HOST_PATH: /data/qualityops/document-storage/repository
@@ -112,6 +114,7 @@ services:
 
     environment:
       APP_ENV_FILE: /run/config/qualityops.env
+      TZ: Asia/Kolkata
       WEB_CONCURRENCY: ${DOCUMENT_PORTAL_WEB_CONCURRENCY:-2}
       DB_POOL_SIZE: ${DOCUMENT_PORTAL_DB_POOL_SIZE:-2}
       DB_MAX_OVERFLOW: ${DOCUMENT_PORTAL_DB_MAX_OVERFLOW:-1}
@@ -175,6 +178,8 @@ services:
 
   frontend:
     image: qualityops-frontend:${IMAGE_TAG:-latest}
+    environment:
+      TZ: Asia/Kolkata
     build:
       context: ./frontend
       dockerfile: Dockerfile

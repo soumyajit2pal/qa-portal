@@ -60,9 +60,11 @@ def require_admin_department(user, department):
         raise HTTPException(403, 'Administrators may perform workflow actions only within their own department, using an assigned workflow role.')
 
 
-def configure_request(db, user, request, *, workflow=False):
+def configure_request(db, user, request, *, workflow=False, read_operation=False):
     _workflow_actors.set((user,) if workflow else ())
-    if not workflow or request.method.upper() in {'GET', 'HEAD', 'OPTIONS'}:
+    # Trusted dependencies may classify an inspection POST as a read. Keep
+    # the same read authority context without registering a mutation actor.
+    if not workflow or read_operation or request.method.upper() in {'GET', 'HEAD', 'OPTIONS'}:
         return
     if is_system_admin(user) and not set(user.roles) & WORKFLOW_ROLES:
         raise HTTPException(403, 'Administrator access does not grant workflow authority. An explicit workflow role is required.')

@@ -15,10 +15,12 @@ import contextvars
 import logging
 import logging.handlers
 import os
+from datetime import datetime
 from pathlib import Path
 
 from .config import settings as _settings  # importing config loads APP_ENV_FILE once
 from .process_logging import ProcessSafeRotatingFileHandler
+from .time_format import IST
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -69,6 +71,12 @@ class _RequestContextFilter(logging.Filter):
         return True
 
 
+class ISTFormatter(logging.Formatter):
+    def formatTime(self, record: logging.LogRecord, datefmt=None) -> str:
+        timestamp = datetime.fromtimestamp(record.created, IST)
+        return timestamp.strftime(datefmt or "%Y-%m-%d %H:%M:%S IST")
+
+
 def _add_handler_once(target: logging.Logger, handler: logging.Handler) -> None:
     if handler not in target.handlers:
         target.addHandler(handler)
@@ -85,10 +93,10 @@ def configure_logging() -> logging.Logger:
     deep = deep_logging_enabled()
     application_level = logging.DEBUG if deep else logging.INFO
 
-    formatter = logging.Formatter(
+    formatter = ISTFormatter(
         "%(asctime)s %(levelname)-8s [%(name)s] "
         "[pid=%(process)d request_id=%(request_id)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        datefmt="%Y-%m-%d %H:%M:%S IST",
     )
     context_filter = _RequestContextFilter()
 
@@ -112,12 +120,20 @@ def configure_logging() -> logging.Logger:
     _add_handler_once(logger, console_handler)
     logger.propagate = False
 
-    # Uvicorn retains its own console handlers. Add only the rotating file
-    # destination here to avoid duplicate console lines.
-    for name in ("uvicorn.error", "uvicorn.access"):
+    # Application modules that use their module name (rather than qa_portal)
+    # and dependency warnings reach the root logger.
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    _add_handler_once(root_logger, file_handler)
+    _add_handler_once(root_logger, console_handler)
+
+    # Replace Uvicorn's default handlers so startup, errors and access logs
+    # use the same IST timestamp in both console and file without duplicates.
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         uvicorn_logger = logging.getLogger(name)
         uvicorn_logger.setLevel(logging.DEBUG if deep else logging.INFO)
-        _add_handler_once(uvicorn_logger, file_handler)
+        uvicorn_logger.handlers = [file_handler, console_handler]
+        uvicorn_logger.propagate = False
 
     # SQL and pool diagnostics are intentionally opt-in. Engine creation uses
     # hide_parameters=True as a second safety boundary, so even deep mode logs

@@ -15,6 +15,7 @@ import { IconContract, IconExpand } from "../../components/Icons";
 import { useAuth } from "../../context/AuthContext";
 import AppVersion from "../../components/AppVersion";
 import { createLatestRequestGate } from "../../latestRequest";
+import { formatDateTimeIST } from "../../time";
 
 type Sort = "name" | "type" | "size" | "modified";
 type Item = {
@@ -73,16 +74,7 @@ const parent = (value: string) => {
   parts.pop();
   return parts.join("/");
 };
-const timestamp = (value: string) =>
-  new Intl.DateTimeFormat("en-IN", {
-    timeZone: "Asia/Kolkata",
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  }).format(new Date(value));
+const timestamp = formatDateTimeIST;
 
 function FolderTree({
   folders,

@@ -73,8 +73,8 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'collaboration', number: '10', title: 'Comments and collaboration',
-    summary: 'Comments, rich text, images, attachments, and activity history.',
-    keywords: 'comment activity rich text bullet image paste attachment collaboration edit delete history table merged cell colspan rowspan pdf export',
+    summary: 'Comments, rich text, screenshots, document attachments, and activity history.',
+    keywords: 'comment activity rich text bullet image paste attach files drag drop attachment collaboration edit delete history table merged cell colspan rowspan pdf preview download word excel csv txt log export',
   },
   {
     id: 'find-report', number: '11', title: 'Find, monitor, and report',
@@ -420,8 +420,17 @@ export default function Help() {
                 <article><strong>SAST / DAST</strong><p>The QA Lead performs Security Readiness and assigns a Security Analyst from the active workspace for scan execution and findings.</p></article>
                 <article><strong>QA Clearance</strong><p>Only an eligible QA user in the active workspace can raise the certificate. It follows QA Engineer → QA Lead → QA executive, with no business SM stage.</p></article>
               </div>
-              <Callout title="Select every SAST / DAST target included in the scan">
-                Start Scan and Rescan list all repositories configured on a SAST request or all application URLs configured on a DAST request. Every target requires its own Fortify Application Name and Version and creates its own findings result. The rows are grouped as one workflow execution, while Findings and Scan History keep every target separate; older scans show that target coverage was not captured.
+              <Callout title="SAST repositories progress independently">
+                In Findings, Repository progress shows every repository, including those not scanned. Select only the repositories ready for your next action. You can retrieve results in batches or rescan one repository while another fix remains in progress; other findings and history stay intact.
+              </Callout>
+              <SopSteps items={[
+                { title: 'Retrieve selected repositories', text: 'The Security Analyst uses Retrieve Repository Results and selects completed Fortify scans. Application Name and Version are required only for selected repositories. Older scope missing a branch or commit asks for the references used by the completed scan.' },
+                { title: 'Validate selected findings', text: 'The analyst reviews imported results, then selects the repositories to Validate Selected Findings. Clear results and repositories needing fixes progress independently.' },
+                { title: 'Submit fixes and rescan independently', text: 'The requester or active delegate uses Submit Repository Fixes, selects ready repositories and records their new commit/hash references. The analyst uses Retrieve Ready Rescans for the selected repositories. A pending linked suppression still blocks submitting fixes for this request until it is resolved.' },
+                { title: 'Complete every repository', text: 'Every repository needs a current, validated clear result before the request can close. Changing a branch or commit requires a new scan; an old result with incomplete source coverage cannot establish clearance. For an older completed request with missing current evidence, the assigned analyst can use Reverify Repository Results to retrieve only those repositories and reopen findings validation.' },
+              ]} />
+              <Callout title="DAST target scans">
+                Start Scan and Rescan list the application URLs configured on the DAST request. Each target requires its own Fortify Application Name and Version and creates its own findings result. Findings and Scan History keep every target separate; older scans show that target coverage was not captured.
               </Callout>
               <h3 className="help-subheading">QA Clearance Certificate SOP</h3>
               <SopSteps items={[
@@ -457,6 +466,9 @@ export default function Help() {
                 Return and Reject cannot be submitted with blank remarks. State the corrective action, missing evidence, policy reason, or technical reason clearly enough for the next user and the audit reviewer to understand the decision.
               </Callout>
               <p className="help-inline-note">This is an auditable in-application electronic signature. A certificate-based PKI signature using a USB token, DSC provider, or enterprise signing gateway requires a separately configured trust-provider integration.</p>
+              <Callout title="Verify a signature or check a PDF for changes">
+                Open Governance → Verify Signature or use the Verify Signature shortcut in the top bar. Choose Check signature ID to validate the recorded approval evidence, or Verify PDF to upload the original portal export and check the document bytes as well. QA Clearance also has a Verify this signature link. Results show whether the approval is current, replaced, reset or on hold; signing times use IST. Older records without an original integrity seal are shown as unconfirmed. You can verify only records within your existing access scope, and uploaded PDFs are not retained.
+              </Callout>
               <h3 className="help-subheading">Evidence rules</h3>
               <ul className="help-check-list">
                 <li><IconCheckCircle />Attach evidence beside the relevant readiness criterion during request preparation. A mandatory criterion needs both its requester declaration and at least one uploaded evidence file before Submit / Raise is allowed.</li>
@@ -489,7 +501,7 @@ export default function Help() {
               <SopSteps items={[
                 { title: 'Select an active project', text: 'A project requires a Department selected from the system list. Selecting an Application automatically uses and locks its mapped Department. Create folders and subfolders for release, module, epic, or test scope.' },
                 { title: 'Create or import test cases', text: 'Complete the ID-linked hierarchy and all fields including epic, CR, module, priority, pre-condition, scenario, steps, expected result, and data.' },
-                { title: 'Enter repository details consistently', text: 'For SAST repository scope, enter each repository as its own structured row with Repository URL, Branch, Commit ID, Technology Stack, and Build Number. Use Add repository only when the project spans more than one repository.' },
+                { title: 'Enter repository details consistently', text: 'For SAST repository scope, enter each repository as its own structured row with Repository URL, Branch, Commit ID, Technology Stack, and Build Number. Use Add repository only when the project spans more than one repository. A Git clone URL ending in .git is recommended; other formats show a warning and allow you to continue and submit.' },
                 { title: 'Review import results', text: 'The completion dialog identifies created and skipped rows and gives a reason for each issue. The uploaded xlsx is parsed in memory; the source workbook is not retained in document storage.' },
                 { title: 'Submit for QA recommendation', text: 'A new or materially updated testcase moves to Pending QA Recommendation and cannot be used in a cycle until final approval.' },
                 { title: 'Two-stage group approval', text: 'Stage 1 is shared by eligible QA Group members except the author or submitter. After recommendation, Stage 2 moves to the QA Lead Group for final approval, return, or rejection. An Administrator can intervene to recover a blocked workflow.' },
@@ -525,7 +537,7 @@ export default function Help() {
                 { title: 'Add approved test cases', text: 'Open Add Test Cases to load approved candidates on demand. Search and move through cursor-based pages, select individual rows, or use Select all matching. Already-linked and unapproved cases are excluded by the database. Any eligible QA executor may expand an In Progress cycle by entering a required audit reason; existing attempts and evidence remain unchanged, and the new cases start as Not Executed. Blocked and Completed cycles remain locked.' },
                 { title: 'Mark the cycle ready', text: 'A cycle can move from Draft to Ready once it has at least one approved testcase and valid dates. Testcases do not all need to be assigned at this stage.' },
                 { title: 'Assign runners', text: 'While the cycle is Ready, assign each testcase before its execution attempt. Existing Test Management permissions determine who can assign or reassign cases; the selected runner must be an eligible active QA Engineer in the workspace.' },
-                { title: 'Follow the cycle workflow', text: 'Move through Draft → Ready → In Progress. If a Functional Request is linked, it must already be Execution In Progress before Start Execution is allowed. An In Progress cycle can be blocked with a mandatory reason and resumed. Completion checks every result and defect: failed, blocked, or unexecuted cases prevent completion; unresolved severe defects and missing target releases also block it. QA Lead Group reviews eligible residual risk.' },
+                { title: 'Follow the cycle workflow', text: 'Move through Draft → Ready → In Progress. If a Functional Request is linked, it must be Execution In Progress before the cycle can start or complete; this applies to both normal and Conditional Clearance completion. An In Progress cycle can be blocked with a mandatory reason and resumed. Completion checks every result and defect: failed, blocked, or unexecuted cases prevent normal completion; unresolved severe defects and missing target releases also block it. QA Lead Group reviews eligible residual risk.' },
                 { title: 'Execute an attempt', text: 'While the cycle is In Progress, the assigned runner opens the test case, reviews all repository details, and records status, actual result, comments, and evidence. A previously failed case with a linked governed defect needs verification in the same environment before its result can change. The recorded build remains audit evidence but does not need to match the cycle build or a build recorded at another workflow stage.' },
                 { title: 'Use rich Actual Result', text: 'Format text, add bullets, paste images, or upload supported images. Keep results specific enough for another person to reproduce.' },
                 { title: 'Link defects', text: 'For Fail or Blocked outcomes, add the defect reference and explain the observed behavior. Use a new execution attempt for retest history rather than overwriting evidence. Link existing defect also accepts a governed defect that already has a primary execution elsewhere -- it is added as an additional trace on this execution too, without moving its original link.' },
@@ -600,7 +612,7 @@ export default function Help() {
             <ManualSection {...topic('collaboration')}>
               <div className="help-card-grid three">
                 <article><IconEditNote /><h3>Write for the next action</h3><p>State the observation, expected action, owner, and any date or dependency. Avoid comments such as “done” without context.</p></article>
-                <article><IconFolder /><h3>Add usable evidence</h3><p>Paste or upload screenshots at the cursor to place them between surrounding text. Explain what each image or attachment demonstrates.</p></article>
+                <article><IconFolder /><h3>Add usable evidence</h3><p>Paste screenshots at the cursor, or use Attach files to select or drop images, PDFs, Word documents, Excel workbooks, CSV files, text files, and logs. Explain what each attachment demonstrates.</p></article>
                 <article><IconWorkflow /><h3>Preserve the timeline</h3><p>New comments appear immediately in Activity. Workflow decisions and comments remain in chronological audit history.</p></article>
               </div>
               <h3 className="help-subheading">Recommended comment format</h3>
@@ -615,6 +627,9 @@ export default function Help() {
               <ul className="help-check-list">
                 <li><IconCheckCircle />After posting, the editor clears and the new comment is shown immediately.</li>
                 <li><IconCheckCircle />Inline images preserve their position: text → image → more text. Select an image to open the authenticated full-size version.</li>
+                <li><IconCheckCircle />A comment can contain up to eight attachments in total, including inline screenshots. Each file must be 10 MB or smaller. Remove unwanted files before posting; your draft stays available if posting fails.</li>
+                <li><IconCheckCircle />Document cards show the filename, type, and size. Use Preview to open a PDF in a new tab, or Download to save any attachment. You can post attachments with or without comment text.</li>
+                <li><IconCheckCircle />Posted comments and their attachments remain in the audit history. Files follow the record's access permissions and upload timestamps use IST.</li>
                 <li><IconCheckCircle />Tables pasted from supported rich-text content preserve merged rows and columns in the editor, record view, and PDF export.</li>
                 <li><IconCheckCircle />Images from older comments remain available in their attachment gallery even though those records do not contain inline position information.</li>
                 <li><IconCheckCircle />Do not place credentials, secrets, production customer data, or unmasked personal information in comments or screenshots.</li>
@@ -727,7 +742,7 @@ export default function Help() {
                 <div><strong>Import skipped or failed</strong><span>Duplicate, invalid, missing, unsupported, or unapproved data.</span><span>Open the issue summary and correct each row using its displayed reason; do not retry unchanged data.</span></div>
                 <div><strong>Upload path error</strong><span>The deployment-controlled upload path is not absolute, writable, or mounted for the backend container.</span><span>Ask the platform administrator to verify UPLOAD_STORAGE_ROOT and the Docker volume/bind mount; this path is not changed from the portal UI.</span></div>
                 <div><strong>Cannot start or record execution</strong><span>Test case unapproved, project inactive, runner unassigned, environment/build missing, linked Functional Request not Execution In Progress, or linked defect verification incomplete.</span><span>Check the cycle and linked request status, set environment and build, assign an eligible runner, and review the exact defect verification message.</span></div>
-                <div><strong>Cannot complete a cycle</strong><span>Failed, blocked, or unexecuted cases; unresolved Critical/High defects; residual risk without review; or missing target release.</span><span>Open the cycle completion panel to see counts and affected defect IDs, then resolve, retest, review risk, or add the missing release.</span></div>
+                <div><strong>Cannot complete a cycle</strong><span>The linked Functional Request is not Execution In Progress; or there are failed, blocked, or unexecuted cases, unresolved Critical/High defects, residual risk without review, or a missing target release.</span><span>Check the linked request status and open the cycle completion panel for the remaining counts and affected defect IDs, then correct the request stage, resolve or retest evidence, review risk, or add the missing release.</span></div>
                 <div><strong>Cannot upload a document</strong><span>Workspace or parent storage cap is unset or exhausted, or the account lacks a Document Portal contributor role.</span><span>Ask an Administrator to set the cap in Workspace settings; review available capacity and your document role.</span></div>
               </div>
               <Callout title="Excel import storage">

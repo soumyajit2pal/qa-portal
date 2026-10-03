@@ -32,6 +32,7 @@ that renders each one.
 | `approvals.py` | **Governance** (`src/modules/governance/`) | Cross-module workflow-decision feed (`/approvals`, `/approvals/pending-mine`) |
 | `audit.py` | **Governance** (`src/modules/governance/AuditLog.tsx`) | Immutable authentication, API-access, data-change and access-management audit trail |
 | `signoff.py` | **Governance** (`src/modules/governance/`) | Formal QA Clearance issuance, history, documents |
+| `signatures.py` | **Governance** (`src/modules/governance/SignatureVerification.tsx`) | Signature evidence and uploaded PDF integrity verification, with approval visibility checks |
 | `dashboard.py` | `src/Dashboard.tsx` | Project-wise, QA-wise, security, suppression, and 3W ("what's pending, where, since when") dashboards |
 | `reports.py` | **Governance** (`src/modules/governance/Reports.tsx`) | Operational/security/management report data (QA summary, SAST/DAST scan, vulnerability trend, severity distribution, suppression register, monthly KPI, quality scorecard, audit evidence) |
 | `export.py` | **Governance** (`src/modules/governance/Reports.tsx`) | Excel/PDF/CSV export of the above, with RBAC |
@@ -177,6 +178,94 @@ in your local profile. This Oracle container is deliberately
 **not** part of `docker-compose.yml` — it's a one-time local dev prerequisite, not something to
 tear down/recreate alongside the app services.
 
+## SAST repository workflow
+
+One SAST request retains all repositories selected in its QA Request. In **Findings**,
+the repository progress table shows each repository's code reference and state, including
+repositories that have not been scanned. Initial Fortify result retrieval can select one
+or more repositories at a time. The assigned Security Analyst validates the retrieved
+results for selected repositories; zero findings become Clear and nonzero findings remain
+Waiting for fix. Retrieving a partial batch never marks the other repositories clear.
+
+The requester or active delegate can select only repositories whose fixes are ready and
+submit their latest commit/hash. Those repositories enter Ready for rescan; other fixes
+remain pending. The assigned Security Analyst can retrieve and validate selected ready
+rescans while the requester continues work on other repositories. Every import and fix
+submission retains a repository-specific history. Unchanged clear results are retained;
+a changed repository URL, branch or commit makes the previous result stale.
+
+Retrieval imports existing, processed Fortify SSC results; it does not launch the scanner.
+The analyst must select the completed SSC application/version corresponding to the displayed
+repository and code reference. Final completion, reports and QA Clearance require validated,
+current, clear results for every repository in scope. A pending suppression approval still
+blocks fix submission for the request because existing suppressions are linked to requests,
+not individual repositories. DAST retains its existing workflow.
+
+Apply migration `7b8c2d4e6f10` through the existing deployment's `alembic upgrade head`
+procedure before starting the updated backend, then rebuild/restart both services. The
+migration adds durable repository queue, validation and fix-submitter references. Older
+scans without a recorded code identity and validation are shown as stale; retrieve and
+validate current results before using them for new clearance. If an older repository is
+missing its branch or commit, the assigned analyst can capture those missing references
+from the completed scan during retrieval; existing nonempty references cannot be overwritten
+through that dialog. Existing issued certificate
+snapshots remain frozen. For an older completed SAST request with missing or stale repository
+evidence, the assigned analyst can reverify selected repositories; a successful retrieval
+reopens the request for validation and records the reason in its history. Already-clear
+completed repositories and rejected approval stages cannot be reopened this way.
+Rollback retains the new evidence columns.
+
+## Signature verification
+
+Open **Governance → Verify Signature**, use the top-bar shortcut, or follow **Verify this
+signature** from QA Clearance. Enter an `ESIG-...` ID to check the recorded signer,
+decision, timestamp and approval evidence. Upload the original portal PDF (up to 20 MB)
+to also check every byte against the exported document. Results distinguish integrity
+from approvals that have since been replaced, reset or placed under review. Dates use IST.
+Verification requires login and the same workspace/department access as the approval log;
+uploaded files are not retained.
+
+New approval signatures receive a server-generated HMAC-SHA256 seal on insertion. New
+request-detail PDFs containing signatures carry a keyed proof of their exact exported
+bytes and the referenced approval seals. Older approval records are never sealed
+retroactively: their integrity is shown as unconfirmed. A PDF without a proof is also
+unconfirmed. These are portal integrity checks; PDF viewers do not treat them as PKI signatures.
+
+Before starting the updated backend, apply migration `6f2a9c8d1b40` using the existing
+deployment's `alembic upgrade head` procedure, then rebuild/restart backend and frontend.
+The migration adds three nullable approval-evidence columns and a unique signature-ID
+constraint. It preserves existing records; rollback also preserves those evidence columns.
+The signature and SAST repository migrations check for existing columns and constraints,
+so retrying an interrupted Oracle upgrade or upgrading again after an evidence-preserving
+rollback does not recreate existing objects. Offline Oracle scripts include the same checks.
+Optionally set `SIGNATURE_INTEGRITY_KEY` to a dedicated secret of at least 32 characters
+in the deployment secret store **before issuing protected signatures**. Keep it stable,
+back it up, and use the same value in every backend worker. If omitted, the seal key is
+derived from `SECRET_KEY`. Changing the effective key makes earlier signatures/PDFs
+unverifiable, so retain the original key when rotating unrelated authentication secrets.
+
+## Activity attachments
+
+The shared Activity composer accepts multiple files through **Attach files** or drag and
+drop. Supported extensions are PNG, JPG/JPEG, GIF, WebP, PDF, DOC/DOCX, XLS/XLSX, CSV,
+TXT and LOG. Each comment can contain up to eight files in total, including inline
+screenshots, with a 10 MB limit per file. Files can be posted with or without comment
+text and removed from the draft before posting.
+File posts use a bounded ten-minute upload deadline; text-only comments keep the normal
+request deadline. Failed posts retain the draft so the result can be checked before retrying.
+
+Pasted screenshots keep their inline position. Other attachments appear as file cards
+with filename, type and size; PDFs can be previewed in a new browser tab and all files
+can be downloaded. Documents load on demand through authenticated endpoints rather
+than being downloaded with the whole activity feed. Comment text and attachments save
+together, retain their uploader and timestamps, and remain immutable after posting.
+Existing record and workspace access rules apply. Discussion attachments do not replace
+mandatory checklist or workflow evidence.
+
+This change reuses the existing document table and comment attachment storage, including
+older image attachments. No database migration is required; rebuild/redeploy backend
+and frontend together.
+
 ## Quickstart (local dev, no Docker)
 
 Requires Python 3.14.x, Node 26.x, and a reachable Oracle database (see above).
@@ -252,6 +341,13 @@ any configuration values or secrets.
 ### Logging modes
 
 Backend logging is controlled by the active environment profile:
+
+Portal screens, PDF/Excel/CSV exports, and application/Uvicorn logs use IST
+(Asia/Kolkata), regardless of the browser or server timezone. Log timestamps
+include the `IST` label. API timestamps use the equivalent `+05:30` offset.
+Containers also use `TZ=Asia/Kolkata`, including nginx. Rebuild the images and
+restart the services to apply these settings; existing log lines retain their
+original timestamps.
 
 ```dotenv
 DEEP_LOGGING=false

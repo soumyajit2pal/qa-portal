@@ -192,6 +192,11 @@ export function isAdminAuthorizationRequest(path: string, method: string = 'GET'
   if (verb !== 'GET' && /^\/api\/checklist-config(?:\/|$)/.test(pathname)) return true
   if (verb !== 'GET' && /^\/api\/request-type-config(?:\/|$)/.test(pathname)) return true
   if (pathname === '/api/audit/user-access-report') return true
+  // The user-facing /current route is intentionally available to every
+  // authenticated portal role. The configuration envelope and both
+  // mutations are System Administrator operations.
+  if (pathname === '/api/system-settings/maintenance-window' && (verb === 'GET' || verb === 'PUT')) return true
+  if (pathname === '/api/system-settings/maintenance-window/cancel' && verb === 'POST') return true
   if (verb === 'POST' && pathname === '/api/application-names') return true
   if (/^\/api\/application-names\/\d+\/(?:department|name)$/.test(pathname) && verb === 'PATCH') return true
   if (pathname === '/api/application-names/bulk-seed-template') return true
@@ -449,6 +454,9 @@ function triggerDownload(blob: Blob, filename: string) {
 
 export const api = {
   get: <T = any>(path: string): Promise<T> => request<T>(path),
+  // Revisioned admin editors must always compare against the origin's latest
+  // envelope, especially while recovering from an optimistic-lock conflict.
+  getFresh: <T = any>(path: string): Promise<T> => request<T>(path, { cache: false }),
   // Pickers and exports need the complete authorized result set. Keep this
   // separate from normal tables, which should retain server-side paging.
   getAll: <T = any>(path: string): Promise<T[]> =>
@@ -560,7 +568,7 @@ export const api = {
   // Authenticated Blob fetch used when a protected file must be displayed
   // inline (for example, images pasted into a Jira-style comment). Fetching
   // here provides normal API error handling and a revocable object URL.
-  getBlob: (path: string): Promise<Blob> => request<Blob>(path, { isBlob: true }),
+  getBlob: (path: string, timeoutMs?: number): Promise<Blob> => request<Blob>(path, { isBlob: true, timeoutMs }),
 
   // Uploads a single named file plus optional extra form fields -- unlike
   // uploadFiles above (always field name 'files', no other data), this is
@@ -646,20 +654,21 @@ export const api = {
   }),
 
   // Multipart form with repeatable file fields. Used by rich comments,
-  // where formatted body text and several pasted images are submitted as
+  // where formatted body text and attachments are submitted as
   // one atomic user action.
   uploadFormFiles: <T = any>(
     path: string,
     fields: Record<string, string | undefined | null>,
     files: File[],
     fileField: string = 'files',
+    timeoutMs?: number,
   ): Promise<T> => {
     const form = new FormData()
     Object.entries(fields).forEach(([key, value]) => {
       if (value !== undefined && value !== null) form.append(key, value)
     })
     files.forEach((file) => form.append(fileField, file))
-    return request<T>(path, { method: 'POST', body: form, formEncoded: true })
+    return request<T>(path, { method: 'POST', body: form, formEncoded: true, timeoutMs })
   },
 }
 
