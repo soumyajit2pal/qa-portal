@@ -6,7 +6,7 @@ import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { hasWorkflowRole as hasRole, SUPPRESSION_REQUESTER_CONTROLLED_STATUSES, SUPPRESSION_TERMINAL_STATUSES } from '../../constants'
 import { EmptyState, ErrorText, Field, Modal, Table, TableColumn } from '../../components/Common'
-import { SASTRepositoryStateOut, SecurityScanResultOut, SecurityScanSummaryOut, SecurityTargetScanIn, SuppressionOut } from '../../types'
+import { DASTTargetStateOut, SASTRepositoryStateOut, SecurityScanResultOut, SecurityScanSummaryOut, SecurityTargetScanIn, SuppressionOut } from '../../types'
 import { REPOSITORY_STATE_LABELS, repositoriesForAction, selectedRepositoryRows, repositorySelectionComplete, scanFindingViews, securityAuditorCurrentFindings } from './sastRepositoryWorkflow'
 
 // One row per scan and Fortify filter set in Scan History
@@ -49,18 +49,21 @@ function targetNeedsRemediation(id: number | undefined, scans: SecurityScanResul
   return !previous || Math.max(previous.total_count || 0, ...previous.filters.map(filter => filter.total_count || 0)) > 0
 }
 
-export function SecurityFixDialog({ kind, targets, currentScans, repositoryStates, onClose, onSubmit }: {
+export function SecurityFixDialog({ kind, targets, repositoryStates, targetStates, onClose, onSubmit }: {
   kind: 'SAST' | 'DAST'
   targets: { id: number; label: string; previousCommit?: string | null }[]
   currentScans: SecurityScanResultOut[]
   repositoryStates?: SASTRepositoryStateOut[]
+  targetStates?: DASTTargetStateOut[]
   onClose: () => void
   onSubmit: (targets: { target_id: number; commit_id: string }[]) => Promise<void>
 }) {
   const isSAST = kind === 'SAST'
-  const [rows, setRows] = useState(() => targets.filter(target => isSAST
-    ? repositoriesForAction(repositoryStates || [], 'fix').some(row => row.target_id === target.id)
-    : targetNeedsRemediation(target.id, currentScans)).map(target => ({ ...target, commitId: '', selected: !isSAST })))
+  const states = isSAST ? repositoryStates || [] : targetStates || []
+  const noun = isSAST ? 'repositories' : 'targets'
+  const [rows, setRows] = useState(() => targets.filter(target =>
+    repositoriesForAction(states, 'fix').some(row => row.target_id === target.id)
+  ).map(target => ({ ...target, commitId: '', selected: false })))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const selected = selectedRepositoryRows(rows)
@@ -75,24 +78,24 @@ export function SecurityFixDialog({ kind, targets, currentScans, repositoryState
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
-  return <Modal title={isSAST ? 'Submit Repository Fixes' : `Mark ${kind} Fixes Complete`} onClose={() => { if (!busy) onClose() }} variant="dialog" preventBackdropClose wide>
+  return <Modal title={isSAST ? 'Submit Repository Fixes' : 'Submit Target Fixes'} onClose={() => { if (!busy) onClose() }} variant="dialog" preventBackdropClose wide>
     <form className="security-scan-start" onSubmit={submit} aria-busy={busy}>
-      <div className="security-scan-intro"><strong>{isSAST ? 'Select only repositories whose fixes are ready' : 'Identify the code containing each fix'}</strong><span>{isSAST ? 'Enter the latest commit ID or code hash only for selected repositories. Other repositories keep their findings and current progress.' : 'Enter the source commit ID or deployed artifact hash containing the fix for each application URL.'} These references will be recorded with your name and submission date in the activity history.</span></div>
-      {targets.length > rows.length && <p className="muted small">{isSAST ? 'Repositories at other stages keep their current progress and do not require a code reference for this fix submission.' : 'Already-clear targets remain unchanged and do not require a new code reference.'}</p>}
-      {rows.map((row, index) => <div className="security-scan-target-row" key={row.id}>
-        {isSAST ? <label className="security-scan-target-choice"><input type="checkbox" checked={row.selected} disabled={busy} onChange={event => setRows(current => current.map(target => target.id === row.id ? { ...target, selected: event.target.checked } : target))} /><span><strong>{row.label}</strong><small>{REPOSITORY_STATE_LABELS[(repositoryStates || []).find(state => state.target_id === row.id)!.state]}</small></span></label> : <strong>{row.label}</strong>}
+      <div className="security-scan-intro"><strong>{isSAST ? 'Select only repositories whose fixes are ready' : 'Select only application URLs whose fixes are ready'}</strong><span>{isSAST ? 'Enter the latest commit ID or code hash only for selected repositories. Other repositories keep their findings and current progress.' : 'Enter the source commit ID or deployed artifact hash containing the fix only for selected application URLs. Other targets keep their findings and current progress.'} These references will be recorded with your name and submission date in the activity history.</span></div>
+      {targets.length > rows.length && <p className="muted small">{isSAST ? 'Repositories' : 'Targets'} at other stages keep their current progress and do not require a code reference for this fix submission.</p>}
+      {rows.map(row => <div className="security-scan-target-row" key={row.id}>
+        <label className="security-scan-target-choice"><input type="checkbox" checked={row.selected} disabled={busy} onChange={event => setRows(current => current.map(target => target.id === row.id ? { ...target, selected: event.target.checked } : target))} /><span><strong>{row.label}</strong><small>{REPOSITORY_STATE_LABELS[states.find(state => state.target_id === row.id)!.state]}</small></span></label>
         {row.previousCommit && <p className="muted small">Previously recorded commit: {row.previousCommit}</p>}
-        {row.selected && <Field label="Latest commit ID / code hash *"><input required maxLength={500} autoFocus={!isSAST && index === 0} disabled={busy} value={row.commitId} onChange={event => setRows(current => current.map(target => target.id === row.id ? { ...target, commitId: event.target.value } : target))} placeholder="Commit ID or code/artifact hash" /></Field>}
+        {row.selected && <Field label="Latest commit ID / code hash *"><input required maxLength={500} disabled={busy} value={row.commitId} onChange={event => setRows(current => current.map(target => target.id === row.id ? { ...target, commitId: event.target.value } : target))} placeholder="Commit ID or code/artifact hash" /></Field>}
       </div>)}
       {!rows.length && <p>No target is awaiting remediation. Refresh the findings before continuing.</p>}
-      <p className="muted small">{isSAST ? `${selected.length} of ${rows.length} eligible repositories selected. The Security Analyst can rescan these while other fixes remain in progress.` : 'Submitting returns the request to the assigned Security Analyst for rescan.'}</p>
+      <p className="muted small">{selected.length} of {rows.length} eligible {noun} selected. The Security Analyst can rescan these while other fixes remain in progress.</p>
       <ErrorText error={error} />
-      <div className="modal-actions"><button className="btn btn-primary" disabled={busy || !complete}>{busy ? 'Submitting…' : isSAST ? 'Submit Selected Fixes & Request Rescan' : 'Mark Fixed & Send for Rescan'}</button><button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button></div>
+      <div className="modal-actions"><button className="btn btn-primary" disabled={busy || !complete}>{busy ? 'Submitting…' : 'Submit Selected Fixes & Request Rescan'}</button><button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button></div>
     </form>
   </Modal>
 }
 
-export function SecurityScanDialog({ kind, mode = 'start', initialApplicationName, targets, initialScans, repositoryStates, reverification = false, busy, error, onClose, onStart }: {
+export function SecurityScanDialog({ kind, mode = 'start', initialApplicationName, targets, initialScans, repositoryStates, targetStates, reverification = false, busy, error, onClose, onStart }: {
   kind: 'SAST' | 'DAST'
   // 2026-08 "Findings Validation" doc -- Rescan re-uses this exact dialog
   // (same Application Name/Version identity, same SSC import call) rather
@@ -103,6 +106,7 @@ export function SecurityScanDialog({ kind, mode = 'start', initialApplicationNam
   targets: { id: number; label: string; detail?: string | null }[]
   initialScans?: SecurityScanResultOut[]
   repositoryStates?: SASTRepositoryStateOut[]
+  targetStates?: DASTTargetStateOut[]
   reverification?: boolean
   busy: boolean
   error: unknown
@@ -112,16 +116,14 @@ export function SecurityScanDialog({ kind, mode = 'start', initialApplicationNam
   const previousByTarget = new Map((initialScans || []).flatMap(scan => scan.targets.map(target => [target.id, scan] as const)))
   const isRescan = mode === 'rescan'
   const isSAST = kind === 'SAST'
-  const pendingTargets = targets.filter(target => {
-    if (isSAST) return repositoriesForAction(repositoryStates || [], isRescan ? 'rescan' : 'start').some(row => row.target_id === target.id)
-    if (!isRescan) return true
-    return targetNeedsRemediation(target.id, initialScans || [])
-  })
+  const states = isSAST ? repositoryStates || [] : targetStates || []
+  const noun = isSAST ? 'repositories' : 'targets'
+  const pendingTargets = targets.filter(target => repositoriesForAction(states, isRescan ? 'rescan' : 'start').some(row => row.target_id === target.id))
   const retainedTargets = targets.filter(target => !pendingTargets.some(pending => pending.id === target.id))
   const [rows, setRows] = useState(() => pendingTargets.map(target => {
     const previous = previousByTarget.get(target.id)
     const repository = repositoryStates?.find(row => row.target_id === target.id)
-    return { ...target, selected: !isSAST, applicationName: previous?.application_name || initialApplicationName || '', applicationVersion: previous?.application_version || '', needsBranch: isSAST && !repository?.git_branch?.trim(), needsCommit: isSAST && !repository?.commit_id?.trim(), gitBranch: repository?.git_branch || '', commitId: repository?.commit_id || '' }
+    return { ...target, selected: false, applicationName: previous?.application_name || initialApplicationName || '', applicationVersion: previous?.application_version || '', needsBranch: isSAST && !repository?.git_branch?.trim(), needsCommit: isSAST && !repository?.commit_id?.trim(), gitBranch: repository?.git_branch || '', commitId: repository?.commit_id || '' }
   }))
 
   function update(id: number, values: Partial<(typeof rows)[number]>) {
@@ -138,25 +140,23 @@ export function SecurityScanDialog({ kind, mode = 'start', initialApplicationNam
   }
 
   return (
-    <Modal title={isSAST ? reverification ? 'Reverify Repository Results' : isRescan ? 'Retrieve Selected Repository Rescans' : 'Retrieve Repository Scan Results' : isRescan ? `Rescan ${kind} Request` : `Start ${kind} Scan`} onClose={() => { if (!busy) onClose() }} variant="dialog" preventBackdropClose wide>
+    <Modal title={reverification ? isSAST ? 'Reverify Repository Results' : 'Reverify Target Results' : isRescan ? isSAST ? 'Retrieve Selected Repository Rescans' : 'Retrieve Selected Target Rescans' : isSAST ? 'Retrieve Repository Scan Results' : 'Retrieve Target Scan Results'} onClose={() => { if (!busy) onClose() }} variant="dialog" preventBackdropClose wide>
       <form className="security-scan-start" onSubmit={submit} aria-busy={busy}>
         <div className="security-scan-intro">
           <strong>{isRescan ? 'Re-import the latest Fortify SSC analysis' : 'Import the matching Fortify SSC analysis'}</strong>
           <span>
-            {isSAST ? 'Select only repositories with completed Fortify results ready to retrieve. Enter Fortify details only for selected repositories; unselected results and pending work stay unchanged.' : isRescan
-              ? 'Only targets with findings pending are rescanned. Confirm their Fortify Application Name and Version.'
-              : 'Select the targets scanned and enter the exact Fortify Application Name and Version for each one. Every target is imported independently.'}
+            Select only {noun} with completed Fortify results ready to retrieve. Enter Fortify details only for selected {noun}; unselected results and pending work stay unchanged.
           </span>
         </div>
         <fieldset className="security-scan-targets">
           <legend>{kind === 'SAST' ? 'Repository scans *' : 'URL scans *'}</legend>
-          <p className="muted small">{isSAST ? 'Each selected repository produces its own result and history entry. You can retrieve remaining repositories in another batch.' : isRescan ? 'Each pending target produces its own new result and history entry.' : 'Every configured target requires a separate Fortify scan and produces its own findings.'}</p>
-          {retainedTargets.length > 0 && <p className="muted small">{isSAST ? 'Other repositories keep their current progress:' : 'Already clear — latest results retained, no new scan history:'} {retainedTargets.map(target => target.label).join(', ')}</p>}
-          {rows.length ? rows.map((row, index) => (
+          <p className="muted small">Each selected {isSAST ? 'repository' : 'target'} produces its own result and history entry. You can retrieve remaining {noun} in another batch.</p>
+          {retainedTargets.length > 0 && <p className="muted small">Other {noun} keep their current progress: {retainedTargets.map(target => target.label).join(', ')}</p>}
+          {rows.length ? rows.map(row => (
             <div className="security-scan-target-row" key={row.id}>
-              <label className="security-scan-target-choice">{isSAST && <input type="checkbox" disabled={busy} checked={row.selected} onChange={event => update(row.id, { selected: event.target.checked })} />}<span><strong>{row.label}</strong>{row.detail && <small>{row.detail}</small>}</span></label>
+              <label className="security-scan-target-choice"><input type="checkbox" disabled={busy} checked={row.selected} onChange={event => update(row.id, { selected: event.target.checked })} /><span><strong>{row.label}</strong>{row.detail && <small>{row.detail}</small>}</span></label>
               {row.selected && <div className="form-row">
-                <Field label="Fortify Application Name *"><input autoFocus={!isSAST && index === 0} required disabled={busy} value={row.applicationName} onChange={event => update(row.id, { applicationName: event.target.value })} placeholder="Exact Fortify application name" /></Field>
+                <Field label="Fortify Application Name *"><input required disabled={busy} value={row.applicationName} onChange={event => update(row.id, { applicationName: event.target.value })} placeholder="Exact Fortify application name" /></Field>
                 <Field label="Fortify Application Version *"><input required disabled={busy} value={row.applicationVersion} onChange={event => update(row.id, { applicationVersion: event.target.value })} placeholder="For example: 1, 1.1 or 2026.08" /></Field>
               </div>}
               {row.selected && (row.needsBranch || row.needsCommit) && <>
@@ -167,15 +167,15 @@ export function SecurityScanDialog({ kind, mode = 'start', initialApplicationNam
                 </div>
               </>}
             </div>
-          )) : <span className="muted">{isSAST ? 'No repository is eligible for this action. Refresh repository progress before continuing.' : isRescan ? 'Every target is already clear. No rescan is required.' : 'No configured scan target is available. Add one in request details before starting the scan.'}</span>}
+          )) : <span className="muted">No {isSAST ? 'repository' : 'target'} is eligible for this action. Refresh {isSAST ? 'repository' : 'target'} progress before continuing.</span>}
         </fieldset>
         <p className="muted small">Every selected application/version must already exist and have processed results in Fortify SSC. Nothing is saved if any target import fails.</p>
-        {isSAST && reverification && <p className="muted small">Retrieving these results will reopen this SAST request for findings validation. Select only repositories needing current evidence.</p>}
-        {isSAST && <p className="muted small">{selected.length} of {rows.length} eligible repositories selected.</p>}
+        {reverification && <p className="muted small">Retrieving these results will reopen this {kind} request for findings validation. Select only {noun} needing current evidence.</p>}
+        <p className="muted small">{selected.length} of {rows.length} eligible {noun} selected.</p>
         <ErrorText error={error} />
         <div className="modal-actions">
           <button className="btn btn-primary" disabled={busy || !complete}>
-            {busy ? <><span className="api-activity-spinner" aria-hidden="true" /> Importing SSC Results…</> : isSAST ? 'Retrieve Selected Results' : (isRescan ? 'Rescan' : 'Validate & Start Scan')}
+            {busy ? <><span className="api-activity-spinner" aria-hidden="true" /> Importing SSC Results…</> : 'Retrieve Selected Results'}
           </button>
           <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
         </div>
@@ -187,7 +187,8 @@ export function SecurityScanDialog({ kind, mode = 'start', initialApplicationNam
 
 const FINDING_COUNT_COLUMNS = ['critical_count', 'high_count', 'medium_count', 'low_count', 'total_count'] as const
 
-export function SASTRepositoryProgress({ states, results, allClear, canStart, canValidate, reverification = false, busy, onStart, onValidate }: {
+function SecurityTargetProgress({ kind, states, results, allClear, canStart, canValidate, reverification = false, busy, onStart, onValidate }: {
+  kind: 'SAST' | 'DAST'
   states: SASTRepositoryStateOut[]
   results: SecurityScanResultOut[]
   allClear: boolean
@@ -198,6 +199,9 @@ export function SASTRepositoryProgress({ states, results, allClear, canStart, ca
   onStart: () => void
   onValidate: (targetIds: number[]) => void
 }) {
+  const isSAST = kind === 'SAST'
+  const noun = isSAST ? 'repository' : 'target'
+  const plural = isSAST ? 'repositories' : 'targets'
   const [selected, setSelected] = useState<number[]>([])
   const eligible = repositoriesForAction(states, 'validate').map(row => row.target_id)
   const validationVersion = repositoriesForAction(states, 'validate').map(row => `${row.target_id}:${row.latest_scan_id ?? ''}`).join('|')
@@ -206,29 +210,37 @@ export function SASTRepositoryProgress({ states, results, allClear, canStart, ca
   const selectedIds = selected.filter(id => eligible.includes(id))
   const clearCount = states.filter(row => row.state === 'CLEAR').length
 
-  return <section className="sast-repository-progress" aria-label="Repository progress">
-    <header><div><strong>Repository progress</strong><p>Each repository moves independently. Unselected repositories retain their findings and pending work.</p></div><span className={allClear ? 'complete' : ''}>{clearCount} / {states.length} clear</span></header>
+  return <section className="sast-repository-progress" aria-label={isSAST ? 'Repository progress' : 'Target progress'}>
+    <header><div><strong>{isSAST ? 'Repository progress' : 'Target progress'}</strong><p>Each {noun} moves independently. Unselected {plural} retain their findings and pending work.</p></div><span className={allClear ? 'complete' : ''}>{clearCount} / {states.length} clear</span></header>
     <div className="sast-repository-progress-scroll"><table>
-      <thead><tr>{canValidate && <th scope="col">Validate</th>}<th scope="col">Repository</th><th scope="col">Progress</th><th scope="col">Branch / current commit</th><th scope="col">Latest import</th><th scope="col">Active findings<small>Security Auditor View → Current Result</small></th></tr></thead>
+      <thead><tr>{canValidate && <th scope="col">Validate</th>}<th scope="col">{isSAST ? 'Repository' : 'Application URL'}</th><th scope="col">Progress</th><th scope="col">{isSAST ? 'Branch / current commit' : 'Deployed code / artifact hash'}</th><th scope="col">Latest import</th><th scope="col">Active findings<small>Security Auditor View → Current Result</small></th></tr></thead>
       <tbody>{states.map(row => {
         const scan = results.find(result => result.id === row.latest_scan_id)
         return <tr key={row.target_id}>
           {canValidate && <td>{row.state === 'AWAITING_VALIDATION' ? <input type="checkbox" aria-label={`Validate ${row.label}`} checked={selectedIds.includes(row.target_id)} disabled={busy} onChange={event => setSelected(current => event.target.checked ? [...current.filter(id => id !== row.target_id), row.target_id] : current.filter(id => id !== row.target_id))} /> : '—'}</td>}
           <th scope="row">{row.label}</th>
           <td><span className={`sast-repository-state state-${row.state.toLowerCase()}`}>{REPOSITORY_STATE_LABELS[row.state]}</span>{row.fix_submitted_at && row.state === 'READY_FOR_RESCAN' && <small>Fix submitted {formatDateTimeIST(row.fix_submitted_at)}</small>}</td>
-          <td>{row.git_branch || '—'}<small>{row.commit_id || 'Commit not recorded'}</small></td>
+          <td>{isSAST ? <>{row.git_branch || '—'}<small>{row.commit_id || 'Commit not recorded'}</small></> : row.commit_id || 'Hash not recorded'}</td>
           <td>{scan ? formatDateTimeIST(scan.imported_at) : row.latest_scan_id ? 'Import recorded' : 'Not imported'}</td>
           <td>{row.state === 'NOT_SCANNED' ? '—' : securityAuditorCurrentFindings(scan) ?? '—'}</td>
         </tr>
       })}</tbody>
     </table></div>
-    <p className="security-findings-note">{allClear ? 'Every repository has a current, validated clear result.' : 'Overall clearance requires a current, validated clear result for every repository. Repositories without a scan or with a changed branch/commit remain pending.'}</p>
+    <p className="security-findings-note">{allClear ? `Every ${noun} has a current, validated clear result.` : isSAST ? 'Overall clearance requires a current, validated clear result for every repository. Repositories without a scan or with a changed branch/commit remain pending.' : 'Overall clearance requires a current, validated clear result for every application URL. Targets without a scan or with changed scan details remain pending.'}</p>
     {(canStart || canValidate) && <div className="security-scan-actions">
-      {canStart && <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={onStart}>{reverification ? 'Reverify Repository Results' : 'Retrieve Repository Results'}</button>}
+      {canStart && <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={onStart}>{reverification ? isSAST ? 'Reverify Repository Results' : 'Reverify Target Results' : isSAST ? 'Retrieve Repository Results' : 'Retrieve Target Results'}</button>}
       {canValidate && <button type="button" className="btn btn-primary btn-sm" disabled={busy || !selectedIds.length} onClick={() => onValidate(selectedIds)}>Validate Selected Findings ({selectedIds.length})</button>}
-      {canValidate && <p className="muted small">Select the imported repositories you have reviewed. Other repositories keep their current progress.</p>}
+      {canValidate && <p className="muted small">Select the imported {plural} you have reviewed. Other {plural} keep their current progress.</p>}
     </div>}
   </section>
+}
+
+export function SASTRepositoryProgress(props: Omit<React.ComponentProps<typeof SecurityTargetProgress>, 'kind'>) {
+  return <SecurityTargetProgress {...props} kind="SAST" />
+}
+
+export function DASTTargetProgress(props: Omit<React.ComponentProps<typeof SecurityTargetProgress>, 'kind'>) {
+  return <SecurityTargetProgress {...props} kind="DAST" />
 }
 
 function TargetFindings({ scan, initialScan, repositoryState }: { scan: SecurityScanResultOut; initialScan?: SecurityScanResultOut; repositoryState?: SASTRepositoryStateOut }) {
@@ -307,6 +319,7 @@ export function SecurityFindingsNextAction({
   hasWorkflowAction,
   onOpen,
   repositoryProgress,
+  targetProgress,
 }: {
   status: string
   activeCount: number
@@ -314,10 +327,13 @@ export function SecurityFindingsNextAction({
   hasWorkflowAction: boolean
   onOpen: () => void
   repositoryProgress?: { clear: number; total: number }
+  targetProgress?: { clear: number; total: number }
 }) {
-  const nextStep = repositoryProgress ? {
-    title: `Repository progress: ${repositoryProgress.clear} of ${repositoryProgress.total} clear`,
-    description: 'Open Findings to retrieve, validate or submit fixes for selected repositories. Other repositories keep their progress; analyst rescans and developer fixes can proceed independently.',
+  const progress = repositoryProgress || targetProgress
+  const noun = repositoryProgress ? 'repositories' : 'application URLs'
+  const nextStep = progress ? {
+    title: `${repositoryProgress ? 'Repository' : 'Target'} progress: ${progress.clear} of ${progress.total} clear`,
+    description: `Open Findings to retrieve, validate or submit fixes for selected ${noun}. Other ${noun} keep their progress; analyst rescans and developer fixes can proceed independently.`,
   } : FINDINGS_NEXT_STEP[status] || {
     title: 'Review the latest scan findings',
     description: 'Open Findings to view the latest Fortify results, suppressed findings, and scan history.',
@@ -585,6 +601,8 @@ export function SecurityScanResults({
   const initial = summary.initial
   const currentResults = summary.current_results?.length ? summary.current_results : [current]
   const initialResults = summary.initial_results?.length ? summary.initial_results : [initial]
+  const progressStates = (kind === 'SAST' ? summary.repository_states : summary.target_states) || []
+  const totalTargets = kind === 'SAST' ? summary.total_repositories : summary.total_targets
   const targetLabel = (scan: SecurityScanResultOut) => scan.targets?.[0]?.label || 'Legacy target not captured'
 
   return (
@@ -621,7 +639,7 @@ export function SecurityScanResults({
               Validate Findings becomes available again on the fresh data. */}
           {canRescan && (
             <button className="btn btn-sm" disabled={busy} onClick={onRescan}>
-              {kind === 'SAST' ? 'Retrieve Ready Rescans' : 'Rescan'}
+              Retrieve Ready Rescans
             </button>
           )}
           {/* Waiting For Fix -> the requester's own choice: fix and mark
@@ -658,12 +676,12 @@ export function SecurityScanResults({
               Rejected -- so this is disabled the same way Initiate above is. */}
           {canMarkFixed && (
             <button className="btn btn-primary btn-sm" disabled={busy || hasOpenSuppression} onClick={onMarkFixed}>
-              {kind === 'SAST' ? 'Submit Repository Fixes' : 'Mark Fixed (send to Rescan)'}
+              {kind === 'SAST' ? 'Submit Repository Fixes' : 'Submit Target Fixes'}
             </button>
           )}
           {(canInitiateSuppression || canMarkFixed) && hasOpenSuppression && (
             <p className="security-scan-suppression-blocked">
-              {kind === 'SAST' && 'The linked suppression applies to this request: submitting repository fixes is blocked until it is resolved. '}
+              The linked suppression applies to this request: submitting {kind === 'SAST' ? 'repository' : 'target'} fixes is blocked until it is resolved.{' '}
               {requesterActionSuppressionIds?.length ? <>
                 Suppression requires requester action:{' '}
                 {requesterActionSuppressionIds.map((suppressionId, index) => <React.Fragment key={suppressionId}>
@@ -692,14 +710,14 @@ export function SecurityScanResults({
           {canInitiateSuppression && !hasOpenSuppression && hasDoneSuppression && (
             <p className="security-scan-suppression-blocked">
               This request already has an approved suppression{doneSuppressionIds && doneSuppressionIds.length > 0 ? `: ${doneSuppressionIds.join(', ')}` : ''} --
-              {kind === 'SAST' ? 'submit the affected repository fixes for the Security Analyst to rescan.' : 'reassign it to the Security Analyst via Mark Fixed instead of raising another one.'}
+              submit the affected {kind === 'SAST' ? 'repository' : 'target'} fixes for the Security Analyst to rescan.
             </p>
           )}
         </div>
       )}
       <div className="security-findings-overview" aria-label="Target findings overview">
-        <span><b>{kind === 'SAST' ? summary.total_repositories ?? currentResults.length : currentResults.length}</b> {kind === 'SAST' ? 'repositories in scope' : 'application URLs'}</span>
-        {kind === 'SAST' ? <><span className="pending"><b>{summary.repository_states?.filter(row => row.state !== 'CLEAR').length ?? currentResults.length}</b> pending</span><span className="clear"><b>{summary.repository_states?.filter(row => row.state === 'CLEAR').length ?? 0}</b> clear</span></> : <><span className="pending"><b>{currentResults.filter(scan => targetNeedsRemediation(scan.targets?.[0]?.id, [scan])).length}</b> with findings pending</span><span className="clear"><b>{currentResults.filter(scan => !targetNeedsRemediation(scan.targets?.[0]?.id, [scan])).length}</b> clear</span></>}
+        <span><b>{totalTargets ?? currentResults.length}</b> {kind === 'SAST' ? 'repositories in scope' : 'application URLs'}</span>
+        <span className="pending"><b>{progressStates.length ? progressStates.filter(row => row.state !== 'CLEAR').length : totalTargets ?? currentResults.length}</b> pending</span><span className="clear"><b>{progressStates.filter(row => row.state === 'CLEAR').length}</b> clear</span>
       </div>
       <p className="security-findings-note">Review one target at a time. Fortify views can overlap; their totals are shown separately and are not added together.</p>
       <div className="security-findings-targets">
@@ -708,8 +726,8 @@ export function SecurityScanResults({
           const initialScan = initialResults.find(first => targetId != null
             ? first.targets.some(target => target.id === targetId)
             : first.id === initial.id)
-          const repositoryState = kind === 'SAST' ? summary.repository_states?.find(row => row.target_id === targetId)
-            || { target_id: targetId ?? -1, label: targetLabel(scan), state: 'AWAITING_VALIDATION' as const, open_findings: scan.total_count } : undefined
+          const repositoryState = progressStates.find(row => row.target_id === targetId)
+            || { target_id: targetId ?? -1, label: targetLabel(scan), state: 'AWAITING_VALIDATION' as const, open_findings: scan.total_count }
           return <TargetFindings key={scan.id} scan={scan} initialScan={initialScan} repositoryState={repositoryState} />
         })}
       </div>

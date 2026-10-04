@@ -22,7 +22,10 @@ _DEPARTMENTS_CACHE_TTL = 300
 
 
 def _invalidate_departments_cache() -> None:
-    cache.delete(_DEPARTMENTS_CACHE_KEY)
+    # Renames cascade to application ownership, checklist requirements and
+    # request visibility; their cached snapshots must move together.
+    cache.invalidate(cache.DEPARTMENTS_FAMILY, cache.APPLICATIONS_FAMILY,
+                     cache.CHECKLIST_FAMILY, cache.DASHBOARD_FAMILY)
 
 
 def _department_identity(value: str) -> str:
@@ -129,13 +132,10 @@ def list_departments(db: Session = Depends(get_db), current_user: models.User = 
     """Active departments only -- used by every department picker in the app
     (Admin > Create User / assign department, etc). Replaces the old hardcoded
     constants.DEPARTMENTS list."""
-    cached = cache.get_json(_DEPARTMENTS_CACHE_KEY)
-    if cached is not None:
-        return cached
-    rows = db.query(models.Department).options(selectinload(models.Department.units)).filter(models.Department.is_active == True).order_by(models.Department.name).all()  # noqa: E712
-    result = [schemas.DepartmentOut.model_validate(row).model_dump(mode="json") for row in rows]
-    cache.set_json(_DEPARTMENTS_CACHE_KEY, result, _DEPARTMENTS_CACHE_TTL)
-    return result
+    def load():
+        rows = db.query(models.Department).options(selectinload(models.Department.units)).filter(models.Department.is_active == True).order_by(models.Department.name).all()  # noqa: E712
+        return [schemas.DepartmentOut.model_validate(row).model_dump(mode="json") for row in rows]
+    return cache.cached_json(cache.DEPARTMENTS_FAMILY, _DEPARTMENTS_CACHE_KEY, load, _DEPARTMENTS_CACHE_TTL)
 
 
 @router.get("/all", response_model=List[schemas.DepartmentOut])

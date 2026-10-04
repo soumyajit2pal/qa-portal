@@ -706,6 +706,22 @@ export interface SASTRepositoryStateOut {
   fix_submitted_by_id?: number | null
 }
 
+export type DASTTargetState = SASTRepositoryState
+
+export interface DASTTargetStateOut {
+  target_id: number
+  label: string
+  state: DASTTargetState
+  // The deployed code or artifact hash submitted for this URL's latest fix.
+  commit_id?: string | null
+  environment?: string | null
+  authentication_required?: string | null
+  latest_scan_id?: number | null
+  open_findings: number
+  fix_submitted_at?: string | null
+  fix_submitted_by_id?: number | null
+}
+
 export interface SecurityTargetScanIn {
   target_id: number
   application_name: string
@@ -722,13 +738,18 @@ export interface SecurityScanSummaryOut {
   total_rescans: number
   open_findings: number
   suppressed_findings: number
-  // SAST tracks progress independently for every repository. Optional for DAST.
+  // Progress is independent for every repository or application URL.
   repository_states?: SASTRepositoryStateOut[]
   total_repositories?: number
   clear_repositories?: number
   ready_for_rescan?: number
   unscanned_repositories?: number
   all_repositories_clear?: boolean
+  target_states?: DASTTargetStateOut[]
+  total_targets?: number
+  clear_targets?: number
+  unscanned_targets?: number
+  all_targets_clear?: boolean
 }
 
 // One repository row -- replaces the old design where Repository URL/
@@ -840,6 +861,7 @@ export interface DASTTargetOut {
   id: number
   application_url: string
   environment?: string | null
+  commit_id?: string | null
   // "Yes"/"No" -- no longer a plain boolean.
   authentication_required?: string | null
   // Sensitive -- only populated by the API for the requester or a security
@@ -852,6 +874,7 @@ export interface DASTTargetOut {
 export interface DASTTargetIn {
   application_url?: string | null
   environment?: string | null
+  commit_id?: string | null
   authentication_required?: string | null
   test_credentials?: string | null
 }

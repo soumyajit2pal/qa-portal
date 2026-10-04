@@ -24,7 +24,7 @@ from .. import application_names as app_names
 from .. import reassignment
 from ..fortify_ssc import FortifySSCClient, FortifySSCError
 from ..workflow_authority import is_system_admin
-from ..security_scan_state import repository_states, all_repositories_clear
+from ..security_scan_state import repository_states, target_states, dast_target_identity
 
 router = APIRouter(tags=["sast-dast"])
 
@@ -503,7 +503,7 @@ def _sm_decision(db: Session, obj, payload, current_user):
 
 
 def _department_head_decision(db: Session, obj, payload, current_user):
-    """Approval requires assignment to an active QA Lead from the active workspace."""
+    """Department Head approves the request for the workspace's QA Lead group."""
     _require_visible(db, obj, current_user)
     require_same_department(current_user, obj.department)
     require_department_unit_action_scope(
@@ -535,6 +535,7 @@ def _start_readiness(db: Session, obj, current_user):
     _require_visible(db, obj, current_user)
     _require(obj, "SECURITY_LEAD_ASSIGNED", "Start readiness")
     _require_assigned_qa_lead(obj, current_user)
+    obj.security_lead_id = current_user.id
     obj.status = "SECURITY_READINESS"
     _log(db, obj, "Security Readiness", current_user, "Started", "Readiness started by assigned QA Lead")
     db.commit()
@@ -575,6 +576,7 @@ def _readiness_decision(db: Session, obj, payload, current_user):
         obj.needs_dept_head_reapproval = payload.require_dept_head_reapproval
     else:
         raise HTTPException(400, "decision must be one of: Passed, Failed")
+    obj.security_lead_id = current_user.id
     _log(db, obj, "Security Readiness", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)
@@ -660,12 +662,15 @@ def _selected_scan_targets(obj, kind: str, target_ids: list[int] | None) -> list
             detail = " · ".join(part for part in [row.git_branch, row.commit_id] if part)
         else:
             label = (row.application_url or "").strip()
-            detail = (row.environment or "").strip()
+            detail = " · ".join(part for part in [(row.environment or "").strip(),
+                f"Code hash: {row.commit_id}" if row.commit_id else None] if part)
         if not label:
             raise HTTPException(400, "Every selected scan target must have a URL.")
         snapshot = {"id": target_id, "label": label, "detail": detail or None}
         if kind == "SAST":
             snapshot.update(repository_url=label, git_branch=row.git_branch, commit_id=row.commit_id)
+        else:
+            snapshot.update(dast_target_identity(row))
         snapshots.append(snapshot)
     return snapshots
 
@@ -681,7 +686,7 @@ def _import_scan_results(db: Session, obj, kind: str, scans: list[schemas.Securi
     """
     configured_ids = {row.id for row in (obj.components if kind == "SAST" else obj.targets)}
     submitted_ids = {scan.target_id for scan in scans}
-    required_ids = (submitted_ids if kind == "SAST" else configured_ids) if required_target_ids is None else required_target_ids
+    required_ids = submitted_ids if required_target_ids is None else required_target_ids
     if submitted_ids != required_ids or not submitted_ids.issubset(configured_ids):
         noun = "repository" if kind == "SAST" else "application URL"
         raise HTTPException(400, f"Configure a separate scan for every {noun} on this request.")
@@ -724,20 +729,17 @@ def _start_scan(db: Session, obj, payload: schemas.SecurityScanStartIn, current_
     kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
     previous_status = obj.status
     recovery_statuses = {"CLOSED", "REPORT_READY", "SECURITY_COMPLETE"}
-    _require(obj, {"CONFIGURATION"} | SCAN_ACTIVE_STATUSES | recovery_statuses if kind == "SAST" else "CONFIGURATION", "Start scan")
+    _require(obj, {"CONFIGURATION"} | SCAN_ACTIVE_STATUSES | recovery_statuses, "Start scan")
     _require_assigned_security_analyst(obj, current_user)
-    if kind == "SAST":
-        _require_sast_targets(db, obj, [scan.target_id for scan in payload.scans], {"NOT_SCANNED", "STALE"}, "initial scan")
-        _capture_missing_sast_references(db, obj, payload.scans, current_user)
+    _require_security_targets(db, obj, [scan.target_id for scan in payload.scans], {"NOT_SCANNED", "STALE"}, "initial scan")
+    _capture_missing_security_references(db, obj, payload.scans, current_user)
     scan_results = _import_scan_results(db, obj, kind, payload.scans, current_user)
-    if kind == "SAST":
-        _track_sast_import(db, obj, scan_results)
-        if previous_status in recovery_statuses:
-            _log(db, obj, "Scan Configuration", current_user, "Repository Verification Reopened",
-                 f"Previous request status: {previous_status}. Fresh coverage required for selected repositories: "
-                 + ", ".join(result.targets[0]["label"] for result in scan_results))
-    else:
-        obj.status = "SCANNING"
+    _track_security_import(db, obj, scan_results)
+    if previous_status in recovery_statuses:
+        noun = "repositories" if kind == "SAST" else "targets"
+        _log(db, obj, "Scan Configuration", current_user, "Repository Verification Reopened" if kind == "SAST" else "Target Verification Reopened",
+             f"Previous request status: {previous_status}. Fresh coverage required for selected {noun}: "
+             + ", ".join(result.targets[0]["label"] for result in scan_results))
     _log(
         db, obj, "Configuration", current_user, "SSC Results Imported / Scanning Started",
         f"Imported {len(scan_results)} independent target scan(s); "
@@ -796,16 +798,18 @@ def _sast_dast_named_assignment(model, user_id: int):
     """SQL predicate for the named owner of the request's current step."""
     requester_work = model.status.in_(SAST_DAST_REQUESTER_WORK_STATUSES)
     analyst_work = model.status.in_(SAST_DAST_SECURITY_ANALYST_WORK_STATUSES)
-    if model is models.SASTRequest:
+    if model in (models.SASTRequest, models.DASTRequest):
+        relation = model.components if model is models.SASTRequest else model.targets
+        target_model = models.SASTComponent if model is models.SASTRequest else models.DASTTarget
         requester_work = or_(requester_work, and_(
             model.status.in_(SCAN_ACTIVE_STATUSES),
-            model.components.any(models.SASTComponent.scan_state.in_(["WAITING_FOR_FIX", "STALE"])),
+            relation.any(target_model.scan_state.in_(["WAITING_FOR_FIX", "STALE"])),
         ))
-        scan_work = or_(models.SASTComponent.scan_state.is_(None),
-            models.SASTComponent.scan_state.in_(["NOT_SCANNED", "STALE", "READY_FOR_RESCAN", "AWAITING_VALIDATION"]))
+        scan_work = or_(target_model.scan_state.is_(None),
+            target_model.scan_state.in_(["NOT_SCANNED", "STALE", "READY_FOR_RESCAN", "AWAITING_VALIDATION"]))
         analyst_work = or_(and_(model.status.notin_(SCAN_ACTIVE_STATUSES), analyst_work),
-            and_(model.status.in_(SCAN_ACTIVE_STATUSES), model.components.any(scan_work)),
-            and_(~model.components.any(), analyst_work))
+            and_(model.status.in_(SCAN_ACTIVE_STATUSES), relation.any(scan_work)),
+            and_(~relation.any(), analyst_work))
     return or_(
         and_(model.requester_id == user_id,
              requester_work),
@@ -818,6 +822,31 @@ def _sast_dast_named_assignment(model, user_id: int):
 
 def _sast_repository_states(db: Session, obj) -> list[dict]:
     return repository_states(obj, _scan_results(db, "SAST", obj.id))
+
+
+def _security_target_states(db: Session, obj) -> list[dict]:
+    kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+    resolver = repository_states if kind == "SAST" else target_states
+    return resolver(obj, _scan_results(db, kind, obj.id))
+
+
+def _capture_missing_security_references(db: Session, obj, scans, current_user) -> None:
+    if isinstance(obj, models.SASTRequest):
+        return _capture_missing_sast_references(db, obj, scans, current_user)
+    targets = {target.id: target for target in obj.targets}
+    changes = []
+    for scan in scans:
+        target = targets[scan.target_id]
+        existing = (target.commit_id or "").strip()
+        if existing and scan.commit_id and scan.commit_id != existing:
+            raise HTTPException(400, "Scan retrieval cannot replace an existing deployed code hash. Submit a target fix with the latest code hash before rescanning.")
+        if not existing and scan.commit_id:
+            changes.append((target, scan.commit_id))
+    for target, value in changes:
+        target.commit_id = value
+    if changes:
+        _log(db, obj, "Scan Configuration", current_user, "Missing Code References Captured",
+             "\n".join(f"{target.application_url}: commit_id={value}" for target, value in changes))
 
 
 def _capture_missing_sast_references(db: Session, obj, scans, current_user) -> None:
@@ -844,16 +873,26 @@ def _capture_missing_sast_references(db: Session, obj, scans, current_user) -> N
 
 
 def _require_sast_targets(db: Session, obj, target_ids: list[int], allowed: set[str], action: str) -> list[dict]:
-    _selected_scan_targets(obj, "SAST", target_ids)
-    by_id = {row["target_id"]: row for row in _sast_repository_states(db, obj)}
+    return _require_security_targets(db, obj, target_ids, allowed, action)
+
+
+def _require_security_targets(db: Session, obj, target_ids: list[int], allowed: set[str], action: str) -> list[dict]:
+    kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+    _selected_scan_targets(obj, kind, target_ids)
+    by_id = {row["target_id"]: row for row in _security_target_states(db, obj)}
     selected = [by_id[target_id] for target_id in target_ids]
     if any(row["state"] not in allowed for row in selected):
-        raise HTTPException(400, f"Only repositories in {', '.join(sorted(allowed))} can be selected for {action}. Refresh the repository progress and try again.")
+        noun = "repositories" if kind == "SAST" else "targets"
+        raise HTTPException(400, f"Only {noun} in {', '.join(sorted(allowed))} can be selected for {action}. Refresh the {noun} progress and try again.")
     return selected
 
 
 def _sast_aggregate_status(db: Session, obj) -> None:
-    states = {row["state"] for row in _sast_repository_states(db, obj)}
+    _security_aggregate_status(db, obj)
+
+
+def _security_aggregate_status(db: Session, obj) -> None:
+    states = {row["state"] for row in _security_target_states(db, obj)}
     if states == {"CLEAR"}:
         obj.status = "SECURITY_COMPLETE"
     elif "AWAITING_VALIDATION" in states:
@@ -867,80 +906,54 @@ def _sast_aggregate_status(db: Session, obj) -> None:
 
 
 def _track_sast_import(db: Session, obj, results) -> None:
+    _track_security_import(db, obj, results)
+
+
+def _track_security_import(db: Session, obj, results) -> None:
     # Obtain persisted result identities before setting repository pointers.
     db.flush()
-    components = {row.id: row for row in obj.components}
+    components = {row.id: row for row in (obj.components if isinstance(obj, models.SASTRequest) else obj.targets)}
     for result in results:
         component = components[result.targets[0]["id"]]
         component.latest_scan_id = result.id
         component.validation_scan_id = None
         component.scan_state = "AWAITING_VALIDATION"
-    _sast_aggregate_status(db, obj)
+    _security_aggregate_status(db, obj)
 
 
 def _require_sast_complete(db: Session, obj, action: str) -> None:
-    states = _sast_repository_states(db, obj)
+    _require_security_complete(db, obj, action)
+
+
+def _require_security_complete(db: Session, obj, action: str) -> None:
+    states = _security_target_states(db, obj)
     if not states or any(row["state"] != "CLEAR" for row in states):
         remaining = sum(row["state"] != "CLEAR" for row in states)
-        raise HTTPException(400, f"Cannot {action}: every configured repository must have a current, validated scan with 0 findings. {remaining} repository/repositories still require scanning, validation or remediation.")
+        noun = "repository" if isinstance(obj, models.SASTRequest) else "target"
+        raise HTTPException(400, f"Cannot {action}: every configured {noun} must have a current, validated scan with 0 findings. {remaining} {noun}/{noun}s still require scanning, validation or remediation.")
 
 
 def _pending_scan_target_ids(db: Session, obj, kind: str) -> set[int]:
-    if kind == "SAST":
-        return {row["target_id"] for row in _sast_repository_states(db, obj) if row["state"] != "CLEAR"}
-    current_results = _current_scan_results(_scan_results(db, kind, obj.id))
-    current_by_target = {
-        target["id"]: result for result in current_results for target in result.targets
-        if target.get("id") is not None
-    }
-    return {
-        target.id for target in (obj.components if kind == "SAST" else obj.targets)
-        if target.id not in current_by_target or _scan_open_count(current_by_target[target.id]) > 0
-    }
+    return {row["target_id"] for row in _security_target_states(db, obj) if row["state"] != "CLEAR"}
 
 
 def _rescan_scan(db: Session, obj, kind: str, payload: schemas.SecurityScanStartIn, current_user):
-    """Reported directly, full requirement doc pasted with a status-flow
-    diagram: "Assigned for Rescan" (RESCAN) -> re-run the scan -> "Scanning"
-    (SCANNING), a distinct edge from "Scanning" -> "Finding Validation" right
-    after it -- i.e. Rescan and Finding Validation are two separate,
-    explicit steps again, not one auto-inferred action. This narrows Rescan
-    back to firing only from RESCAN (previously reachable from the whole
-    SCAN_ANALYST_ACTIVE_STATUSES window as part of this session's earlier
-    flatter "Rescan/Mark Scan Complete direct from Scanning" model -- see the
-    module docstring above and _validate_findings below for the fuller
-    picture of what's being restored/superseded here), and -- new -- moves
-    the request back to SCANNING once the fresh results are in, so Validate
-    Findings is reachable again afterward, same as it was after the very
-    first Start Scan."""
+    """Retrieve fresh results only for selected targets whose fixes are ready.
+
+    The request may still have other targets awaiting development or QA.
+    Their findings, scan pointers and validation states are preserved.
+    """
     _require_visible(db, obj, current_user)
-    _require(obj, SCAN_ACTIVE_STATUSES if kind == "SAST" else "RESCAN", "Rescan")
+    _require(obj, SCAN_ACTIVE_STATUSES, "Rescan")
     _require_assigned_security_analyst(obj, current_user)
-    if kind == "SAST":
-        selected_ids = [scan.target_id for scan in payload.scans]
-        _require_sast_targets(db, obj, selected_ids, {"READY_FOR_RESCAN"}, "rescan")
-        _capture_missing_sast_references(db, obj, payload.scans, current_user)
-        scan_results = _import_scan_results(db, obj, kind, payload.scans, current_user, required_target_ids=set(selected_ids))
-        _track_sast_import(db, obj, scan_results)
-        _log(db, obj, "Rescan", current_user, "Rescan Imported / Scanning Started",
-             "Selected repositories: " + ", ".join(result.targets[0]["label"] for result in scan_results))
-        db.commit()
-        db.refresh(obj)
-        for result in scan_results:
-            db.refresh(result)
-        return obj, scan_results
-    pending_ids = _pending_scan_target_ids(db, obj, kind)
-    if not pending_ids:
-        raise HTTPException(400, "Every target is already clear. No rescan is required.")
-    _selected_scan_targets(obj, kind, [scan.target_id for scan in payload.scans])
-    pending_scans = [scan for scan in payload.scans if scan.target_id in pending_ids]
-    scan_results = _import_scan_results(db, obj, kind, pending_scans, current_user, required_target_ids=pending_ids)
-    obj.status = "SCANNING"
-    _log(
-        db, obj, "Rescan", current_user, "Rescan Imported / Scanning Started",
-        f"Imported {len(scan_results)} independent target rescan(s); "
-        f"{sum(result.total_count for result in scan_results)} finding(s) across targets.",
-    )
+    selected_ids = [scan.target_id for scan in payload.scans]
+    _require_security_targets(db, obj, selected_ids, {"READY_FOR_RESCAN"}, "rescan")
+    _capture_missing_security_references(db, obj, payload.scans, current_user)
+    scan_results = _import_scan_results(db, obj, kind, payload.scans, current_user, required_target_ids=set(selected_ids))
+    _track_security_import(db, obj, scan_results)
+    noun = "repositories" if kind == "SAST" else "targets"
+    _log(db, obj, "Rescan", current_user, "Rescan Imported / Scanning Started",
+         f"Selected {noun}: " + ", ".join(result.targets[0]["label"] for result in scan_results))
     db.commit()
     db.refresh(obj)
     for result in scan_results:
@@ -959,39 +972,23 @@ def _mark_scan_complete(db: Session, obj, kind: str, payload: schemas.CommentIn,
     _require_visible(db, obj, current_user)
     _require(obj, SCAN_ANALYST_ACTIVE_STATUSES, "Mark Scan Complete")
     _require_assigned_security_analyst(obj, current_user)
-    if kind == "SAST":
-        _require_sast_complete(db, obj, "mark Scan Complete")
+    _require_security_complete(db, obj, "mark Scan Complete")
     results = _scan_results(db, kind, obj.id)
     if not results:
         raise HTTPException(400, "Start a scan and import Fortify SSC results before marking this scan complete.")
-    open_count = _batch_open_count(_current_scan_results(results))
-    if kind != "SAST" and open_count > 0:
-        raise HTTPException(
-            400,
-            f"Scan cannot be marked Complete because the current scan still has {open_count} finding(s). "
-            "Resolve or suppress them in Fortify SSC, then perform a rescan. Every current scan filter "
-            "must show 0 findings before this request can be completed.",
-        )
     obj.status = "SECURITY_COMPLETE"
     _log(db, obj, "Scanning", current_user, "Scan Marked Complete",
          (payload.comments if payload else None) or "All current scan filters show 0 findings.")
-    if kind == "SAST":
-        return _auto_close_if_clean(db, obj, current_user, sup_filter_col)
-    db.commit()
-    db.refresh(obj)
     return _auto_close_if_clean(db, obj, current_user, sup_filter_col)
 
 
 def _scan_results(db: Session, kind: str, request_id: int):
-    """Oldest-first pass computes each row's Scan No / Type / Status (2026-08
-    "Findings Validation" doc, section 4.3 Scan History -- these are derived
-    from ordering, not stored columns, since Scan No 1 is always "Initial
-    Scan" and every row after it is a "Rescan" by definition; Status is
-    always "Completed" because a failed/partial SSC import never gets this
-    far -- see _import_scan_result, which only ever adds a row after a
-    successful retrieve_snapshot()), then reverses back to the newest-first
-    order this function has always returned (SecurityScanResults.tsx's
-    `results[0]` == latest is relied on elsewhere)."""
+    """Return newest-first history with execution numbers and per-target types.
+
+    The first attributable result for each target is its Initial Scan,
+    even when that URL joins a later batch. Legacy aggregate executions
+    retain their historical first-execution/rescan classification.
+    """
     rows = (
         db.query(models.SecurityScanResult)
         .filter_by(request_type=kind, request_id=request_id)
@@ -1008,7 +1005,7 @@ def _scan_results(db: Session, kind: str, request_id: int):
             batch_numbers[batch_key] = len(batch_numbers) + 1
         row.scan_no = batch_numbers[batch_key]
         identities = {target["id"] for target in row.targets if target.get("id") is not None}
-        row.scan_type = ("Initial Scan" if not (identities & seen_targets) else "Rescan") if kind == "SAST" and identities else ("Initial Scan" if row.scan_no == 1 else "Rescan")
+        row.scan_type = ("Initial Scan" if not (identities & seen_targets) else "Rescan") if identities else ("Initial Scan" if row.scan_no == 1 else "Rescan")
         seen_targets.update(identities)
         row.status = "Completed"
     rows.reverse()
@@ -1023,7 +1020,7 @@ def _current_scan_results(results) -> list:
 def _initial_scan_results(results) -> list:
     if not results:
         return []
-    if results[0].request_type == "SAST":
+    if results[0].request_type in {"SAST", "DAST"}:
         from ..security_scan_state import initial_repository_results
         return list(reversed(initial_repository_results(list(reversed(results)))))
     first_scan_no = min(row.scan_no for row in results)
@@ -1069,6 +1066,16 @@ def _scan_summary(db: Session, kind: str, request_id: int, sup_filter_col) -> di
             "unscanned_repositories": sum(row["state"] == "NOT_SCANNED" for row in states),
             "all_repositories_clear": bool(states) and all(row["state"] == "CLEAR" for row in states),
         }
+    else:
+        obj = db.get(models.DASTRequest, request_id)
+        states = target_states(obj, results) if obj else []
+        coverage = {
+            "target_states": states, "total_targets": len(states),
+            "clear_targets": sum(row["state"] == "CLEAR" for row in states),
+            "ready_for_rescan": sum(row["state"] == "READY_FOR_RESCAN" for row in states),
+            "unscanned_targets": sum(row["state"] == "NOT_SCANNED" for row in states),
+            "all_targets_clear": bool(states) and all(row["state"] == "CLEAR" for row in states),
+        }
     if not results:
         return {"initial": None, "current": None, "total_rescans": 0, "open_findings": 0, "suppressed_findings": 0, **coverage}
     current_results = _current_scan_results(results)
@@ -1084,8 +1091,7 @@ def _scan_summary(db: Session, kind: str, request_id: int, sup_filter_col) -> di
     return {
         "initial": initial_scan, "current": current_scan,
         "initial_results": initial_results, "current_results": current_results,
-        "total_rescans": (len({row.execution_key or f"legacy-{row.id}" for row in results if row.scan_type == "Rescan"})
-                          if kind == "SAST" else max(current_scan.scan_no - 1, 0)),
+        "total_rescans": len({row.execution_key or f"legacy-{row.id}" for row in results if row.scan_type == "Rescan"}),
         "open_findings": _batch_open_count(current_results), "suppressed_findings": suppressed_findings,
         **coverage,
     }
@@ -1099,15 +1105,7 @@ def _close_request(db: Session, obj, current_user):
     _require_visible(db, obj, current_user)
     _require(obj, "REPORT_READY", "Close request")
     _require_assigned_security_analyst(obj, current_user)
-    kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
-    if kind == "SAST":
-        _require_sast_complete(db, obj, "close this request")
-    results = _scan_results(db, kind, obj.id)
-    if kind != "SAST" and results and _batch_open_count(_current_scan_results(results)) > 0:
-        raise HTTPException(
-            400,
-            "Cannot close this request until every current scan filter shows 0 findings. Perform a rescan first.",
-        )
+    _require_security_complete(db, obj, "close this request")
     obj.status = "CLOSED"
     _log(db, obj, "Report Ready", current_user, "Closed", None)
     db.commit()
@@ -1124,104 +1122,56 @@ def _auto_close_if_clean(db: Session, obj, current_user, sup_filter_col):
     linked Suppression / False Positive request isn't Done yet -- the
     analyst then finishes the remaining hop(s) manually via the existing
     Mark Report Ready / Close actions once that's resolved."""
-    if isinstance(obj, models.SASTRequest):
-        # All hops run under the caller's parent-row lock and commit once;
-        # partial or outdated coverage cannot race a terminal transition.
-        _require_sast_complete(db, obj, "complete this request")
-        if not _pending_suppression_ids(db, obj, sup_filter_col):
-            obj.status = "REPORT_READY"
-            _log(db, obj, "Security Complete", current_user, "Report Ready", None)
-            obj.status = "CLOSED"
-            _log(db, obj, "Report Ready", current_user, "Closed", None)
-        db.commit()
-        db.refresh(obj)
-        return obj
-    try:
-        _mark_report_ready(db, obj, current_user, sup_filter_col)
-    except HTTPException:
-        return obj  # left at SECURITY_COMPLETE; suppression still pending
-    return _close_request(db, obj, current_user)
+    # All hops run under the caller's parent-row lock and commit once;
+    # partial or outdated coverage cannot race a terminal transition.
+    _require_security_complete(db, obj, "complete this request")
+    if not _pending_suppression_ids(db, obj, sup_filter_col):
+        obj.status = "REPORT_READY"
+        _log(db, obj, "Security Complete", current_user, "Report Ready", None)
+        obj.status = "CLOSED"
+        _log(db, obj, "Report Ready", current_user, "Closed", None)
+    db.commit()
+    db.refresh(obj)
+    return obj
 
 
 def _validate_sast_findings(db: Session, obj, current_user, payload=None):
+    return _validate_security_findings(db, obj, current_user, payload)
+
+
+def _validate_security_findings(db: Session, obj, current_user, payload=None):
     _require_visible(db, obj, current_user)
     _require(obj, SCAN_ACTIVE_STATUSES, "Validate findings")
     _require_assigned_security_analyst(obj, current_user)
     target_ids = payload.target_ids if payload else None
     if target_ids is None:
-        target_ids = [row["target_id"] for row in _sast_repository_states(db, obj) if row["state"] == "AWAITING_VALIDATION"]
+        target_ids = [row["target_id"] for row in _security_target_states(db, obj) if row["state"] == "AWAITING_VALIDATION"]
     if not target_ids:
-        raise HTTPException(400, "Retrieve scan results for at least one repository before validating findings.")
-    selected = _require_sast_targets(db, obj, target_ids, {"AWAITING_VALIDATION"}, "finding validation")
-    components = {row.id: row for row in obj.components}
+        raise HTTPException(400, "Retrieve scan results for at least one target before validating findings.")
+    selected = _require_security_targets(db, obj, target_ids, {"AWAITING_VALIDATION"}, "finding validation")
+    kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+    components = {row.id: row for row in (obj.components if kind == "SAST" else obj.targets)}
     evidence = []
     for row in selected:
         component = components[row["target_id"]]
         component.validation_scan_id = row["latest_scan_id"]
         component.scan_state = "WAITING_FOR_FIX" if row["open_findings"] > 0 else "CLEAR"
         evidence.append(f"{row['label']}: {row['open_findings']} finding(s); {component.scan_state}")
-    _sast_aggregate_status(db, obj)
+    _security_aggregate_status(db, obj)
     _log(db, obj, "Scanning", current_user, "Finding Validation", "\n".join(evidence))
     if any(row["open_findings"] > 0 for row in selected):
-        _log(db, obj, "Remediation", current_user, "Assigned To Requester", "Selected repositories require remediation: " + ", ".join(row["label"] for row in selected if row["open_findings"] > 0))
+        noun = "repositories" if kind == "SAST" else "targets"
+        _log(db, obj, "Remediation", current_user, "Assigned To Requester", f"Selected {noun} require remediation: " + ", ".join(row["label"] for row in selected if row["open_findings"] > 0))
     if obj.status == "SECURITY_COMPLETE":
-        return _auto_close_if_clean(db, obj, current_user, models.SuppressionRequest.sast_request_id)
+        return _auto_close_if_clean(db, obj, current_user,
+            models.SuppressionRequest.sast_request_id if kind == "SAST" else models.SuppressionRequest.dast_request_id)
     db.commit()
     db.refresh(obj)
     return obj
 
 
-def _validate_findings(db: Session, obj, current_user, sup_filter_col, kind: str):
-    if kind == "SAST":
-        return _validate_sast_findings(db, obj, current_user)
-    """Reported directly, full requirement doc pasted with a status-flow
-    diagram: "Scanning Initiated" -> "Finding Validation" is a mandatory,
-    explicit step again -- "When the Security Analyst selects Finding
-    Validation, the system must require: Application Name, Application
-    Version, Scan completion details, Number of findings, Scan report or
-    supporting evidence." The first four are already on file the moment a
-    scan exists (Start Scan/Rescan capture Application Name/Version and
-    import the Fortify SSC snapshot, which is itself the "scan completion
-    details"/finding count); the fifth -- "scan report or supporting
-    evidence" -- is read as satisfied by that same Fortify SSC snapshot
-    (`audit_url`, already surfaced as "Open in Fortify SSC" in the Findings
-    tab) rather than a brand-new separate manual upload requirement, to keep
-    this restoration scoped to the status-flow diagram itself rather than
-    also standing up a new evidence-upload subsystem; worth flagging if a
-    literal separate document upload is actually wanted here too.
-
-    This supersedes this session's earlier flatter model, where Rescan/Mark
-    Scan Complete acted directly from Scanning with no separate validation
-    step (see the module docstring above and _mark_scan_complete's own
-    docstring, both left in place for the historical record) -- reachable
-    now from SCANNING (previously FINDING_VALIDATION itself, which nothing
-    transitioned into anymore under that flatter model, making this
-    permanently unreachable).
-
-    Only a latest scan with zero findings in every filter reaches Security
-    Complete. Any non-zero view returns the request to the remediation /
-    requester / rescan loop, even when a linked suppression is Done.
-    """
-    _require_visible(db, obj, current_user)
-    _require(obj, "SCANNING", "Validate findings")
-    _require_assigned_security_analyst(obj, current_user)
-    results = _scan_results(db, kind, obj.id)
-    if not results:
-        raise HTTPException(400, "Start a scan and import Fortify SSC results before validating findings.")
-    open_count = _batch_open_count(_current_scan_results(results))
-    if open_count <= 0:
-        obj.status = "SECURITY_COMPLETE"
-        _log(db, obj, "Scanning", current_user, "Finding Validation",
-             "All current scan filters show 0 findings")
-        db.commit()
-        db.refresh(obj)
-        return _auto_close_if_clean(db, obj, current_user, sup_filter_col)
-    obj.status = "REMEDIATION"
-    _log(db, obj, "Scanning", current_user, "Finding Validation",
-         f"{open_count} finding(s) on the latest scan require remediation")
-    db.commit()
-    db.refresh(obj)
-    return obj
+def _validate_findings(db: Session, obj, current_user, sup_filter_col, kind: str, payload=None):
+    return _validate_security_findings(db, obj, current_user, payload)
 
 
 def _assign_to_requester(db: Session, obj, kind: str, current_user):
@@ -1317,7 +1267,7 @@ def _mark_fixed(db: Session, obj, current_user, sup_filter_col, payload: schemas
     ):
         raise HTTPException(403, "Only the requester (or their active delegate), or an admin, can mark this fixed")
     kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
-    _require(obj, SCAN_ACTIVE_STATUSES if kind == "SAST" else "WAITING_FOR_FIX", "Mark fixed")
+    _require(obj, SCAN_ACTIVE_STATUSES, "Mark fixed")
     pending = _pending_suppression_ids(db, obj, sup_filter_col)
     if pending:
         raise HTTPException(
@@ -1325,35 +1275,25 @@ def _mark_fixed(db: Session, obj, current_user, sup_filter_col, payload: schemas
             "Cannot mark fixed -- suppression request(s) still pending a decision: "
             + ", ".join(pending) + ". Wait for it to be approved or rejected first.",
         )
-    supplied_ids = {target.target_id for target in payload.targets}
-    if kind == "SAST":
-        selected = _require_sast_targets(db, obj, [target.target_id for target in payload.targets], {"WAITING_FOR_FIX", "STALE"}, "fix submission")
-        latest_ids = {row["target_id"]: row["latest_scan_id"] for row in selected}
-    else:
-        pending_ids = _pending_scan_target_ids(db, obj, kind)
-        if not pending_ids or supplied_ids != pending_ids:
-            raise HTTPException(400, "Provide the latest commit ID / code hash for every target awaiting remediation. Refresh the findings and try again.")
+    selected = _require_security_targets(db, obj, [target.target_id for target in payload.targets], {"WAITING_FOR_FIX", "STALE"}, "fix submission")
+    latest_ids = {row["target_id"]: row["latest_scan_id"] for row in selected}
     configured = {target.id: target for target in (obj.components if kind == "SAST" else obj.targets)}
     evidence = ["Assigned to Lead for rescan. Latest remediation code references:"]
     for fix in payload.targets:
         target = configured[fix.target_id]
         url = target.repository_url if kind == "SAST" else target.application_url
-        previous = target.commit_id if kind == "SAST" else None
+        previous = target.commit_id
         evidence.append(f"{url} — Latest commit ID / code hash: {fix.commit_id}"
                         + (f" (previous: {previous})" if previous else ""))
-        if kind == "SAST":
-            target.commit_id = fix.commit_id
-            target.latest_scan_id = latest_ids[fix.target_id]
-            target.scan_state = "READY_FOR_RESCAN"
-            target.fix_submitted_at = models.now()
-            target.fix_submitted_by_id = current_user.id
+        target.commit_id = fix.commit_id
+        target.latest_scan_id = latest_ids[fix.target_id]
+        target.scan_state = "READY_FOR_RESCAN"
+        target.fix_submitted_at = models.now()
+        target.fix_submitted_by_id = current_user.id
     _log(db, obj, "Waiting For Fix", current_user, "Fix Submitted", "\n".join(evidence))
-    if kind == "SAST":
-        _sast_aggregate_status(db, obj)
-    else:
-        obj.status = "RESCAN"
+    _security_aggregate_status(db, obj)
     _log(db, obj, "Rescan", current_user, "Rescanning", None)
-    remaining_fixes = kind == "SAST" and any(row["state"] in {"WAITING_FOR_FIX", "STALE"} for row in _sast_repository_states(db, obj))
+    remaining_fixes = any(row["state"] in {"WAITING_FOR_FIX", "STALE"} for row in _security_target_states(db, obj))
     if delegation and not remaining_fixes:
         delegation.status = "RETURNED"
         delegation.closed_by_id = current_user.id
@@ -1406,15 +1346,7 @@ def _mark_report_ready(db: Session, obj, current_user, sup_filter_col):
     _require_visible(db, obj, current_user)
     _require(obj, "SECURITY_COMPLETE", "Mark report ready")
     _require_assigned_security_analyst(obj, current_user)
-    kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
-    if kind == "SAST":
-        _require_sast_complete(db, obj, "mark Report Ready")
-    results = _scan_results(db, kind, obj.id)
-    if kind != "SAST" and results and _batch_open_count(_current_scan_results(results)) > 0:
-        raise HTTPException(
-            400,
-            "Cannot mark Report Ready until every current scan filter shows 0 findings. Perform a rescan first.",
-        )
+    _require_security_complete(db, obj, "mark Report Ready")
     _require_no_pending_suppressions(db, obj, sup_filter_col, "Report Ready")
     obj.status = "REPORT_READY"
     _log(db, obj, "Security Complete", current_user, "Report Ready", None)
@@ -2181,15 +2113,10 @@ def dast_mark_scan_complete(req_id: int, payload: schemas.CommentIn, db: Session
 
 
 @router.post("/api/dast-requests/{req_id}/validate-findings", response_model=schemas.DASTOut)
-def dast_validate_findings(req_id: int, db: Session = Depends(get_db),
+def dast_validate_findings(req_id: int, payload: Optional[schemas.SecurityFindingsValidationIn] = Body(default=None), db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True)
-    obj = _validate_findings(db, obj, current_user, models.SuppressionRequest.dast_request_id, "DAST")
-    # Keep DAST identical to SAST: validating a non-zero scan completes the
-    # transient Remediation hand-off without requiring a second Assign to
-    # Requester click.
-    if obj.status == "REMEDIATION":
-        obj = _assign_to_requester(db, obj, "DAST", current_user)
+    obj = _validate_security_findings(db, obj, current_user, payload)
     return _dast_out(obj, current_user)
 
 

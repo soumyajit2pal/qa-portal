@@ -1,4 +1,4 @@
-import asyncio
+import hashlib
 import io
 import os
 from typing import List, Optional
@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 import openpyxl
 
 from .. import models, schemas, pagination
-from ..database import get_db, SessionLocal
+from ..database import get_db
 from ..deps import (
     get_workflow_user as get_current_user, require_workflow_roles as require_roles, get_or_404,
     require_can_author_repository, require_can_review_repository, require_can_give_final_approval,
@@ -20,10 +20,10 @@ from ..deps import (
 from ..constants import (
     Role, TEST_CASE_PRIORITIES, format_role_labels,
 )
-from ..workspace_service import active_workspace_scope_ids, workspace_context
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 from ..testcase_imports import TEST_CASE_IMPORT_CONTENT_FIELDS, build_test_case_import_fingerprint
 from . import jobs
+from ..job_tasks import make_spec
 
 # PAG-005 -- every eager-load the list endpoint needs to serialize
 # TestCaseListOut without an N+1: folder/created_by/checked_out_by are
@@ -900,32 +900,9 @@ def queue_test_repository_export(
     user_id = current_user.id
     actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
 
-    def build(job_id: str):
-        with SessionLocal() as worker_db:
-            worker_user = worker_db.get(models.User, user_id)
-            if not worker_user or not worker_user.is_active:
-                raise RuntimeError("The user who started this export no longer exists or is inactive")
-            worker_user.active_qa_workspace_id = actor_workspace_id
-            worker_scope_ids = active_workspace_scope_ids(
-                worker_db, worker_user, actor_workspace_id,
-            )
-            if actor_workspace_id is None or actor_workspace_id not in worker_scope_ids:
-                raise HTTPException(403, "The workspace used to start this export is no longer available")
-            worker_user.active_workspace_scope_ids = tuple(sorted(worker_scope_ids))
-            from ..workflow_authority import workflow_context
-            with workspace_context(actor_workspace_id, worker_scope_ids), workflow_context(worker_user):
-                from ..project_workspace_ownership import bind_actor
-                bind_actor(worker_db, worker_user)
-                worker_db.info['workflow_actor'] = worker_user
-                jobs.update(job_id, progress=15)
-                response = (
-                    export_test_repository(project_id, worker_db, worker_user, folder_id=folder_id)
-                    if folder_id is not None
-                    else export_test_repository(project_id, worker_db, worker_user)
-                )
-                return asyncio.run(jobs.save_streaming_response(job_id, response, filename))
-
-    return jobs.enqueue(background_tasks, "TEST_REPOSITORY_EXPORT", user_id, build)
+    spec = make_spec("TEST_REPOSITORY_EXPORT", user_id, actor_workspace_id,
+                     project_id=project_id, folder_id=folder_id, filename=filename)
+    return jobs.enqueue(background_tasks, "TEST_REPOSITORY_EXPORT", user_id, spec)
 
 
 @router.post("/projects/{project_id}/test-cases", response_model=schemas.TestCaseOut)
@@ -2614,7 +2591,7 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
     if created_test_cases == 0 and skipped_rows == 0:
         errors.append("No test cases were found. Confirm that data starts below the header row and uses the standard template columns.")
 
-    db.commit()
+    jobs.commit_or_flush(db)
     failure_reason = None
     if created_test_cases == 0:
         failure_reason = errors[0] if errors else (
@@ -2647,26 +2624,7 @@ async def queue_test_case_import(
     user_id = current_user.id
     actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
 
-    def process(job_id: str):
-        with SessionLocal() as worker_db:
-            worker_user = worker_db.get(models.User, user_id)
-            if not worker_user:
-                raise RuntimeError("The user who started this import no longer exists")
-            worker_user.active_qa_workspace_id = actor_workspace_id
-            from ..workflow_authority import workflow_context
-            with workflow_context(worker_user):
-                from ..project_workspace_ownership import bind_actor
-                bind_actor(worker_db, worker_user)
-                worker_db.info['workflow_actor'] = worker_user
-                jobs.update(job_id, progress=15)
-                upload = UploadFile(filename=filename, file=io.BytesIO(raw))
-                result = asyncio.run(import_test_cases(
-                    project_id,
-                    upload,
-                    folder_id,
-                    worker_db,
-                    worker_user,
-                ))
-                return result.model_dump(mode="json")
-
-    return jobs.enqueue(background_tasks, "TESTCASE_XLSX_IMPORT", user_id, process)
+    spec = make_spec("TESTCASE_XLSX_IMPORT", user_id, actor_workspace_id,
+                     project_id=project_id, folder_id=folder_id, filename=filename,
+                     input_sha256=hashlib.sha256(raw).hexdigest())
+    return jobs.enqueue(background_tasks, "TESTCASE_XLSX_IMPORT", user_id, spec, input_bytes=raw)

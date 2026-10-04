@@ -199,7 +199,26 @@ The analyst must select the completed SSC application/version corresponding to t
 repository and code reference. Final completion, reports and QA Clearance require validated,
 current, clear results for every repository in scope. A pending suppression approval still
 blocks fix submission for the request because existing suppressions are linked to requests,
-not individual repositories. DAST retains its existing workflow.
+not individual repositories.
+
+## DAST target workflow
+
+DAST follows the same independent workflow for each application URL. The
+**Findings** target progress table includes unscanned URLs and their current
+scan, validation, remediation, and rescan states. QA can retrieve and validate
+a selected batch while the requester or active developer delegate fixes other
+URLs. Fix submissions select only ready targets and record the latest deployed
+commit or artifact hash; unfinished fixes remain assigned to the requester or
+delegate. QA can rescan the ready targets without waiting for those other fixes.
+
+Every URL requires its own current, validated clear result before the request
+can complete or support QA Clearance. Changes to a target's URL, environment,
+authentication settings, credentials, or recorded code hash invalidate older
+evidence. Older scans without an attributable target snapshot require fresh
+retrieval and validation. Existing request-level suppression approvals still
+block fix submission while pending; they do not block QA from retrieving other
+eligible targets. Apply migration `9d4e6f8a2b13` with `alembic upgrade head` and
+deploy backend and frontend together.
 
 Apply migration `7b8c2d4e6f10` through the existing deployment's `alembic upgrade head`
 procedure before starting the updated backend, then rebuild/restart both services. The
@@ -475,12 +494,38 @@ hostname in that URL must be reachable from the backend containers. `localhost` 
 means that container itself, not the Docker host or a separately running Oracle instance. The
 `/api/health` endpoint checks connectivity with `SELECT 1 FROM DUAL`.
 
-The core backend runs 4 worker processes by default (`WEB_CONCURRENCY`, see `backend/Dockerfile`) and
-a `redis` service is included and wired up by `REDIS_URL` for shared dashboard and reference-data
-caching across workers (see `backend/app/cache.py`). The supplied topology uses `redis://` on the
-private Compose network. An operational Redis outage becomes cache misses because workflow
-correctness never depends on cached data. Startup file maintenance is coordinated separately with
-a shared-filesystem lock.
+The core backend runs 4 worker processes by default (`WEB_CONCURRENCY`, see `backend/Dockerfile`).
+Compose now runs two Redis services on its private network:
+
+- `redis` / `REDIS_URL` is an optional, evictable read cache (`allkeys-lru`). Dashboard summary,
+  project-wise, 3W, SAST, DAST and suppression analytics use permission-aware keys and a configurable
+  30-second TTL (`DASHBOARD_CACHE_TTL_SECONDS`, capped at five minutes).
+  Departments, approved applications, checklists and request types use five-minute TTLs. Generation
+  changes after committed ORM/bulk writes prevent older readers from repopulating invalidated data;
+  owner-token fill leases coalesce concurrent misses. Cache outages fall back to Oracle. The default
+  pool is 32 connections per API process with 250 ms connect/command timeouts and no hidden retries.
+  An invalidation missed during an outage is retried locally before cache reuse; other replicas can
+  retain the previous response until its original TTL expires. Oracle remains authoritative.
+- `redis_coordination` / `REDIS_COORDINATION_URL` stores job dispatch, login windows, scheduler
+  leases and wake hints. It uses `noeviction`, a durable named volume and AOF with `appendfsync always`.
+  Job submissions and Redis-mode login checks return retryable HTTP 503 when this service is down;
+  they never silently bypass coordination. The optional `CACHE_ENABLED` switch does not disable it.
+
+Each Redis defaults to a 256 MB dataset limit in a 512 MB container. Size these separately with
+`REDIS_CACHE_MAXMEMORY`, `REDIS_CACHE_CONTAINER_MEMORY`, `REDIS_COORDINATION_MAXMEMORY` and
+`REDIS_COORDINATION_CONTAINER_MEMORY`. Leave room for allocator, persistence and replication
+overhead. Separate logical Redis database numbers do not isolate eviction; the configuration
+rejects sharing the same cache and coordination host/port when durable modes are enabled.
+Startup file maintenance continues to use a shared-filesystem lock.
+
+Administrators can inspect `/api/operations/redis` and scrape `/api/operations/redis/metrics` using
+an authenticated Admin session. Diagnostics include actual application cache hits/misses/bypasses,
+errors, operation timings, circuit state, API latency histograms and approximate p95, Redis memory/evictions/connections/CPU, queue pending work,
+retry/failure/completion counts and worker health. Application counters are per process and include
+the PID; Redis INFO metrics cover each server. Server keyspace hit ratios also include generation
+and lease reads, so use application hit counters when judging response reuse. No Redis URLs, keys,
+credentials or task payloads are exposed. Baseline endpoint p95 latency and Oracle pool/SQL load
+alongside these metrics before increasing memory, pool limits or TTLs. Liveness does not issue INFO.
 
 ### Production Oracle pool capacity
 
@@ -503,9 +548,57 @@ dashboard traffic does not retain guard connections or create a large burst of s
 queries. If pool pressure remains after deployment sizing, investigate slow Oracle SQL/indexes and
 the logged pool counters before increasing the connection limit.
 
-Long-running imports and exports are also queued with `BACKGROUND_JOB_WORKERS` (default `2`) per
-backend worker. Those jobs each use their own database session, so include this bounded number in
-operational capacity planning and keep it below the main request pool size.
+Long-running imports and exports execute in the dedicated `job_worker` service. Its
+`BACKGROUND_JOB_WORKERS` (default `2`) threads are capped across the deployment by
+`BACKGROUND_JOB_GLOBAL_CONCURRENCY` (default `2`), rather than multiplied by API worker count.
+Include the dedicated job and notification services' Oracle pools in the budget, plus Document
+Portal's separate pools. Both dedicated services default to a `2 + 1` main pool and `1 + 0` audit
+pool. Tune `JOB_WORKER_DB_POOL_SIZE` / `JOB_WORKER_DB_MAX_OVERFLOW` and
+`NOTIFICATION_WORKER_DB_POOL_SIZE` / `NOTIFICATION_WORKER_DB_MAX_OVERFLOW` deliberately.
+
+### Redis workers and rollout
+
+Deploy the updated backend image and run `alembic upgrade head` before starting the new workers.
+The `a47c2e9d6b10` migration adds Oracle background-job receipts. Versioned JSON task manifests and
+uploads/artifacts remain under the durable shared upload root; Redis carries task IDs and bounded
+dispatch state. Workers reconstruct the current user/workspace and recheck roles and record access.
+Export downloads also recheck the downloader's current workspace and project/cycle read access.
+Import/cycle-addition writes and their receipt commit in the same transaction, so a delivery after
+an interrupted worker returns the original result rather than repeating committed writes.
+Unacknowledged deliveries are reclaimed; renewable owner-token leases and global slots fence
+execution. Workers reconcile unfinished JSON manifests every 60 seconds, including after a Redis
+restart, and repair missing dispatch entries without submitting another business operation.
+Terminal Redis status/specification keys expire after seven days (`BACKGROUND_JOB_RETENTION_SECONDS`);
+Oracle receipts and durable files remain available. Completed/failed job status can be read from
+those files during a Redis outage. Old pre-upgrade callable jobs cannot be reconstructed and require manual review after
+an interruption. They are never automatically replayed.
+
+Compose starts `job_worker` and `notification_worker` using the same backend image, environment and
+shared upload mount. The worker healthchecks check their own recent heartbeat. Stop signals prevent
+new claims and allow active work to drain; imports interrupted before commit roll back and can be
+retried. Keep the shared storage available to every API/job replica. The durable Redis volume must
+also be preserved across upgrades; do not use `down -v` to redeploy.
+
+Notifications retain the Oracle outbox and its atomic claim/retry rules. Dedicated mode sends
+best-effort Redis wake hints after commit and periodically scans Oracle, so Redis downtime never
+discards email. A renewable shared lease and next-run marker coordinate the hourly SLA scan across
+replicas. Embedded API pollers are disabled in dedicated mode.
+
+Redis login mode atomically reserves admission slots and records the existing five-failures / 15-minute
+username-and-IP window. Successful login clears the current IP; administrator unlock invalidates
+all of that username's IP buckets. Aborted requests have expiring reservations. Redis downtime fails
+closed with HTTP 503; switching to an empty Oracle window would bypass already recorded failures.
+During rollout, switch every API replica together. The first Redis admission for a username/IP
+bucket atomically imports its existing Oracle failure window; later admissions use Redis directly.
+Successful login and administrator unlock also clear those legacy rows. Do not mix limiter backends
+across replicas. A rollback to database mode requires quiescing login for the existing 15-minute
+window, because new Redis failures are not copied back into Oracle.
+
+For standalone development without these worker services, explicitly set `JOB_QUEUE_BACKEND=local`,
+`NOTIFICATION_WORKER_MODE=embedded`, and `LOGIN_RATE_LIMIT_BACKEND=database`. Local job mode still
+uses a bounded number of per-process worker threads and serializable task manifests. Production Compose defaults to
+Redis jobs/login and dedicated notifications even when upgrading an older populated env file.
+The safe profile templates document all capacity settings; populated secrets are not rewritten.
 
 ### Workflow email notifications
 
@@ -692,6 +785,15 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
 
 - Apply versioned Oracle schema changes with **Alembic** before starting API
   containers.
+- Request QA Lead attribution requires migration `8c3d5e7f9a12` (included in
+  `alembic upgrade head`). Functional, SAST, DAST, and Performance requests now
+  save the QA Lead group member who starts readiness and update that assignment
+  to the member who makes the readiness decision. PDF exports display that saved
+  person's name. The migration recovers missing assignments from the most recent
+  readiness history after the latest Department Head approval, preserving existing
+  assignments. Requests with no attributable readiness action remain unassigned;
+  ambiguous legacy `SAST_DAST` history is excluded. Deploy the backend changes and
+  run the migration before regenerating PDFs for previously approved requests.
 - Conditional Clearance requires the `a6d9c2e4f801` migration (included in
   `alembic upgrade head`) for mitigation, responsible owner, and target date.
   Full and Conditional Clearance both require an eligible Functional Request,

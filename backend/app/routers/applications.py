@@ -35,7 +35,7 @@ _APPROVED_NAMES_CACHE_TTL = 300
 
 
 def _invalidate_approved_names_cache() -> None:
-    cache.delete(_APPROVED_NAMES_CACHE_KEY)
+    cache.invalidate(cache.APPLICATIONS_FAMILY, cache.DASHBOARD_FAMILY)
 
 
 def _log_application_name_decision(db: Session, obj: "models.ApplicationMaster", tier_label: str,
@@ -182,15 +182,12 @@ def list_application_names(db: Session = Depends(get_db), current_user: models.U
     Application Name dropdown (see frontend QARequests/steps/DetailsStep.tsx).
     Anyone logged in can see the full approved list; there's nothing
     sensitive about a standardised application name."""
-    cached = cache.get_json(_APPROVED_NAMES_CACHE_KEY)
-    if cached is not None:
-        return cached
-    rows = (db.query(models.ApplicationMaster)
-            .filter(models.ApplicationMaster.status == "APPROVED")
-            .order_by(models.ApplicationMaster.name).all())
-    result = [schemas.ApplicationMasterOut.model_validate(row).model_dump(mode="json") for row in rows]
-    cache.set_json(_APPROVED_NAMES_CACHE_KEY, result, _APPROVED_NAMES_CACHE_TTL)
-    return result
+    def load():
+        rows = (db.query(models.ApplicationMaster)
+                .filter(models.ApplicationMaster.status == "APPROVED")
+                .order_by(models.ApplicationMaster.name).all())
+        return [schemas.ApplicationMasterOut.model_validate(row).model_dump(mode="json") for row in rows]
+    return cache.cached_json(cache.APPLICATIONS_FAMILY, _APPROVED_NAMES_CACHE_KEY, load, _APPROVED_NAMES_CACHE_TTL)
 
 
 @router.post("", response_model=schemas.ApplicationMasterOut, status_code=201)

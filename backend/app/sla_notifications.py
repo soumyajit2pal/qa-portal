@@ -68,26 +68,37 @@ def queue_record_breach(db, entity_type, target, now=None):
     return count
 
 
-def queue_breaches():
+def queue_breaches(continue_running=None):
     if not mail._enabled():
         return 0
     total = 0
+    continue_running = continue_running or (lambda: True)
     for kind, model in ENTITIES.items():
         # Keyset pages avoid loading an unbounded deployment into memory.
         last_id = 0
         while True:
+            if not continue_running():
+                return total
             with mail.SessionLocal() as db:
                 ids = [r[0] for r in db.query(model.id).filter(model.id > last_id)
                        .order_by(model.id).limit(100).all()]
             if not ids:
                 break
             for ident in ids:
+                if not continue_running():
+                    return total
                 try:
                     with mail.SessionLocal() as db:
                         target = db.query(model).filter(model.id == ident).with_for_update().one_or_none()
                         if target is not None:
-                            total += queue_record_breach(db, kind, target)
+                            queued = queue_record_breach(db, kind, target)
+                        else:
+                            queued = 0
+                        if not continue_running():
+                            db.rollback()
+                            return total
                         db.commit()
+                        total += queued
                 except Exception:
                     mail.logger.exception('SLA notification evaluation failed entity=%s id=%s', kind, ident)
             last_id = ids[-1]

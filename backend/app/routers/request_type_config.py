@@ -18,14 +18,11 @@ _CACHE_TTL = 300
 @router.get("", response_model=List[schemas.RequestTypeConfigOut])
 def list_request_types(db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
-    cached = cache.get_json(_CACHE_KEY)
-    if cached is not None:
-        return cached
-    rows = get_request_type_configs(db)
-    db.commit()
-    result = [schemas.RequestTypeConfigOut.model_validate(row).model_dump(mode="json") for row in rows]
-    cache.set_json(_CACHE_KEY, result, _CACHE_TTL)
-    return result
+    def load():
+        rows = get_request_type_configs(db)
+        db.commit()
+        return [schemas.RequestTypeConfigOut.model_validate(row).model_dump(mode="json") for row in rows]
+    return cache.cached_json(cache.REQUEST_TYPES_FAMILY, _CACHE_KEY, load, _CACHE_TTL)
 
 
 @router.patch("/{config_id}", response_model=schemas.RequestTypeConfigOut)
@@ -39,5 +36,5 @@ def update_request_type(config_id: int, payload: schemas.RequestTypeConfigUpdate
     row.is_active = payload.is_active
     db.commit()
     db.refresh(row)
-    cache.delete(_CACHE_KEY)
+    cache.invalidate(cache.REQUEST_TYPES_FAMILY)
     return row

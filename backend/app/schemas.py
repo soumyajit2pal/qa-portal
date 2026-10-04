@@ -683,6 +683,12 @@ class DASTTargetIn(BaseModel):
     environment: Optional[str] = None
     authentication_required: Optional[str] = None   # "Yes"/"No"
     test_credentials: Optional[str] = None
+    commit_id: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("commit_id", mode="before")
+    @classmethod
+    def normalize_deployed_hash(cls, value):
+        return (value.strip() or None) if isinstance(value, str) else value
 
 
 class DASTTargetOut(ORMModel):
@@ -693,6 +699,7 @@ class DASTTargetOut(ORMModel):
     # Sensitive -- masked out per-row for unauthorized viewers; see
     # _dast_out in routers/sast_dast.py.
     test_credentials: Optional[str] = None
+    commit_id: Optional[str] = None
 
 
 class QARequestCreate(BaseModel):
@@ -1345,6 +1352,9 @@ class SecurityScanTargetOut(BaseModel):
     repository_url: Optional[str] = None
     git_branch: Optional[str] = None
     commit_id: Optional[str] = None
+    application_url: Optional[str] = None
+    environment: Optional[str] = None
+    authentication_required: Optional[str] = None
 
 
 class SecurityScanFilterOut(BaseModel):
@@ -1404,6 +1414,11 @@ class SecurityRepositoryStateOut(ISTResponseModel):
     fix_submitted_by_id: Optional[int] = None
 
 
+class DASTTargetStateOut(SecurityRepositoryStateOut):
+    environment: Optional[str] = None
+    authentication_required: Optional[str] = None
+
+
 class SecurityFindingsValidationIn(BaseModel):
     target_ids: Optional[List[int]] = None
 
@@ -1411,7 +1426,7 @@ class SecurityFindingsValidationIn(BaseModel):
     @classmethod
     def valid_targets(cls, value):
         if value is not None and (not value or any(item <= 0 for item in value) or len(value) != len(set(value))):
-            raise ValueError("Select each valid repository once")
+            raise ValueError("Select each valid scan target once")
         return value
 
 
@@ -1430,6 +1445,11 @@ class SecurityScanSummaryOut(ORMModel):
     ready_for_rescan: int = 0
     unscanned_repositories: int = 0
     all_repositories_clear: bool = False
+    target_states: List[DASTTargetStateOut] = []
+    total_targets: int = 0
+    clear_targets: int = 0
+    unscanned_targets: int = 0
+    all_targets_clear: bool = False
 
 
 class CommentIn(BaseModel):

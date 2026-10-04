@@ -48,7 +48,7 @@ _LINKABLE_TEST_CYCLE_STATUSES = ("Draft", "Ready", "In Progress")
 # lifecycle that used to live directly on the QA Request itself:
 #
 #   Draft -> Submit -> same-department SM Approval -> same-department
-#   Department Head Approval (assigns a QA Lead from the active workspace) -> that lead starts
+#   Department Head Approval -> workspace QA Lead group starts
 #   Readiness Verification -> QA Activity (Planning -> Tester
 #   Assignment -> Test Design -> Execution, with a Defect -> Waiting For Fix
 #   -> Retesting -> Regression Testing cycle) -> QA Completed -> QA Clearance
@@ -922,7 +922,7 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
 @router.post("/{req_id}/department-head-decision", response_model=schemas.FunctionalOut)
 def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisionIn, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
-    """Department Head reviews the request and assigns a QA Lead from the active workspace."""
+    """Department Head approves the request for the workspace's QA Lead group."""
     obj = _get_or_404(db, req_id, lock=True)
     _require_visible(db, obj, current_user)
     require_same_department(current_user, obj.department)
@@ -961,6 +961,7 @@ def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
     _require_visible(db, obj, current_user)
     _require(obj, QAStatus.QA_LEAD_ASSIGNED, "Start readiness verification")
     _require_assigned_qa_lead(obj, current_user)
+    obj.qa_lead_id = current_user.id
     obj.status = QAStatus.READINESS_VERIFICATION
     _log(db, obj.id, "QA Readiness", current_user, "Started", "Readiness verification started by assigned QA Lead")
     db.commit()
@@ -1013,6 +1014,9 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
         obj.needs_dept_head_reapproval = payload.require_dept_head_reapproval
     else:
         raise HTTPException(400, "decision must be one of: Passed, Failed")
+    # Group members may hand off readiness; retain the actual decision-maker
+    # in the same transaction as the decision and its history entry.
+    obj.qa_lead_id = current_user.id
     _log(db, obj.id, "Readiness Verification", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)

@@ -8127,7 +8127,7 @@ td { padding: 12px; }
 /* Test Execution refinement: turn the screen into an execution workspace,
    rather than a stack of competing summary cards. */
 .tm-execution-refined {
-  grid-template-columns: 236px minmax(0, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr);
   gap: 18px;
 }
 .tm-execution-refined.cycle-sidebar-collapsed { grid-template-columns: 52px minmax(0, 1fr); }
@@ -8463,7 +8463,7 @@ td { padding: 12px; }
   .qa-request-filter-row .raised-history-filter { justify-content: flex-start; }
 }
 
-/* Compact Test Execution navigator -------------------------------------- */
+/* Test Execution navigator: full cycle names above IDs and status. */
 .tm-execution-workspace .tm-cycle-panel {
   padding: 12px;
   border-color: #d7e2ea;
@@ -8577,10 +8577,10 @@ td { padding: 12px; }
   gap: 2px;
 }
 .tm-execution-workspace .tm-cycle-row > button:first-child {
-  min-height: 49px;
-  padding: 7px 9px;
+  min-height: 65px;
+  padding: 10px 11px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   border: 1px solid transparent;
@@ -8593,18 +8593,33 @@ td { padding: 12px; }
   background: #e8f1f9;
   box-shadow: inset 3px 0 #256397;
 }
-.tm-execution-workspace .tm-cycle-row-copy { gap: 8px !important; }
-.tm-execution-workspace .tm-cycle-row-copy > i { width: 7px; height: 7px; flex-basis: 7px; }
-.tm-execution-workspace .tm-cycle-row-copy > span { gap: 1px; }
-.tm-execution-workspace .tm-cycle-row-copy strong { color: #2d4e69; font-size: 11px; }
-.tm-execution-workspace .tm-cycle-row-copy small {
-  overflow: hidden;
-  color: #8192a1;
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.tm-execution-workspace .tm-cycle-row-copy { align-items: flex-start; gap: 8px !important; }
+.tm-execution-workspace .tm-cycle-row-copy > i { width: 7px; height: 7px; margin-top: 5px; flex-basis: 7px; }
+.tm-execution-workspace .tm-cycle-row-copy > span { flex: 1; gap: 6px; }
+.tm-execution-workspace .tm-cycle-nested .tm-cycle-row-copy strong {
+  overflow: visible;
+  color: #2d4e69;
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
-.tm-execution-workspace .tm-cycle-row > button:first-child > .badge {
+.tm-execution-workspace .tm-cycle-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px 8px;
+}
+.tm-execution-workspace .tm-cycle-row-copy small {
+  min-width: 0;
+  color: #8192a1;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.tm-execution-workspace .tm-cycle-row-meta > .badge {
   position: static;
   max-width: none;
   margin: 0;
@@ -8625,8 +8640,7 @@ td { padding: 12px; }
 .tm-execution-workspace .tm-cycle-delete svg { width: 13px; height: 13px; }
 .tm-execution-workspace .tm-cycle-row:hover .tm-cycle-delete,
 .tm-execution-workspace .tm-cycle-row:focus-within .tm-cycle-delete { display: grid; }
-.tm-execution-workspace .tm-cycle-row:has(.tm-cycle-delete):hover > button:first-child > .badge,
-.tm-execution-workspace .tm-cycle-row:has(.tm-cycle-delete:focus-visible) > button:first-child > .badge { display: none; }
+.tm-execution-workspace .tm-cycle-row:has(.tm-cycle-delete) > button:first-child { padding-right: 35px; }
 
 .tm-execution-workspace .tm-cycle-nested-add {
   min-height: 32px;

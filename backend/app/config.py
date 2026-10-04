@@ -19,11 +19,11 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import MutableMapping
+from typing import Literal, MutableMapping
 from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -145,6 +145,26 @@ class Settings(BaseSettings):
     document_portal_blocked_extensions: str = ".exe,.bat,.cmd,.sh,.ps1,.dll,.com,.msi,.scr"
     redis_url: str | None = None
     cache_enabled: bool = True
+    cache_socket_connect_timeout_seconds: float = Field(default=0.25, gt=0)
+    cache_socket_timeout_seconds: float = Field(default=0.25, gt=0)
+    cache_max_connections: int = Field(default=32, ge=1)
+    cache_fill_lock_ttl_seconds: int = Field(default=15, ge=1)
+    cache_fill_wait_seconds: float = Field(default=0.15, ge=0)
+    cache_init_retry_seconds: float = Field(default=15, gt=0)
+    dashboard_cache_ttl_seconds: int = Field(default=30, ge=1, le=300)
+    redis_coordination_url: str | None = None
+    redis_coordination_max_connections: int = Field(default=24, ge=1)
+    redis_coordination_connect_timeout_seconds: float = Field(default=0.5, gt=0)
+    redis_coordination_socket_timeout_seconds: float = Field(default=1, gt=0)
+    job_queue_backend: Literal["local", "redis"] = "local"
+    background_job_workers: int = Field(default=2, ge=1, le=16)
+    background_job_global_concurrency: int = Field(default=2, ge=1, le=64)
+    background_job_lease_seconds: int = Field(default=120, ge=15)
+    background_job_poll_seconds: float = Field(default=2, gt=0, le=30)
+    background_job_max_attempts: int = Field(default=3, ge=1, le=20)
+    background_job_retention_seconds: int = Field(default=7 * 86400, ge=60)
+    notification_worker_mode: Literal["embedded", "dedicated"] = "embedded"
+    login_rate_limit_backend: Literal["database", "redis"] = "database"
     cors_allowed_origins: str = ""
     trusted_hosts: str = "localhost,127.0.0.1,backend,document_portal"
     domain_name: str = ""
@@ -191,10 +211,19 @@ class Settings(BaseSettings):
                         "CORS_ALLOWED_ORIGINS must contain only explicit HTTPS origins "
                         "without credentials, paths, queries, or fragments in UAT or production"
                     )
-        if self.redis_url:
-            parsed_redis_url = urlsplit(self.redis_url)
-            if parsed_redis_url.scheme.lower() not in {"redis", "rediss"} or not parsed_redis_url.hostname:
-                raise ValueError("REDIS_URL must be a valid redis:// or rediss:// URL")
+        for name, value in (("REDIS_URL", self.redis_url), ("REDIS_COORDINATION_URL", self.redis_coordination_url)):
+            if value:
+                parsed_redis_url = urlsplit(value)
+                if parsed_redis_url.scheme.lower() not in {"redis", "rediss"} or not parsed_redis_url.hostname:
+                    raise ValueError(f"{name} must be a valid redis:// or rediss:// URL")
+        if self.job_queue_backend == "redis" or self.login_rate_limit_backend == "redis" or self.notification_worker_mode == "dedicated":
+            if not self.redis_coordination_url:
+                raise ValueError("REDIS_COORDINATION_URL is required for Redis jobs, login throttling or dedicated notifications")
+            if self.cache_enabled and self.redis_url:
+                cache_endpoint = urlsplit(self.redis_url)
+                control_endpoint = urlsplit(self.redis_coordination_url)
+                if (cache_endpoint.hostname, cache_endpoint.port or 6379) == (control_endpoint.hostname, control_endpoint.port or 6379):
+                    raise ValueError("Cache and durable coordination must use separate Redis instances, not different database numbers")
         if self.app_env in {"prod", "production"} and self.ldap_mock_enabled:
             raise ValueError("LDAP mock authentication cannot be enabled in production")
         if self.ldap_mock_enabled:

@@ -61,7 +61,22 @@ export async function pollBackgroundJob<T>(
       throw backgroundJobTimeoutError()
     }
 
-    const job = await getJob(remainingMs)
+    let job: PollableBackgroundJob<T>
+    try {
+      job = await getJob(remainingMs)
+    } catch (error) {
+      if (options.signal?.aborted) throw backgroundJobAbortError()
+      const status = error && typeof error === 'object' && 'status' in error
+        ? Number(error.status)
+        : undefined
+      // The server owns this operation. Retrying its status read during a
+      // short queue/API outage does not resubmit the import or export.
+      if (status === undefined || ![0, 408, 502, 503, 504].includes(status)) throw error
+      remainingMs = timeoutMs - (Date.now() - startedAt)
+      if (remainingMs <= 0) throw backgroundJobTimeoutError()
+      await waitForNextPoll(Math.min(pollIntervalMs, remainingMs), options.signal)
+      continue
+    }
     if (job.status === 'FAILED') throw new Error(job.error || 'The background operation failed')
     if (job.status === 'COMPLETED') return job
 

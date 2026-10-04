@@ -822,6 +822,8 @@ def _child_delegation_target(db: Session, qa_request_id: int, target_type: str,
         query = query.populate_existing().with_for_update()
         if model is models.SASTRequest:
             query = query.options(selectinload(models.SASTRequest.components))
+        elif model is models.DASTRequest:
+            query = query.options(selectinload(models.DASTRequest.targets))
     # ORA-02014 when lock=True -- see assign_for_input's comment in this same
     # file for the full explanation. .one_or_none() instead of .first() is
     # identical here (model.id is the primary key, so at most one row either
@@ -891,13 +893,14 @@ def assign_child_for_input(qa_request_id: int, target_type: str, target_id: int,
     _require_child_delegation_visibility(db, target, current_user)
     if target.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can delegate this request")
-    repository_input_pending = False
-    if normalized == 'SAST' and target.status in {'CONFIGURATION', 'SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'ASSIGNED_TO_LEAD', 'RESCAN'}:
-        from ..security_scan_state import repository_states
-        scans = db.query(models.SecurityScanResult).filter_by(request_type='SAST', request_id=target.id).order_by(
+    scan_input_pending = False
+    if normalized in {'SAST', 'DAST'} and target.status in {'CONFIGURATION', 'SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'ASSIGNED_TO_LEAD', 'RESCAN'}:
+        from ..security_scan_state import repository_states, target_states
+        scans = db.query(models.SecurityScanResult).filter_by(request_type=normalized, request_id=target.id).order_by(
             models.SecurityScanResult.imported_at.desc(), models.SecurityScanResult.id.desc()).all()
-        repository_input_pending = any(row['state'] in {'WAITING_FOR_FIX', 'STALE'} for row in repository_states(target, scans))
-    if target.status not in requester_statuses and not repository_input_pending:
+        resolve_states = repository_states if normalized == 'SAST' else target_states
+        scan_input_pending = any(row['state'] in {'WAITING_FOR_FIX', 'STALE'} for row in resolve_states(target, scans))
+    if target.status not in requester_statuses and not scan_input_pending:
         raise HTTPException(400, "Delegation is available only while this request is with the requester for input or correction")
     if _active_child_delegation(db, normalized, target.id, lock=True):
         raise HTTPException(400, "This request already has an active delegation")
@@ -1145,6 +1148,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
                 environment=t.get("environment") or "UAT",
                 authentication_required=t.get("authentication_required") or "No",
                 test_credentials=t.get("test_credentials"),
+                commit_id=t.get("commit_id"),
             ))
         # Same "Security Readiness" checklist pattern as SAST above -- own
         # Admin-configurable "DAST" template (see checklist_config.py), own

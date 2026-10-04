@@ -2763,8 +2763,14 @@ export default function TestExecution() {
     <ul className="tm-cycle-nested">
       {cycles.map((cycle) => (
         <li className="tm-cycle-row" key={cycle.id}>
-          <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)} title={`Open ${cycle.name} (${cycle.cycle_key}) · ${cycle.status}`}>
-            <span className="tm-cycle-row-copy"><i aria-hidden="true" /><span><strong>{cycle.name}</strong><small>{cycle.cycle_key}</small></span></span><Badge status={cycle.status} />
+          <button type="button" className={cycleId === cycle.id ? 'active' : ''} aria-current={cycleId === cycle.id ? 'true' : undefined} onClick={() => setCycleId(cycle.id)} title={`Open ${cycle.name} (${cycle.cycle_key}) · ${cycle.status}`}>
+            <span className="tm-cycle-row-copy">
+              <i aria-hidden="true" />
+              <span>
+                <strong>{cycle.name}</strong>
+                <span className="tm-cycle-row-meta"><small>{cycle.cycle_key}</small><Badge status={cycle.status} /></span>
+              </span>
+            </span>
           </button>
           {canDeleteCycle && cycle.workspace_writable && projectIsActive && !TEST_CYCLE_LOCKED_STATUSES.includes(cycle.status) && <button className="tm-cycle-delete" title={`Delete ${cycle.name}`} aria-label={`Delete ${cycle.name}`} onClick={() => setCycleToDelete(cycle)}><IconTrash aria-hidden="true" /></button>}
         </li>

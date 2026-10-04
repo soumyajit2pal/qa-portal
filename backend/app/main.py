@@ -42,6 +42,7 @@ from .routers import (
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, test_reports, audit, checklist_config, request_type_config,
     pending_approvals, defects, jobs, qa_workspaces, system_settings, signatures,
+    operations,
 )
 
 
@@ -114,7 +115,7 @@ app = FastAPI(
 email_notifications.install_outbox_listener()
 smtp_ready, smtp_reason = email_notifications.smtp_readiness()
 if smtp_ready:
-    logger.info("SMTP delivery is enabled; durable outbox polling started.")
+    logger.info("SMTP delivery is enabled; outbox worker mode=%s.", settings.notification_worker_mode)
     # Resume any notifications delayed by a temporary SMTP outage. The
     # outbox's atomic claim makes this safe with many workers.
     email_notifications.start_outbox_poller()
@@ -279,24 +280,6 @@ def _classify_module(path: str) -> str:
         if path.startswith(prefix):
             return module
     return "OTHER"
-
-
-# DSH-007 -- every one of these modules feeds routers/dashboard.py::
-# dashboard_summary's counts (QA_REQUEST for target_release_date/
-# department, the other four for child-request/active-request/lifecycle
-# counts). Rather than threading a cache.delete_prefix() call through the
-# ~30 individual create/transition/update endpoints across
-# qa_requests.py/functional.py/sast_dast.py/performance.py (high blast
-# radius, easy to miss one, and every one of them would need the exact same
-# call), this single choke point already sees every mutating request to
-# these modules via the module classification AUD-001/005 already computes
-# -- one successful POST/PUT/PATCH/DELETE against any of them invalidates
-# every cached dashboard summary (all department-scope/date-range variants
-# at once, via the shared key prefix) rather than trying to work out which
-# one variant it could have affected.
-_DASHBOARD_SUMMARY_INVALIDATING_MODULES = {
-    "QA_REQUEST", "FUNCTIONAL_REQUEST", "SAST_REQUEST", "DAST_REQUEST", "PERFORMANCE_REQUEST",
-}
 
 
 def _write_request_audit(request, request_id, status_code, duration_ms, error_name=None):
@@ -677,16 +660,6 @@ async def application_audit_middleware(request, call_next):
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
     if response.status_code < 500:
         database_circuit.record_success()
-    # DSH-007 -- see _DASHBOARD_SUMMARY_INVALIDATING_MODULES' own comment.
-    # cache.delete_prefix() is a best-effort SCAN+DEL that never raises
-    # (see cache.py's own docstring), so this is safe to run inline on the
-    # request path rather than needing its own BackgroundTask.
-    if (
-        request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
-        and response.status_code < 400
-        and _classify_module(request.url.path) in _DASHBOARD_SUMMARY_INVALIDATING_MODULES
-    ):
-        cache.delete_prefix("dashboard:summary:")
     # X-Audit-Request-ID is the original/established header name (kept for
     # any existing caller depending on it); X-Request-ID is added alongside
     # it as the conventional/standard header name (Section 8) so this also
@@ -747,6 +720,7 @@ app.include_router(request_type_config.router)
 app.include_router(pending_approvals.router)
 app.include_router(jobs.router)
 app.include_router(system_settings.router)
+app.include_router(operations.router)
 if DOCUMENT_PORTAL_EMBEDDED:
     app.include_router(document_portal.router)
     logger.warning(
@@ -774,12 +748,14 @@ def health():
         db_ok = True
     except Exception:
         db_ok = False
-    cache_status = "connected" if cache.available() else ("disabled" if not cache.REDIS_URL else "unreachable")
+    cache_details = cache.health_snapshot()
+    cache_status = "connected" if cache.available() else ("disabled" if not cache.CACHE_ENABLED or not cache.REDIS_URL else "unreachable")
     payload = {
         "status": "ok" if db_ok else "degraded",
         "profile": settings.app_env,
         "database": "ok" if db_ok else "unreachable",
         "cache": cache_status,
+        "cache_details": cache_details,
         # Deployment capability marker: support teams can verify that every
         # backend worker is running the build that accepts video evidence.
         "capabilities": {"video_evidence": ["mp4", "mov", "webm", "avi"]},
@@ -792,6 +768,9 @@ def health():
     if not db_ok:
         return JSONResponse(status_code=503, content=payload)
     return payload
+
+from .cache_invalidation import committed_cache_invalidation
+app.middleware("http")(committed_cache_invalidation)
 
 # Register last so cleartext requests are rejected before auth/database work.
 app.middleware("http")(enforce_https)

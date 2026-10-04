@@ -1,4 +1,3 @@
-import asyncio
 import os
 from typing import List, Literal, Optional
 from urllib.parse import urlparse
@@ -17,7 +16,6 @@ from ..execution_cycles import (
     require_cycle_unlinkable,
 )
 from ..database import get_db
-from ..database import SessionLocal
 from ..deps import (
     get_workflow_user as get_current_user, require_workflow_roles as require_roles, viewable_project_ids,
     require_can_execute_project, require_can_manage_execution_governance,
@@ -32,12 +30,12 @@ from ..constants import (
     format_role_labels,
 )
 from ..workspace_service import (
-    active_workspace_scope_ids, current_workspace_id, selectable_workspace_ids,
-    workspace_context,
+    current_workspace_id, selectable_workspace_ids,
 )
 from .. import documents as doc_store
 from .. import reassignment
 from . import jobs
+from ..job_tasks import make_spec
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 from ..upload_limits import validate_document_uploads
 
@@ -2788,28 +2786,9 @@ def queue_test_cycle_export(
     user_id = current_user.id
     actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
 
-    def build(job_id: str):
-        with SessionLocal() as worker_db:
-            worker_user = worker_db.get(models.User, user_id)
-            if not worker_user or not worker_user.is_active:
-                raise RuntimeError("The user who started this export no longer exists or is inactive")
-            worker_user.active_qa_workspace_id = actor_workspace_id
-            worker_scope_ids = active_workspace_scope_ids(
-                worker_db, worker_user, actor_workspace_id,
-            )
-            if actor_workspace_id is None or actor_workspace_id not in worker_scope_ids:
-                raise HTTPException(403, "The workspace used to start this export is no longer available")
-            worker_user.active_workspace_scope_ids = tuple(sorted(worker_scope_ids))
-            from ..workflow_authority import workflow_context
-            with workspace_context(actor_workspace_id, worker_scope_ids), workflow_context(worker_user):
-                from ..project_workspace_ownership import bind_actor
-                bind_actor(worker_db, worker_user)
-                worker_db.info['workflow_actor'] = worker_user
-                jobs.update(job_id, progress=15)
-                response = export_test_cycle(cycle_id, worker_db, worker_user)
-                return asyncio.run(jobs.save_streaming_response(job_id, response, filename))
-
-    return jobs.enqueue(background_tasks, "TEST_CYCLE_EXPORT", user_id, build)
+    spec = make_spec("TEST_CYCLE_EXPORT", user_id, actor_workspace_id,
+                     cycle_id=cycle_id, filename=filename)
+    return jobs.enqueue(background_tasks, "TEST_CYCLE_EXPORT", user_id, spec)
 
 
 @router.post("/cycles/{cycle_id}/executions", response_model=List[schemas.TestExecutionOut])
@@ -2959,7 +2938,7 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
             cycle=cycle,
             test_cases=[selected_by_id[execution.test_case_id] for execution in created],
         )
-    db.commit()
+    jobs.commit_or_flush(db)
     if not created:
         return []
     # Perf tuning (2026-08, reported directly: "if i have 3500 testcase
@@ -3024,34 +3003,10 @@ def add_test_cases_from_server_selection(
         assigned_to_id = payload.assigned_to_id
         scope_expansion_reason = payload.reason
 
-        def add_in_background(job_id: str):
-            with SessionLocal() as worker_db:
-                worker_user = worker_db.get(models.User, user_id)
-                if not worker_user:
-                    raise RuntimeError("The user who started this job no longer exists")
-                worker_user.active_qa_workspace_id = actor_workspace_id
-                from ..workflow_authority import workflow_context
-                with workflow_context(worker_user):
-                    from ..project_workspace_ownership import bind_actor
-                    bind_actor(worker_db, worker_user)
-                    worker_db.info['workflow_actor'] = worker_user
-                    jobs.update(job_id, progress=15)
-                    created_rows = add_test_cases_to_cycle(
-                        cycle_id,
-                        schemas.TestExecutionAdd(
-                            test_case_ids=selected_ids,
-                            assigned_to_id=assigned_to_id,
-                            reason=scope_expansion_reason,
-                        ),
-                        worker_db,
-                        worker_user,
-                    )
-                    return {
-                        "created_count": len(created_rows),
-                        "skipped_count": len(selected_ids) - len(created_rows),
-                    }
-
-        job = jobs.enqueue(background_tasks, "ADD_TESTCASES_TO_CYCLE", user_id, add_in_background)
+        spec = make_spec("ADD_TESTCASES_TO_CYCLE", user_id, actor_workspace_id,
+                         cycle_id=cycle_id, test_case_ids=selected_ids,
+                         assigned_to_id=assigned_to_id, reason=scope_expansion_reason)
+        job = jobs.enqueue(background_tasks, "ADD_TESTCASES_TO_CYCLE", user_id, spec)
         return {
             "created_count": 0,
             "skipped_count": 0,

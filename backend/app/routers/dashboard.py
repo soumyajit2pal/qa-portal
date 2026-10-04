@@ -3,6 +3,8 @@ import datetime
 from collections import Counter, defaultdict
 from types import SimpleNamespace
 import json
+from functools import wraps
+import inspect
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import and_, case, exists as db_exists, func, literal, or_, select, union_all
@@ -23,6 +25,55 @@ from ..constants import (
 )
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard-analytics"])
+
+
+def _dashboard_cache_key(name, db, current_user, date_from, date_to):
+    """Represent all visibility inputs, including individual project grants.
+
+    The committed invalidation generation is the data/permission revision;
+    this principal fingerprint also isolates differently scoped readers.
+    JSON preserves empty and unrestricted scopes as distinct identities.
+    """
+    scope = dashboard_department_scope(current_user)
+    projects = viewable_project_ids(db, current_user)
+    return json.dumps({
+        "schema": 1, "analytics": name, "principal": current_user.id,
+        "roles": sorted(current_user.roles),
+        "departments": None if scope is None else sorted(scope),
+        "workspaces": sorted(active_qa_workspace_scope_ids(current_user)),
+        "projects": None if projects is None else sorted(projects),
+        "from": date_from.isoformat() if date_from else None,
+        "to": date_to.isoformat() if date_to else None,
+        # Ageing and release-window aggregates depend on today's date.
+        "today": models.now().date().isoformat(),
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _cached_dashboard(name, ttl_seconds=None):
+    def decorate(function):
+        signature = inspect.signature(function)
+
+        @wraps(function)
+        def read(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            for field in ("date_from", "date_to"):
+                value = bound.arguments[field]
+                if not isinstance(value, (str, type(None))):
+                    bound.arguments[field] = getattr(value, "default", value)
+            start, end = _date_bounds(bound.arguments["date_from"], bound.arguments["date_to"])
+            db, user = bound.arguments["db"], bound.arguments["current_user"]
+            load = lambda: function(*bound.args, **bound.kwargs)
+            # Lightweight direct-call tests and unconfigured environments
+            # retain the original database path without scope-key queries.
+            if not cache.CACHE_ENABLED or not cache.REDIS_URL or getattr(user, "id", None) is None:
+                return load()
+            key = _dashboard_cache_key(name, db, user, start, end)
+            configured_ttl = cache.settings.dashboard_cache_ttl_seconds if ttl_seconds is None else ttl_seconds
+            return cache.cached_json(cache.DASHBOARD_FAMILY, key, load, configured_ttl)
+
+        return read
+    return decorate
 
 
 # Every endpoint in this file is only ever called by the Dashboard (see
@@ -747,11 +798,13 @@ def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
     count_fields = ("critical_count", "high_count", "medium_count", "low_count", "total_count",
                     "suppressed_critical_count", "suppressed_high_count", "suppressed_medium_count",
                     "suppressed_low_count", "suppressed_total_count")
-    sast_requests = {}
-    if kind == "SAST" and grouped:
-        sast_requests = {request.id: request for request in db.query(models.SASTRequest)
-                         .filter(models.SASTRequest.id.in_(list(grouped)))
-                         .options(selectinload(models.SASTRequest.components)).all()}
+    security_requests = {}
+    if kind in {"SAST", "DAST"} and grouped:
+        request_model = models.SASTRequest if kind == "SAST" else models.DASTRequest
+        targets = request_model.components if kind == "SAST" else request_model.targets
+        security_requests = {request.id: request for request in db.query(request_model)
+                             .filter(request_model.id.in_(list(grouped)))
+                             .options(selectinload(targets)).all()}
     for request_id, request_rows in grouped.items():
         representative = request_rows[-1]
         from ..security_scan_state import current_scan_results
@@ -762,10 +815,16 @@ def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
         values["targets"] = [target for row in batch for target in row.targets]
         if kind == "SAST":
             from ..security_scan_state import repository_states
-            request = sast_requests.get(request_id)
+            request = security_requests.get(request_id)
             states = repository_states(request, list(reversed(request_rows))) if request else []
             values["repository_states"] = states
             values["all_repositories_clear"] = bool(states) and all(row["state"] == "CLEAR" for row in states)
+        elif kind == "DAST":
+            from ..security_scan_state import target_states
+            request = security_requests.get(request_id)
+            states = target_states(request, list(reversed(request_rows))) if request else []
+            values["target_states"] = states
+            values["all_targets_clear"] = bool(states) and all(row["state"] == "CLEAR" for row in states)
         latest[request_id] = SimpleNamespace(**values)
     return latest
 
@@ -1562,6 +1621,7 @@ def _ageing_bucket(days: int) -> str:
 
 # ---------------- 4.9.1 / 4.9.2 Project-wise Dashboard ----------------
 @router.get("/project-wise")
+@_cached_dashboard("project_wise")
 def project_wise(date_from: str | None = Query(None), date_to: str | None = Query(None),
                  db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
@@ -1645,6 +1705,7 @@ _ACTIVE_REQUEST_MODELS = [
 
 
 @router.get("/summary")
+@_cached_dashboard("dashboard_summary")
 def dashboard_summary(date_from: str | None = Query(None), date_to: str | None = Query(None),
                       db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """DSH-001..004 -- consolidates the handful of derived numbers
@@ -1666,22 +1727,12 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     CommandCentre's own pre-existing behavior, where those three were never
     range-filtered client-side either.
 
-    DSH-005/006 -- read-through Redis cache, 60s TTL, keyed by department
-    scope + the two date params (this summary's only real inputs) so one
-    department's cached response is never served to another. See
-    `cache.py`'s own module docstring for why this degrades to "just
-    compute it every time" rather than erroring when Redis isn't
-    configured/reachable -- `cache.get_json`/`set_json` never raise."""
+    Read-through Redis caching uses the configured dashboard TTL (30s by
+    default), committed data/permission generations and a complete principal,
+    workspace, department and project-grant fingerprint. Invalid dates are
+    rejected before lookup. An unavailable cache preserves the database path.
+    """
     scope = dashboard_department_scope(current_user)
-    # 2026-08 CR -- scope is now a list; join it into a stable, readable cache
-    # key segment (sorted so department order never produces a cache miss).
-    workspace_ids = active_qa_workspace_scope_ids(current_user)
-    workspace_scope_key = ",".join(str(value) for value in workspace_ids) or "all"
-    cache_key = f"dashboard:summary:v9:ws-{workspace_scope_key}:{','.join(sorted(scope)) if scope else 'all'}:{date_from or ''}:{date_to or ''}"
-    cached = cache.get_json(cache_key)
-    if cached is not None:
-        return cached
-
     child_requests_total = 0
     active_requests_count = 0
     for model, terminal_statuses in _ACTIVE_REQUEST_MODELS:
@@ -1745,7 +1796,6 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
         "defects_resolved": defects_resolved,
         "defect_reopen_events": int(defect_reopen_events),
     }
-    cache.set_json(cache_key, result, ttl_seconds=60)
     return result
 
 
@@ -2178,11 +2228,12 @@ def dashboard_attention_detail(
 # ---------------- 4.9.5 / 4.9.6 Security Dashboards ----------------
 def _security_remediation_status(kind: str, scan) -> str:
     resolved = (bool(getattr(scan, "all_repositories_clear", False))
-                if kind == "SAST" else scan.total_count == 0)
+                if kind == "SAST" else bool(getattr(scan, "all_targets_clear", scan.total_count == 0)))
     return "Resolved" if resolved else "Open"
 
 
 @router.get("/security/sast")
+@_cached_dashboard("security_sast")
 def security_sast(date_from: str | None = Query(None), date_to: str | None = Query(None),
                   db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
@@ -2222,6 +2273,7 @@ def security_sast(date_from: str | None = Query(None), date_to: str | None = Que
 
 
 @router.get("/security/dast")
+@_cached_dashboard("security_dast")
 def security_dast(date_from: str | None = Query(None), date_to: str | None = Query(None),
                   db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
@@ -2334,6 +2386,7 @@ def security_insight_details(
 
 # ---------------- 4.9.7 Suppression Dashboard ----------------
 @router.get("/suppression")
+@_cached_dashboard("suppression_dashboard")
 def suppression_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None),
                           db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
@@ -2536,15 +2589,23 @@ SAST_DAST_PENDING_WITH = {
 }
 
 
-def _sast_pending_with(request, scan) -> str:
+def _security_pending_with(request, scan, states_field) -> str:
     pending_with = SAST_DAST_PENDING_WITH.get(request.status, "Security Analyst")
     if request.status not in {"SCANNING", "FINDING_VALIDATION", "REMEDIATION", "ASSIGNED_TO_REQUESTER",
                               "WAITING_FOR_FIX", "ASSIGNED_TO_LEAD", "RESCAN"}:
         return pending_with
-    states = {row["state"] for row in getattr(scan, "repository_states", [])}
+    states = {row["state"] for row in getattr(scan, states_field, [])}
     requester_work = bool(states & {"WAITING_FOR_FIX", "STALE"})
     analyst_work = bool(states & {"NOT_SCANNED", "AWAITING_VALIDATION", "READY_FOR_RESCAN", "STALE"})
     return "Requester / Security Analyst" if requester_work and analyst_work else pending_with
+
+
+def _sast_pending_with(request, scan) -> str:
+    return _security_pending_with(request, scan, "repository_states")
+
+
+def _dast_pending_with(request, scan) -> str:
+    return _security_pending_with(request, scan, "target_states")
 
 
 PERFORMANCE_PENDING_WITH = {
@@ -2563,6 +2624,7 @@ PERFORMANCE_PENDING_WITH = {
 
 
 @router.get("/3w")
+@_cached_dashboard("three_w_dashboard")
 def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None),
                       db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """
@@ -2606,17 +2668,19 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             "priority": r.risk_category, "status": r.status, "source": "SAST Request",
         })
 
-    for r in _join_qa_department(
+    dast_requests = _join_qa_department(
             _in_period(db.query(models.DASTRequest), models.DASTRequest.updated_at, date_from, date_to).filter(
                 models.DASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)),
-            models.DASTRequest, scope, db, current_user).all():
+            models.DASTRequest, scope, db, current_user).all()
+    dast_scans = _latest_scan_by_request(db, "DAST", [r.id for r in dast_requests])
+    for r in dast_requests:
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
             "application_name": r.application_name or r.application_url,
             "pending_stage": f"DAST - {SAST_DAST_STATUS_LABELS.get(r.status, r.status)}",
             "responsible_team": r.department or "Unassigned Department",
-            "pending_with": SAST_DAST_PENDING_WITH.get(r.status, "Security Analyst"), "owner": None,
+            "pending_with": _dast_pending_with(r, dast_scans.get(r.id)), "owner": None,
             "department": r.department,
             "pending_since": r.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": r.risk_category, "status": r.status, "source": "DAST Request",

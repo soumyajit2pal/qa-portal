@@ -23,11 +23,14 @@ _ACTIVE_ITEMS_CACHE_TTL = 300
 
 
 def _active_items_cache_key(module: str, department: Optional[str]) -> str:
-    return f"refdata:checklist-items:active:v2:{module}:{department or '__none__'}"
+    # JSON distinguishes an absent department from a literal name and does
+    # not introduce delimiter collisions between module/name segments.
+    import json
+    return json.dumps(["active:v3", module, department], ensure_ascii=False)
 
 
 def _invalidate_active_items_cache(module: str) -> None:
-    cache.delete_prefix(f"refdata:checklist-items:active:v2:{module}:")
+    cache.invalidate(cache.CHECKLIST_FAMILY)
 
 
 def _validate_mandatory_departments(db: Session, departments: List[str]) -> List[str]:
@@ -75,13 +78,10 @@ def list_active_items(module: str, department: Optional[str] = None, db: Session
     user (not Admin-only), same as e.g. GET /api/departments."""
     module = _check_module(module)
     cache_key = _active_items_cache_key(module, department)
-    cached = cache.get_json(cache_key)
-    if cached is not None:
-        return cached
-    rows = get_template_items(db, module, only_active=True)
-    result = [_item_out(row, department) for row in rows]
-    cache.set_json(cache_key, result, _ACTIVE_ITEMS_CACHE_TTL)
-    return result
+    def load():
+        rows = get_template_items(db, module, only_active=True)
+        return [_item_out(row, department) for row in rows]
+    return cache.cached_json(cache.CHECKLIST_FAMILY, cache_key, load, _ACTIVE_ITEMS_CACHE_TTL)
 
 
 @router.get("/{module}/all", response_model=List[schemas.ChecklistTemplateItemOut])

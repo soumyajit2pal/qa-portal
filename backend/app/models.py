@@ -20,6 +20,24 @@ def pk_column():
     return Column(Integer, Identity(start=1, increment=1), primary_key=True)
 
 
+class BackgroundJobReceipt(Base):
+    """Commit the durable job result in the same transaction as its writes.
+
+    The primary key also serializes an old worker and its recovered delivery.
+    Snapshot IDs deliberately outlive removed users/workspaces; they are never
+    used to grant access, which is checked afresh before every execution.
+    """
+    __tablename__ = 'qap_background_job_receipts'
+    job_id = Column(String(32), primary_key=True)
+    task_type = Column(String(64), nullable=False)
+    task_hash = Column(String(64), nullable=False)
+    user_id = Column(Integer, nullable=False)
+    # Business/ViewOnly exports can be department- or record-grant scoped.
+    workspace_id = Column(Integer, nullable=True)
+    result_json = Column(Text, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+
 class UsedLoginChallenge(Base):
     __tablename__ = 'qap_used_login_challenges'
     __table_args__ = (Index('ix_qap_login_challenge_exp', 'expires_at'),)
@@ -1109,7 +1127,7 @@ class FunctionalRequest(Base):
     risk_rating = Column(String(16))
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     department_head_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # who performed Department Head Approval
-    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # QA Lead from the assigned workspace assigned by Department Head
+    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # QA Lead group member who started/decided readiness
     assigned_tester_ids = Column(String(255))     # comma-separated QA Engineer user ids (Tester Assigned step)
     signoff_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)    # linked QA Clearance certificate
     # Set when auto-created from a QA Request gateway (always, for new rows --
@@ -1355,8 +1373,8 @@ class SASTRequest(Base):
     # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # QA Lead from the assigned workspace assigned by the requester's Department Head for readiness,
-    # followed by the Security Analyst from the assigned workspace selected by that lead.
+    # QA Lead group member who started/decided readiness; the Security Analyst
+    # for execution is selected separately by the group.
     security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     report_path = Column(String(255))
@@ -1580,7 +1598,7 @@ class DASTRequest(Base):
     # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned QA Lead from the assigned workspace
+    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # QA Lead group member who started/decided readiness
     security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned Security Analyst from the assigned workspace
     report_path = Column(String(255))
     # Set when this DAST request was auto-created because a QA Request's
@@ -1737,6 +1755,15 @@ class DASTTarget(Base):
     environment = Column(String(500))
     authentication_required = Column(String(16), default="No")   # "Yes"/"No"
     test_credentials = Column(String(2000))
+    # Deployed code reference and independent target queue. Legacy targets
+    # require a fresh identity-bound scan; old aggregate evidence cannot
+    # establish current validated coverage for a URL.
+    commit_id = Column(String(500), nullable=True)
+    scan_state = Column(String(32), nullable=True)
+    latest_scan_id = Column(Integer, ForeignKey("qap_security_scan_results.id"), nullable=True)
+    validation_scan_id = Column(Integer, ForeignKey("qap_security_scan_results.id"), nullable=True)
+    fix_submitted_at = Column(DateTime, nullable=True)
+    fix_submitted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
 
     dast_request = relationship("DASTRequest", back_populates="targets")
 
@@ -1867,8 +1894,8 @@ class PerformanceRequest(Base):
     # that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # Existing column now represents the QA Lead from the assigned workspace assigned by the
-    # requester's Department Head. Execution testers are tracked separately.
+    # Existing column records the QA Lead group member who started/decided
+    # readiness. Execution testers are tracked separately.
     engineer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     assigned_tester_ids = Column(String(255))  # comma-separated workspace QA Engineer ids
     report_path = Column(String(255))

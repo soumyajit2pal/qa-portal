@@ -51,6 +51,10 @@ services:
       DOCUMENT_PORTAL_STORAGE_HOST_PATH: /data/qualityops/document-storage/repository
       LOGIN_ENCRYPTION_PRIVATE_KEY_FILE: /run/secrets/qualityops/login-private.pem
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_COORDINATION_URL: ${REDIS_COORDINATION_URL:-redis://redis_coordination:6379/0}
+      JOB_QUEUE_BACKEND: ${JOB_QUEUE_BACKEND:-redis}
+      NOTIFICATION_WORKER_MODE: ${NOTIFICATION_WORKER_MODE:-dedicated}
+      LOGIN_RATE_LIMIT_BACKEND: ${LOGIN_RATE_LIMIT_BACKEND:-redis}
 
     # Read the trust list from the selected service env_file at runtime.
     # Uvicorn must trust only nginx's source IP for forwarding metadata.
@@ -62,8 +66,8 @@ services:
     volumes:
       - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}:/run/config/qualityops.env:ro,z
       - ${LOGIN_ENCRYPTION_KEY_HOST_DIR:-./secrets}:/run/secrets/qualityops:ro,Z
-      - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/uploads:/data/qualityops/uploads:Z
-      - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/logs:/app/logs:Z
+      - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/uploads:/data/qualityops/uploads:z
+      - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/logs:/app/logs:z
       # Workspace administration and the document service must see the same
       # files and quota locks. Lowercase z permits both SELinux containers.
       - ${DOCUMENT_PORTAL_STORAGE_HOST_PATH:-./storage/document-portal}:/data/qualityops/document-storage:z
@@ -82,7 +86,7 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      redis:
+      redis_coordination:
         condition: service_healthy
 
     healthcheck:
@@ -164,7 +168,17 @@ services:
     # to resolve an ambiguous short name. Load this exact tag before using
     # `--pull never` on an offline host.
     image: docker.io/library/redis:8.10.1-alpine3.23
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --maxmemory
+      - ${REDIS_CACHE_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+    mem_limit: ${REDIS_CACHE_CONTAINER_MEMORY:-512m}
 
     healthcheck:
       test:
@@ -175,6 +189,120 @@ services:
     restart: unless-stopped
     volumes:
       - qa_portal_redis:/data
+
+  # Durable coordination has a separate memory/eviction boundary. A second
+  # logical Redis database cannot protect queues from cache eviction.
+  redis_coordination:
+    image: docker.io/library/redis:8.10.1-alpine3.23
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - always
+      - --maxmemory
+      - ${REDIS_COORDINATION_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - noeviction
+    mem_limit: ${REDIS_COORDINATION_CONTAINER_MEMORY:-512m}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    volumes:
+      - qa_portal_redis_coordination:/data
+
+  job_worker:
+    image: qualityops-backend:${IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}
+    environment:
+      APP_ENV_FILE: /run/config/qualityops.env
+      TZ: Asia/Kolkata
+      UPLOAD_STORAGE_ROOT: /data/qualityops/uploads
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_COORDINATION_URL: ${REDIS_COORDINATION_URL:-redis://redis_coordination:6379/0}
+      JOB_QUEUE_BACKEND: redis
+      NOTIFICATION_WORKER_MODE: dedicated
+      LOGIN_RATE_LIMIT_BACKEND: ${LOGIN_RATE_LIMIT_BACKEND:-redis}
+      DB_POOL_SIZE: ${JOB_WORKER_DB_POOL_SIZE:-2}
+      DB_MAX_OVERFLOW: ${JOB_WORKER_DB_MAX_OVERFLOW:-1}
+      AUDIT_DB_POOL_SIZE: 1
+      AUDIT_DB_MAX_OVERFLOW: 0
+      LOG_FILE_NAME: jobs.log
+    command: ["python", "-m", "app.job_worker"]
+    volumes:
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}:/run/config/qualityops.env:ro,z
+      - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/uploads:/data/qualityops/uploads:z
+      - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/logs:/app/logs:z
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis_coordination:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.job_worker", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 2m
+    restart: unless-stopped
+
+  notification_worker:
+    image: qualityops-backend:${IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}
+    environment:
+      APP_ENV_FILE: /run/config/qualityops.env
+      TZ: Asia/Kolkata
+      UPLOAD_STORAGE_ROOT: /data/qualityops/uploads
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_COORDINATION_URL: ${REDIS_COORDINATION_URL:-redis://redis_coordination:6379/0}
+      JOB_QUEUE_BACKEND: redis
+      NOTIFICATION_WORKER_MODE: dedicated
+      LOGIN_RATE_LIMIT_BACKEND: ${LOGIN_RATE_LIMIT_BACKEND:-redis}
+      DB_POOL_SIZE: ${NOTIFICATION_WORKER_DB_POOL_SIZE:-2}
+      DB_MAX_OVERFLOW: ${NOTIFICATION_WORKER_DB_MAX_OVERFLOW:-1}
+      AUDIT_DB_POOL_SIZE: 1
+      AUDIT_DB_MAX_OVERFLOW: 0
+      LOG_FILE_NAME: notifications.log
+    command: ["python", "-m", "app.notification_worker"]
+    volumes:
+      - ${APP_ENV_FILE:?Set APP_ENV_FILE to the intended deployment environment file}:/run/config/qualityops.env:ro,z
+      - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/uploads:/data/qualityops/uploads:z
+      - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/logs:/app/logs:z
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis_coordination:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.notification_worker", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 2m
+    restart: unless-stopped
 
   frontend:
     image: qualityops-frontend:${IMAGE_TAG:-latest}
@@ -214,4 +342,5 @@ volumes:
   # These legacy volume keys are intentionally retained: renaming a volume
   # disconnects an existing deployment from its persisted Redis data/logs.
   qa_portal_redis:
+  qa_portal_redis_coordination:
   qa_portal_document_logs:

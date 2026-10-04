@@ -1,126 +1,168 @@
+"""Optional shared Redis cache with generation fencing and bounded fills.
+
+Workflow authority stays in Oracle. Redis failures bypass caching, and a
+reader can only publish while its generation and owned fill lease still
+match, so committed invalidation cannot be undone by an older reader.
 """
-Redis-backed cache -- CAC-001..007 (reference-data caching) and DSH-005..007
-(dashboard summary caching).
+from __future__ import annotations
 
-Why Redis instead of the in-process cache originally planned: once the API
-runs as multiple worker processes (INF-001, 4 workers), an in-process cache
-is 4 separate caches that can't see each other's writes/invalidations --
-worker 2 could keep serving a stale dashboard summary for its full TTL after
-worker 1 already invalidated its own copy on a write. Redis gives every
-worker the same cache and the same invalidation, which is the whole point of
-caching data that changes.
-
-This module is designed to degrade to a harmless no-op cache, never to break
-a request, for operational failures such as:
-  - the `redis` package isn't installed at all (ImportError on first use)
-  - REDIS_URL isn't set (caching simply stays off)
-  - Redis is unreachable / times out / returns an operation error
-
-That matters a lot in this codebase: there is no live Redis available in
-every environment this app runs in (e.g. this sandbox, or a fresh dev
-checkout before infra is provisioned), and cache reads/writes should always
-be treated as a possibly-absent optimization, not a dependency the request
-can fail on. Every public function below returns a safe default (None /
-False / 0) instead of raising when the cache is unavailable for any reason.
-
-Usage:
-    from . import cache
-    value = cache.get_json("dashboard:summary:v1")
-    if value is None:
-        value = _compute_expensive_thing()
-        cache.set_json("dashboard:summary:v1", value, ttl_seconds=60)
-    ...
-    cache.delete_prefix("refdata:departments:")  # on a write that invalidates it
-"""
+from collections import Counter
+from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import threading
 import time
-from typing import Any, Optional
+import uuid
+from typing import Any, Callable, Optional
+from fastapi.encoders import jsonable_encoder
 
 from .config import settings
 from .resilience import CircuitOpenError, redis_circuit
 
+try:
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry
+except ImportError:
+    NoBackoff = Retry = None
+
 logger = logging.getLogger("qa_portal.cache")
-
 REDIS_URL = settings.redis_url
-# Escape hatch to force caching off even with REDIS_URL set (e.g. to isolate
-# a cache-related bug in production without touching the connection string).
 CACHE_ENABLED = settings.cache_enabled
-
-# Every key this app writes is namespaced under this prefix, so a shared
-# Redis instance (e.g. one Redis used by more than one app) can never collide
-# with, or be accidentally flushed alongside, someone else's keys.
-KEY_PREFIX = "qa_portal:"
+KEY_PREFIX = f"qualityops:{settings.app_env}:cache:"
+DASHBOARD_FAMILY = "dashboard"
+DEPARTMENTS_FAMILY = "refdata:departments"
+APPLICATIONS_FAMILY = "refdata:application-names"
+CHECKLIST_FAMILY = "refdata:checklist-items"
+REQUEST_TYPES_FAMILY = "refdata:request-types"
 
 _client = None
 _client_lock = threading.Lock()
 _next_init_at = 0.0
-INIT_RETRY_SECONDS = 30.0
+INIT_RETRY_SECONDS = float(getattr(settings, "cache_init_retry_seconds", 15))
 _warned_unavailable = False
+_metrics_lock = threading.Lock()
+_counters = Counter()
+_operation_counts = Counter()
+_operation_time_ms = Counter()
+_last_success_at = None
+_last_failure_at = None
+_connected = False
+_dirty_families = set()
+_dirty_lock = threading.Lock()
+
+# Compare and publish in one Redis operation. A lost lease or changed
+# generation never permits writing an obsolete value or releasing a new
+# owner's lock. Cache data expires; generations use random tokens and do not.
+_PUBLISH_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
+redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[4])
+redis.call('DEL', KEYS[2])
+return 1
+"""
+_RELEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+
+def _setting(name, default):
+    return getattr(settings, name, default)
+
+
+def _count(name, amount=1):
+    with _metrics_lock:
+        _counters[name] += amount
+
+
+def _record(operation, started, successful, *, error=False):
+    global _connected, _last_success_at, _last_failure_at
+    elapsed = max(0, (time.perf_counter() - started) * 1000)
+    with _metrics_lock:
+        _operation_counts[operation] += 1
+        _operation_time_ms[operation] += elapsed
+        if successful:
+            _connected = True
+            _last_success_at = datetime.now(timezone.utc).isoformat()
+        elif error:
+            _connected = False
+            _last_failure_at = datetime.now(timezone.utc).isoformat()
+            _counters["errors"] += 1
+    if successful:
+        redis_circuit.record_success()
+    elif error:
+        redis_circuit.record_failure()
 
 
 def _cache_circuit_allows() -> bool:
     try:
         redis_circuit.check()
         return True
-    except CircuitOpenError as exc:
-        logger.info("Redis cache bypassed reason=circuit_open retry_after=%ss", exc.retry_after_seconds)
+    except CircuitOpenError:
+        _count("circuit_bypasses")
         return False
 
 
-def _cache_failure(operation: str, exc: Exception) -> None:
-    redis_circuit.record_failure()
-    logger.warning("Redis %s failed; treating cache as unavailable.", operation, exc_info=True)
+def _cache_failure(operation: str, exc: Exception, started=None) -> None:
+    _record(operation, started if started is not None else time.perf_counter(), False, error=True)
+    # Exceptions may contain server connection details; keep logs useful
+    # without exposing a configured URL, credentials or cached payloads.
+    logger.warning("Redis %s failed; bypassing cache (%s).", operation, type(exc).__name__)
 
 
 def _get_client():
-    """Lazily builds, with bounded retry, and returns the redis client, or None if caching
-    is disabled/unconfigured/unavailable."""
+    """Resolve backoff and no-I/O exits before reserving a circuit probe."""
     global _client, _warned_unavailable, _next_init_at
-    if not _cache_circuit_allows():
-        return None
-    if _client is not None:
-        return _client
     if not CACHE_ENABLED or not REDIS_URL:
         return None
+    if _client is not None:
+        return _client if _cache_circuit_allows() else None
     with _client_lock:
-        if _client is not None or time.monotonic() < _next_init_at:
-            return _client
-        _next_init_at = time.monotonic() + INIT_RETRY_SECONDS
+        if _client is not None:
+            return _client if _cache_circuit_allows() else None
+        if time.monotonic() < _next_init_at:
+            return None
         try:
-            import redis  # local import -- optional dependency, see module docstring
+            import redis
         except ImportError:
+            _next_init_at = time.monotonic() + INIT_RETRY_SECONDS
             if not _warned_unavailable:
-                logger.warning(
-                    "REDIS_URL is set but the 'redis' package is not installed; "
-                    "caching is disabled. Run `pip install -r requirements.txt`."
-                )
+                logger.warning("Redis package is unavailable; caching is bypassed.")
                 _warned_unavailable = True
             return None
+        if not _cache_circuit_allows():
+            return None
+        _next_init_at = time.monotonic() + INIT_RETRY_SECONDS
+        started = time.perf_counter()
         try:
-            client = redis.Redis.from_url(
-                REDIS_URL,
-                socket_connect_timeout=2,
-                socket_timeout=2,
+            # Explicitly disable automatic Redis command retries: optional
+            # caching must have a small, predictable request latency budget.
+            options = dict(
+                socket_connect_timeout=float(_setting("cache_socket_connect_timeout_seconds", .25)),
+                socket_timeout=float(_setting("cache_socket_timeout_seconds", .25)),
+                max_connections=int(_setting("cache_max_connections", 32)),
+                health_check_interval=30,
                 decode_responses=True,
+                retry_on_timeout=False,
             )
-            client.ping()
-        except Exception:
-            redis_circuit.record_failure()
-            if not _warned_unavailable:
-                logger.warning("Redis at %s is unreachable; caching will retry.", _masked(REDIS_URL), exc_info=True)
-                _warned_unavailable = True
+            if Retry is not None:
+                options["retry"] = Retry(NoBackoff(), int(_setting("cache_retry_attempts", 0)))
+            client = redis.Redis.from_url(REDIS_URL, **options)
+            if not client.ping():
+                raise ConnectionError("Redis initialization ping returned false")
+        except Exception as exc:
+            _cache_failure("connect", exc, started)
             return None
-        logger.info("Connected to Redis for caching.")
-        redis_circuit.record_success()
+        _record("connect", started, True)
         _client = client
-        return _client
+        _warned_unavailable = False
+        return client
 
 
 def _masked(url: str) -> str:
-    # Same spirit as database.py's mask_database_url -- don't let a
-    # redis://user:password@host URL's credentials reach the log file.
     if "@" not in url:
         return url
     scheme_and_creds, _, rest = url.rpartition("@")
@@ -132,110 +174,204 @@ def _key(key: str) -> str:
     return f"{KEY_PREFIX}{key}"
 
 
+def _call(operation, action):
+    client = _get_client()
+    if client is None:
+        _count("bypasses")
+        return False, None
+    started = time.perf_counter()
+    try:
+        value = action(client)
+    except Exception as exc:
+        _cache_failure(operation, exc, started)
+        return False, None
+    _record(operation, started, True)
+    return True, value
+
+
 def available() -> bool:
-    """True if a live, pingable Redis connection is currently in hand.
-    Useful for /api/health (INF-003) to report cache status without forcing
-    a new connection attempt on every health check."""
-    return _client is not None
+    """Report the outcome of recent I/O rather than allocated-client state."""
+    with _metrics_lock:
+        return bool(CACHE_ENABLED and REDIS_URL and _connected)
+
+
+def health_snapshot() -> dict:
+    with _metrics_lock:
+        state = "disabled" if not CACHE_ENABLED or not REDIS_URL else (
+            "connected" if _connected else "unreachable" if _last_failure_at else "not_connected")
+        operations = {
+            name: {"count": count, "total_ms": round(_operation_time_ms[name], 3),
+                   "average_ms": round(_operation_time_ms[name] / count, 3)}
+            for name, count in _operation_counts.items()
+        }
+        result = {
+            "enabled": bool(CACHE_ENABLED), "configured": bool(REDIS_URL),
+            "status": state, "last_success_at": _last_success_at, "last_failure_at": _last_failure_at,
+            "counters": dict(_counters), "operations": operations,
+        }
+    snap = redis_circuit.snapshot()
+    result["circuit"] = {"state": snap.state, "consecutive_failures": snap.consecutive_failures,
+                         "retry_after_seconds": snap.retry_after_seconds}
+    return result
 
 
 def ping() -> bool:
-    """Actively checks connectivity (may attempt to (re)connect). Distinct
-    from `available()`, which only reports the last-known state."""
-    client = _get_client()
-    if client is None:
-        return False
-    try:
-        result = bool(client.ping())
-        if result:
-            redis_circuit.record_success()
-        return result
-    except Exception as exc:
-        _cache_failure("PING", exc)
-        return False
+    ok, value = _call("ping", lambda client: client.ping())
+    return bool(ok and value)
 
 
-def get_json(key: str) -> Optional[Any]:
-    client = _get_client()
-    if client is None:
-        return None
-    try:
-        raw = client.get(_key(key))
-        redis_circuit.record_success()
-    except Exception as exc:
-        _cache_failure("GET", exc)
-        return None
+def _decode(raw):
     if raw is None:
         return None
     try:
         return json.loads(raw)
     except (TypeError, ValueError):
-        logger.warning("Redis GET returned non-JSON value for key=%s; treating as cache miss.", key)
+        _count("invalid_values")
         return None
 
 
+def get_json(key: str) -> Optional[Any]:
+    ok, raw = _call("get", lambda client: client.get(_key(key)))
+    value = _decode(raw) if ok else None
+    _count("hits" if value is not None else "misses")
+    return value
+
+
 def set_json(key: str, value: Any, ttl_seconds: int) -> bool:
-    client = _get_client()
-    if client is None:
-        return False
     try:
-        client.set(_key(key), json.dumps(value, default=str, ensure_ascii=False), ex=max(1, ttl_seconds))
-        redis_circuit.record_success()
-        return True
-    except Exception as exc:
-        _cache_failure("SET", exc)
+        encoded = json.dumps(jsonable_encoder(value), ensure_ascii=False)
+        ttl = max(1, int(ttl_seconds))
+    except (TypeError, ValueError, OverflowError):
+        _count("serialization_errors")
         return False
+    ok, _ = _call("set", lambda client: client.set(_key(key), encoded, ex=ttl))
+    return ok
 
 
 def delete(*keys: str) -> int:
-    """Deletes one or more exact keys. Missing keys are silently ignored
-    (matches Redis DEL semantics)."""
     if not keys:
         return 0
-    client = _get_client()
-    if client is None:
-        return 0
-    try:
-        deleted = client.delete(*(_key(k) for k in keys))
-        redis_circuit.record_success()
-        return deleted
-    except Exception as exc:
-        _cache_failure("DEL", exc)
-        return 0
+    ok, deleted = _call("delete", lambda client: client.delete(*(_key(key) for key in keys)))
+    return int(deleted or 0) if ok else 0
 
 
 def try_acquire_lock(key: str, ttl_seconds: int = 300) -> bool:
-    """Acquire a bounded Redis lock; unavailable is never permission to proceed.
-
-    Long-running maintenance uses storage_lock instead, avoiding lease expiry.
-    """
-    client = _get_client()
-    if client is None:
-        return False
-    try:
-        acquired = bool(client.set(_key(key), "1", nx=True, ex=max(1, ttl_seconds)))
-        redis_circuit.record_success()
-        return acquired
-    except Exception as exc:
-        _cache_failure("lock acquisition", exc)
-        return False
+    ok, acquired = _call("lock", lambda client: client.set(_key(key), "1", nx=True, ex=max(1, ttl_seconds)))
+    return bool(ok and acquired)
 
 
 def delete_prefix(prefix: str) -> int:
-    """Deletes every key under this app's namespace starting with `prefix`
-    (e.g. "refdata:departments:" to invalidate every cached page/variant of
-    that reference data at once). Uses SCAN rather than KEYS -- KEYS blocks
-    the whole Redis instance while it walks the entire keyspace, which is
-    exactly the kind of latency spike a cache is supposed to avoid causing."""
-    client = _get_client()
-    if client is None:
-        return 0
-    pattern = f"{_key(prefix)}*"
-    deleted = 0
+    """Legacy cleanup uses bounded batches rather than one round trip per key."""
+    def remove(client):
+        deleted, batch = 0, []
+        for found in client.scan_iter(match=f"{_key(prefix)}*", count=200):
+            batch.append(found)
+            if len(batch) == 200:
+                deleted += client.delete(*batch)
+                batch.clear()
+        if batch:
+            deleted += client.delete(*batch)
+        return deleted
+    ok, deleted = _call("scan_delete", remove)
+    return int(deleted or 0) if ok else 0
+
+
+def invalidate(*families: str) -> bool:
+    """Fence every pre-commit reader out of the next generation atomically."""
+    unique = tuple(dict.fromkeys(families))
+    if not unique:
+        return True
+    versions = {_key(f"generation:{family}"): uuid.uuid4().hex for family in unique}
+    ok, _ = _call("invalidate", lambda client: client.mset(versions))
+    with _dirty_lock:
+        if ok:
+            _dirty_families.difference_update(unique)
+        else:
+            _dirty_families.update(unique)
+    _count("invalidations" if ok else "invalidation_failures", len(unique))
+    return ok
+
+
+def _generation(family):
+    with _dirty_lock:
+        dirty = family in _dirty_families
+    if dirty and not invalidate(family):
+        return None
+    generation_key = _key(f"generation:{family}")
+    def resolve(client):
+        value = client.get(generation_key)
+        if value is not None:
+            return str(value)
+        client.set(generation_key, uuid.uuid4().hex, nx=True)
+        return client.get(generation_key)
+    ok, value = _call("generation", resolve)
+    return str(value) if ok and value is not None else None
+
+
+def cached_json(family: str, key: str, loader: Callable[[], Any], ttl_seconds: int) -> Any:
+    """Coordinated read-through cache; unavailable or busy falls back to DB.
+
+    Cache hits are isolated by family generation and caller-provided scope.
+    A busy reader waits briefly for the leader, then computes without
+    publishing. Values produced after lease expiry or invalidation cannot
+    repopulate the active generation.
+    """
+    generation = _generation(family)
+    if generation is None:
+        return loader()
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    value_key = _key(f"data:{family}:{generation}:{digest}")
+    lock_key = _key(f"fill:{family}:{generation}:{digest}")
+    generation_key = _key(f"generation:{family}")
+    ok, raw = _call("get", lambda client: client.get(value_key))
+    value = _decode(raw) if ok else None
+    if value is not None:
+        _count("hits")
+        return value
+    _count("misses")
+    if not ok:
+        return loader()
+    token = uuid.uuid4().hex
+    ok, acquired = _call("fill_lock", lambda client: client.set(lock_key, token, nx=True,
+        ex=max(1, int(_setting("cache_fill_lock_ttl_seconds", 15)))))
+    if not ok:
+        return loader()
+    if not acquired:
+        _count("fill_waits")
+        deadline = time.monotonic() + float(_setting("cache_fill_wait_seconds", .15))
+        while time.monotonic() < deadline:
+            time.sleep(min(.02, max(0, deadline - time.monotonic())))
+            ok, raw = _call("get", lambda client: client.get(value_key))
+            value = _decode(raw) if ok else None
+            if value is not None:
+                # A commit during the wait can make this old key obsolete.
+                if _generation(family) == generation:
+                    _count("coalesced_hits")
+                    return value
+                break
+            if not ok:
+                break
+        _count("fill_timeouts")
+        return loader()
+    _count("fill_leaders")
     try:
-        for found_key in client.scan_iter(match=pattern, count=200):
-            deleted += client.delete(found_key)
-        redis_circuit.record_success()
-    except Exception as exc:
-        _cache_failure("SCAN/DEL", exc)
-    return deleted
+        # Recheck once after acquiring: a fast prior leader could have filled
+        # and released between our initial GET and lock acquisition.
+        ok, raw = _call("get", lambda client: client.get(value_key))
+        value = _decode(raw) if ok else None
+        if value is not None:
+            return value
+        value = loader()
+        try:
+            encoded = json.dumps(jsonable_encoder(value), ensure_ascii=False)
+            ttl = max(1, int(ttl_seconds))
+        except (TypeError, ValueError, OverflowError):
+            _count("serialization_errors")
+            return value
+        ok, published = _call("publish", lambda client: client.eval(_PUBLISH_SCRIPT, 3,
+            generation_key, lock_key, value_key, generation, token, encoded, ttl))
+        if ok and not published:
+            _count("fenced_fills")
+        return value
+    finally:
+        _call("release_lock", lambda client: client.eval(_RELEASE_SCRIPT, 1, lock_key, token))

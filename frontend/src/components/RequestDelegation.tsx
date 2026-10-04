@@ -70,7 +70,7 @@ export function requestDelegationCapabilities(
     parentId,
     active,
     canAssign: !!parentId && canManage && !active && (REQUESTER_STATUSES[targetType].has(request.status)
-      || (targetType === 'SAST' && requesterWork && ['CONFIGURATION', 'SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'RESCAN'].includes(request.status))),
+      || (['SAST', 'DAST'].includes(targetType) && requesterWork && ['CONFIGURATION', 'SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'RESCAN'].includes(request.status))),
     canReturn: !!parentId && active?.assigned_to_id === user?.id,
     canRecall: !!parentId && !!active && canManage,
   }

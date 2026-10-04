@@ -132,6 +132,11 @@ if QUERY_TIMEOUT_MS > 0:
             logger.warning("DB driver does not support call_timeout; DB_QUERY_TIMEOUT_MS ignored.")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# The same listeners cover API, job and notification sessions. Installation
+# performs no network I/O and leaves audit/auth-session writes uncached.
+from .cache_invalidation import install as install_cache_invalidation
+install_cache_invalidation()
+
 def get_db():
     db = SessionLocal()
     try:

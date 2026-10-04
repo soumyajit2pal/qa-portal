@@ -444,7 +444,7 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
 @router.post("/{req_id}/department-head-decision", response_model=schemas.PerformanceOut)
 def department_head_decision(req_id: int, payload: schemas.PerformanceDeptHeadDecisionIn, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
-    """Approval requires assignment to an active QA Lead in the workspace."""
+    """Department Head approves the request for the workspace's QA Lead group."""
     obj = _get_or_404(db, req_id, lock=True)
     _require_visible(db, obj, current_user)
     require_same_department(current_user, obj.department)
@@ -479,6 +479,7 @@ def start_readiness(req_id: int, db: Session = Depends(get_db),
     _require_visible(db, obj, current_user)
     _require(obj, "ENGINEER_ASSIGNED", "Start readiness")
     _require_assigned_qa_lead(obj, current_user)
+    obj.engineer_id = current_user.id
     obj.status = "READINESS"
     _log(db, obj.id, "Readiness", current_user, "Started", "Readiness started by assigned QA Lead")
     db.commit()
@@ -542,6 +543,7 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
         obj.needs_dept_head_reapproval = payload.require_dept_head_reapproval
     else:
         raise HTTPException(400, "decision must be one of: Passed, Failed")
+    obj.engineer_id = current_user.id
     _log(db, obj.id, "Readiness", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)

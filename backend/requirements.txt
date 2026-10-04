@@ -19,8 +19,7 @@ reportlab==5.0.1
 # supported database backend.
 oracledb==26.0.1
 
-# Optional cache backend (dashboard summary + reference-data caching, see
-# cache.py). The app runs fine with this package absent or REDIS_URL unset
-# or unreachable -- cache.py degrades to a no-op cache in all of those
-# cases -- but it's a real dependency once REDIS_URL is configured.
+# Optional analytics/reference cache and required Redis-mode coordination
+# for dedicated jobs, login throttling and notification scheduling.
+# Read caching falls back to Oracle; required coordination reports outages.
 redis==8.1.0

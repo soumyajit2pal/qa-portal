@@ -14,10 +14,11 @@ import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import RequestDelegation from '../../components/RequestDelegation'
 import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_REQUESTER_CONTROLLED_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasWorkflowRole as hasRole, hasDepartment, hasWorkspaceRole, isViewOnly, canManageReadinessEvidence } from '../../constants'
-import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOption, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
+import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOption, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, SecurityTargetScanIn, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
-import { SecurityFindingsNextAction, SecurityRemediationAssignment, SecurityFixDialog, SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
+import { SecurityFindingsNextAction, DASTTargetProgress, SecurityFixDialog, SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
+import { allDASTTargetsClear, canRetrieveDASTResults, targetsForAction, dastTargetProgress, DAST_ACTIVE_SCAN_STATUSES, DAST_REVERIFICATION_STATUSES } from './dastTargetWorkflow'
 import { NewSuppressionModal } from './Suppression'
 
 function userName(users: UserOption[], id?: number | null): string | null {
@@ -34,6 +35,7 @@ function userName(users: UserOption[], id?: number | null): string | null {
 const DAST_TARGET_COLUMNS: TableColumn<DASTTargetOut>[] = [
   { key: 'application_url', header: 'Application URL', render: (t) => t.application_url || '—' },
   { key: 'environment', header: 'Environment', render: (t) => t.environment || '—' },
+  { key: 'commit_id', header: 'Deployed commit / artifact hash', render: (t) => t.commit_id || '—' },
   { key: 'authentication_required', header: 'Auth Required', render: (t) => t.authentication_required || '—' },
   { key: 'test_credentials', header: 'Credentials', render: (t) => t.test_credentials || '—' },
 ]
@@ -46,11 +48,12 @@ const DAST_TARGET_COLUMNS: TableColumn<DASTTargetOut>[] = [
 interface DastTargetRow {
   application_url: string
   environment: string
+  commit_id: string
   authentication_required: boolean
   test_credentials: string
 }
 function blankDastTarget(): DastTargetRow {
-  return { application_url: '', environment: '', authentication_required: false, test_credentials: '' }
+  return { application_url: '', environment: '', commit_id: '', authentication_required: false, test_credentials: '' }
 }
 
 // Standalone DAST request creation is DISABLED per request -- a DAST request
@@ -83,6 +86,7 @@ function DASTFormModal({
     return targets.length > 0
       ? targets.map((t) => ({
           application_url: t.application_url || '', environment: t.environment || '',
+          commit_id: t.commit_id || '',
           authentication_required: (t.authentication_required || '').trim().toLowerCase() === 'yes',
           test_credentials: t.test_credentials || '',
         }))
@@ -143,6 +147,7 @@ function DASTFormModal({
         targets: targets.map((t) => ({
           application_url: t.application_url.trim(),
           environment: t.environment.trim(),
+          commit_id: t.commit_id.trim() || null,
           authentication_required: t.authentication_required ? 'Yes' : 'No',
           test_credentials: t.test_credentials.trim(),
         })),
@@ -447,14 +452,14 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
     } finally { setBusy(false) }
   }
 
-  async function startScan(scans: { target_id: number; application_name: string; application_version: string }[]) {
+  async function startScan(scans: SecurityTargetScanIn[]) {
     setBusy(true); setScanError(null)
     try {
       const response = await api.post<{ request: DASTOut; scan_results: SecurityScanResultOut[] }>(`/api/dast-requests/${req.id}/start-scan`, { scans }, 600_000)
       onChanged(response.request)
       setShowStartScan(false)
       setTab('findings')
-      setScanNotice('Scan validated successfully. Fortify SSC findings were imported and are shown below.')
+      setScanNotice(`${scans.length} target result${scans.length === 1 ? '' : 's'} imported. Select these targets for findings validation; other targets remain unchanged.`)
       await loadScan()
       await load()
     } catch (err) { setScanError(err) } finally { setBusy(false) }
@@ -463,12 +468,13 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   // Fortify SSC results as a brand-new scan record (see backend
   // _rescan_scan/_import_scan_result); it no longer asks a manual
   // Passed/Failed question -- the real findings count drives everything.
-  async function rescan(scans: { target_id: number; application_name: string; application_version: string }[]) {
+  async function rescan(scans: SecurityTargetScanIn[]) {
     setBusy(true); setScanError(null)
     try {
       const response = await api.post<{ request: DASTOut; scan_results: SecurityScanResultOut[] }>(`/api/dast-requests/${req.id}/rescan`, { scans }, 600_000)
       onChanged(response.request)
       setShowRescan(false)
+      setScanNotice(`${scans.length} target rescan result${scans.length === 1 ? '' : 's'} imported and awaiting validation. Other targets remain unchanged.`)
       await loadScan()
       await load()
     } catch (err) { setScanError(err) } finally { setBusy(false) }
@@ -479,13 +485,11 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   // canValidateFindings below) -- the backend endpoint (_mark_scan_complete)
   // is left in place, unused, matching this file's existing convention for
   // superseded-but-not-deleted legacy actions.
-  async function validateFindings() {
-    const updated = await act('validate-findings')
+  async function validateFindings(targetIds: number[]) {
+    const updated = await act('validate-findings', { target_ids: targetIds })
     if (!updated) return
     setTab('findings')
-    setScanNotice(updated.status === 'WAITING_FOR_FIX'
-      ? 'Findings validated successfully. Open findings were automatically assigned to the requester for remediation.'
-      : 'Findings validated successfully. No unresolved finding requires requester action.')
+    setScanNotice(`${targetIds.length} target result${targetIds.length === 1 ? '' : 's'} validated. Targets with unresolved findings are assigned for fixes; remaining targets keep their current progress.`)
     await loadScan()
   }
   // Keep the originating DAST detail open and layer the shared suppression
@@ -588,73 +592,18 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   const canAssignSecurityAnalyst =
     (isInitialAnalystAssignment ? isAssignedQALead : canReassignSecurityAnalyst) &&
     SAST_DAST_ANALYST_REASSIGNABLE_STATUSES.includes(status)
-  const canStartScan = isAssignedAnalyst && status === 'CONFIGURATION'
-  // 2026-08 "Findings Validation" doc restoration -- Finding Validation is
-  // once again a mandatory, explicit gate rather than a bypassed status.
-  // Three separate turn-based gates, mirroring routers/sast_dast.py's
-  // rewritten _validate_findings/_assign_to_requester/_rescan_scan exactly:
-  // the assigned analyst validates findings from SCANNING, assigns to the
-  // requester from REMEDIATION (only reachable once findings were found),
-  // and rescans only once genuinely reassigned back (RESCAN).
-  const canValidateFindings = isAssignedAnalyst && status === 'SCANNING'
-  const canAssignToRequester = isAssignedAnalyst && status === 'REMEDIATION'
-  const canRescan = isAssignedAnalyst && status === 'RESCAN'
-  // Reported directly: "suppression requests CAN ONLY be raised by
-  // requester, so this should be enable for requester, not QA team." --
-  // Initiate Suppression Request is the requester's own action. Narrowed to
-  // WAITING_FOR_FIX only (2026-08 doc Section 4: "After reviewing the
-  // findings, the requester may choose...") -- consistent with the
-  // above analyst-side gates now being turn-specific rather than spanning
-  // the whole active-scan window.
-  //
-  // Reported directly (follow-up): "requester delegated, to qa ... Full
-  // stand-in for requester" briefly used requesterInputEditor here (like
-  // canMarkFixed below), extending suppression-raising to the active
-  // delegate too.
-  //
-  // Reported directly (reversed): "INITIATE SUPPRESSION REQUEST SHOULD BE
-  // FROM REQUESTER SIDE, NOT QA SIDE" -- the concrete case was a requester
-  // who'd delegated this Waiting For Fix request to a Security Analyst
-  // (ordinary "full stand-in" use), and that analyst could then raise a
-  // suppression against their own team's finding. Suppression is now
-  // carved OUT of delegate stand-in entirely -- uses plain `isRequester`
-  // (the literal original requester, or Admin) instead of
-  // requesterInputEditor, unlike canMarkFixed below which is still fully
-  // delegable. Since the delegate can no longer act here, the original
-  // requester is deliberately NOT blocked by !req.active_delegation either
-  // (isRequester already ignores delegation status) -- mirrors
-  // suppression.py's _require_requester_of_linked exactly.
-  const canInitiateSuppression = isRequester && status === 'WAITING_FOR_FIX'
-  // Reported directly (follow-up): "why still mark fixed is visible? why
-  // you are not going through the codebase and not fixing all and not
-  // checking edge cases." Two fixes, mirroring sast_dast.py's _mark_fixed
-  // exactly:
-  // (1) `isAssignedAnalyst` used to also grant Mark Fixed -- a leftover
-  //     from the pre-turn-based design (section 51/52) that no longer
-  //     matches "after fix requester will reassign": Mark Fixed is now
-  //     strictly the requester's action, same as Rescan/Assign to Requester
-  //     are strictly the analyst's (section 130).
-  // (2) `req.active_delegation` guard was entirely missing -- once
-  //     WAITING_FOR_FIX became delegatable (section 126), a requester who'd
-  //     delegated this request out could still Mark Fixed themselves while
-  //     the delegate's assignment was still open.
-  //
-  // Reported directly (another follow-up): "requester delegated, to qa.
-  // but as status is Waiting For Fix, in qa side rescan button and all
-  // eligble button not visible." Blocking Mark Fixed outright while
-  // delegated (as just above) left the delegate with nothing reachable at
-  // all -- SAST/DAST has no editable surface during Waiting For Fix
-  // (Documents/Checklist are locked solid post-readiness, the edit form is
-  // pre-approval-only). Asked directly: delegate should be a full stand-in
-  // for the requester, including Mark Fixed itself. Now uses
-  // requesterInputEditor (isActiveDelegate OR (isRequester and NOT
-  // delegated)) instead of `isRequester && !req.active_delegation` --
-  // the delegate can Mark Fixed directly; the original requester is still
-  // locked out while someone else holds the delegation. Mirrors
-  // sast_dast.py's _mark_fixed exactly, which also auto-closes the
-  // delegation once Mark Fixed succeeds.
-  const canMarkFixed = requesterInputEditor && status === 'WAITING_FOR_FIX'
-  const canMarkReportReady = isAssignedAnalyst && status === 'SECURITY_COMPLETE'
+  const targetStates = dastTargetProgress(req.targets, scanSummary)
+  const activeTargetWorkflow = DAST_ACTIVE_SCAN_STATUSES.includes(status)
+  const allTargetsClear = allDASTTargetsClear(targetStates, scanSummary)
+  // Each target can move between QA and requester work independently.
+  const canStartScan = isAssignedAnalyst && canRetrieveDASTResults(status, targetStates)
+  const requiresReverification = DAST_REVERIFICATION_STATUSES.includes(status) && targetsForAction(targetStates, 'start').length > 0
+  const canValidateFindings = isAssignedAnalyst && activeTargetWorkflow && targetsForAction(targetStates, 'validate').length > 0
+  const canRescan = isAssignedAnalyst && activeTargetWorkflow && targetsForAction(targetStates, 'rescan').length > 0
+  const canMarkFixed = requesterInputEditor && activeTargetWorkflow && targetsForAction(targetStates, 'fix').length > 0
+  // Suppression remains the original requester's action during mixed queues.
+  const canInitiateSuppression = isRequester && activeTargetWorkflow && targetStates.some(row => row.state === 'WAITING_FOR_FIX')
+  const canMarkReportReady = isAssignedAnalyst && status === 'SECURITY_COMPLETE' && allTargetsClear
   // Reported directly (bug): "Supression request is now rejected, but
   // still user not able to create supression request." Rejected must NOT
   // block Initiate Suppression Request or _mark_fixed's pending-suppression
@@ -680,7 +629,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   // covers the case where that auto-chain stopped at Report Ready's
   // suppression gate and the analyst needs to finish the last hop themselves
   // once the linked suppression(s) are Done.
-  const canCloseRequest = isAssignedAnalyst && status === 'REPORT_READY'
+  const canCloseRequest = isAssignedAnalyst && status === 'REPORT_READY' && allTargetsClear
 
   return (
     <Modal title={`${req.request_id}`} onClose={onClose} wide>
@@ -693,7 +642,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
                 findings come from the SAST/DAST API, which made
                 req.findings permanently empty. */}
             {t === 'findings'
-              ? `Findings (${scanResults[0]?.total_count ?? 0} active · ${scanResults[0]?.suppressed_total_count ?? 0} suppressed)`
+              ? `Findings (${scanSummary?.open_findings ?? 0} active · ${scanSummary?.suppressed_findings ?? 0} suppressed)`
               : t === 'history' ? 'Activity' : t[0].toUpperCase() + t.slice(1)}
           </button>
         ))}
@@ -702,12 +651,13 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'overview' && (
         <div>
-          {scanResults.length > 0 && (
+          {(scanResults.length > 0 || activeTargetWorkflow || requiresReverification) && (
             <SecurityFindingsNextAction
               status={status}
-              activeCount={scanResults[0]?.total_count ?? 0}
-              suppressedCount={scanResults[0]?.suppressed_total_count ?? 0}
-              hasWorkflowAction={canValidateFindings || canAssignToRequester || canMarkFixed || canRescan || canInitiateSuppression}
+              activeCount={scanSummary?.open_findings ?? 0}
+              suppressedCount={scanSummary?.suppressed_findings ?? 0}
+              targetProgress={{ clear: targetStates.filter(row => row.state === 'CLEAR').length, total: targetStates.length }}
+              hasWorkflowAction={canStartScan || canValidateFindings || canMarkFixed || canRescan || canInitiateSuppression}
               onOpen={() => setTab('findings')}
             />
           )}
@@ -821,6 +771,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
                 request={req}
                 users={users}
                 disabled={busy}
+                requesterWork={activeTargetWorkflow && targetsForAction(targetStates, 'fix').length > 0}
                 onChanged={async (updated) => { onChanged(updated); await load() }}
               />
               {canSubmit && (
@@ -956,7 +907,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
                   </button>
                 </>
               )}
-              {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => setShowStartScanConfirm(true)}>Start Scan</button>}
+              {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => setShowStartScanConfirm(true)}>{requiresReverification ? 'Reverify Target Results' : 'Retrieve Target Results'}</button>}
               {/* Validate Findings / Assign to Requester / Mark Fixed all live
                   in the Findings tab now (SecurityScanResults, section 4.4) --
                   reported directly, see canValidateFindings above. */}
@@ -1043,14 +994,9 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'findings' && (
         <div>
-          {status === 'WAITING_FOR_FIX' && (
-            <SecurityRemediationAssignment
-              requesterName={userName(users, req.requester_id) || 'the requester'}
-              activeCount={scanResults[0]?.total_count ?? 0}
-              viewerOwnsAction={canMarkFixed}
-            />
-          )}
-          {scanNotice && status !== 'WAITING_FOR_FIX' && (
+          <DASTTargetProgress states={targetStates} results={scanSummary?.current_results || []} allClear={allTargetsClear} canStart={canStartScan} canValidate={canValidateFindings} reverification={requiresReverification} busy={busy} onStart={() => setShowStartScanConfirm(true)} onValidate={validateFindings} />
+          {targetsForAction(targetStates, 'fix').length > 0 && <p className="muted small">{userName(users, req.requester_id) || 'The requester'}{req.active_delegation ? ' or the active delegate' : ''} can submit fixes for selected targets while the analyst works on other ready scans. {canMarkFixed ? 'Use Submit Target Fixes below.' : ''}</p>}
+          {scanNotice && (
             <div className="execution-start-notice linked" role="status">
               <strong>Success</strong><span>{scanNotice}</span>
             </div>
@@ -1065,9 +1011,9 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
             kind="DAST"
             results={scanResults}
             summary={scanSummary}
-            canValidateFindings={canValidateFindings}
+            canValidateFindings={false}
             canRescan={canRescan}
-            canAssignToRequester={canAssignToRequester}
+            canAssignToRequester={false}
             canInitiateSuppression={canInitiateSuppression}
             canMarkFixed={canMarkFixed}
             busy={busy}
@@ -1076,7 +1022,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
             requesterActionSuppressionIds={requesterActionSuppressionIds}
             hasDoneSuppression={hasDoneSuppression}
             doneSuppressionIds={doneSuppressionIds}
-            onValidateFindings={validateFindings}
+            onValidateFindings={() => {}}
             onRescan={() => setShowRescanConfirm(true)}
             onAssignToRequester={() => act('assign-to-requester')}
             onMarkFixed={() => setShowMarkFixed(true)}
@@ -1093,13 +1039,16 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
       )}
 
       {showMarkFixed && <SecurityFixDialog
-        kind="DAST" targets={req.targets.map(target => ({ id: target.id, label: target.application_url }))} currentScans={scanSummary?.current_results || []}
+        kind="DAST" targets={req.targets.map(target => ({ id: target.id, label: target.application_url, previousCommit: target.commit_id }))} currentScans={scanSummary?.current_results || []}
+        targetStates={targetStates}
         onClose={() => setShowMarkFixed(false)}
         onSubmit={async targets => {
           const updated = await api.post<DASTOut>(`/api/dast-requests/${req.id}/mark-fixed`, { targets })
           onChanged(updated)
           setShowMarkFixed(false)
           await load()
+          await loadScan()
+          setScanNotice(`${targets.length} target fix${targets.length === 1 ? '' : 'es'} submitted for rescan. Other targets remain unchanged.`)
         }}
       />}
 
@@ -1119,8 +1068,8 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
           reached without it. */}
       {showStartScanConfirm && (
         <ConfirmModal
-          title="Start Scan"
-          message="Has the scan in Fortify SSC finished running? Starting the import now will retrieve whatever results are currently available for this application/version -- if the scan is still in progress, the results may be incomplete."
+          title={requiresReverification ? 'Reverify Target Results' : 'Retrieve Target Results'}
+          message={requiresReverification ? 'Have the Fortify scans finished for the targets needing current evidence? Retrieving new results will reopen this DAST request for findings validation. Next, select only the targets needing current evidence.' : 'Have the Fortify scans finished for the targets you want to retrieve? Next, select those targets and enter their Application Name and Version. In-progress results may be incomplete.'}
           confirmLabel="Yes, retrieve results"
           cancelLabel="Not yet"
           onConfirm={() => { setShowStartScanConfirm(false); setScanError(null); setShowStartScan(true) }}
@@ -1129,21 +1078,22 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
       )}
       {showRescanConfirm && (
         <ConfirmModal
-          title="Rescan"
-          message="Has the rescan in Fortify SSC finished running? Retrieving results now will import whatever is currently available for this application/version -- if the scan is still in progress, the results may be incomplete."
+          title="Retrieve Target Rescans"
+          message="Have the Fortify rescans finished for the targets you want to retrieve? Next, select only those ready targets. Other targets and their pending work remain unchanged."
           confirmLabel="Yes, retrieve results"
           cancelLabel="Not yet"
           onConfirm={() => { setShowRescanConfirm(false); setScanError(null); setShowRescan(true) }}
           onCancel={() => setShowRescanConfirm(false)}
         />
       )}
-      {showStartScan && <SecurityScanDialog kind="DAST" initialApplicationName={req.application_name} targets={req.targets.map(target => ({ id: target.id, label: target.application_url, detail: target.environment }))} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
+      {showStartScan && <SecurityScanDialog kind="DAST" reverification={requiresReverification} targetStates={targetStates} initialScans={scanSummary?.current_results || []} initialApplicationName={req.application_name} targets={req.targets.map(target => ({ id: target.id, label: target.application_url, detail: target.environment }))} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
       {showRescan && (
         <SecurityScanDialog
           kind="DAST" mode="rescan"
           initialApplicationName={scanResults[0]?.application_name || req.application_name}
           targets={req.targets.map(target => ({ id: target.id, label: target.application_url, detail: target.environment }))}
           initialScans={scanSummary?.current_results || []}
+          targetStates={targetStates}
           busy={busy} error={scanError}
           onClose={() => setShowRescan(false)}
           onStart={rescan}

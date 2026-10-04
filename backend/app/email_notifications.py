@@ -4,6 +4,7 @@ SMTP is deliberately disabled unless SMTP_ENABLED=true. Once enabled,
 workflow events are placed in a durable outbox, so a transient SMTP outage
 never loses a notification.
 """
+import asyncio
 import datetime
 import logging
 import os
@@ -42,6 +43,7 @@ class NotificationRoute:
     recipient_label: str
     action_required: bool
     instruction: str
+    requester_input_ids: frozenset[int] = frozenset()
 
 
 def _enabled() -> bool:
@@ -784,6 +786,46 @@ def _assigned_user_route(target) -> NotificationRoute | None:
     return None
 
 
+def _security_remediation_route(db: SASession, target) -> NotificationRoute | None:
+    """Keep target remediation with its input owner while QA scans other scope."""
+    if not isinstance(target, (models.SASTRequest, models.DASTRequest)) or not target.id:
+        return None
+    if target.status not in {
+        "CONFIGURATION", "SCANNING", "FINDING_VALIDATION", "REMEDIATION",
+        "ASSIGNED_TO_REQUESTER", "WAITING_FOR_FIX", "ASSIGNED_TO_LEAD", "RESCAN",
+    }:
+        return None
+    from .security_scan_state import repository_states, target_states
+    kind = "SAST" if isinstance(target, models.SASTRequest) else "DAST"
+    resolve_states = repository_states if kind == "SAST" else target_states
+    scans = db.query(models.SecurityScanResult).filter_by(request_type=kind, request_id=target.id).order_by(
+        models.SecurityScanResult.imported_at.desc(), models.SecurityScanResult.id.desc()).all()
+    states = {row["state"] for row in resolve_states(target, scans)}
+    if not states & {"WAITING_FOR_FIX", "STALE"}:
+        return None
+    delegation = target.active_delegation
+    input_ids = _user_ids(delegation.assigned_to_id if delegation else target.requester_id)
+    input_label = "Assigned Input Owner" if delegation else "Requester"
+    recipients = set(input_ids)
+    if states & {"NOT_SCANNED", "AWAITING_VALIDATION", "READY_FOR_RESCAN", "STALE"}:
+        analyst_ids = _user_ids(target.security_analyst_id)
+        if not analyst_ids:
+            workspace = _target_workspace_id(target)
+            analyst_ids = (_workspace_role_user_ids(db, workspace, {Role.SECURITY_ANALYST}) if workspace
+                           else _role_user_ids(db, {Role.SECURITY_ANALYST}, _department(target)))
+        recipients.update(analyst_ids)
+        return NotificationRoute(
+            recipients, f"{input_label} / Security Analyst", True,
+            "Submit fixes for targets awaiting remediation or continue scanning and reviewing the remaining targets.",
+            frozenset(input_ids),
+        )
+    return NotificationRoute(
+        recipients, input_label, True,
+        "Submit the fix references for targets awaiting remediation so QA can rescan them.",
+        frozenset(input_ids),
+    )
+
+
 _DEFECT_QA_ROUTING_STATUSES = {"NEW"}
 _DEFECT_OWNER_STATUSES = {"TRIAGED", "ASSIGNED", "IN PROGRESS", "REOPENED"}
 _DEFECT_RETEST_STATUSES = {"RESOLVED", "RETEST", "READY FOR QA", "QA TESTING", "NOT A DEFECT REVIEW"}
@@ -966,7 +1008,7 @@ def _notification_route(db, action, target):
                     continue
             if isinstance(target, models.TestExecution) and Role.QA_ENGINEER not in user.roles:
                 continue
-            if roles and not set(user.roles).intersection(roles):
+            if roles and uid not in route.requester_input_ids and not set(user.roles).intersection(roles):
                 continue
             # The SM who approved the first stage cannot receive (or perform)
             # the Department Head stage merely because that person also holds
@@ -1006,7 +1048,8 @@ def _notification_route(db, action, target):
             if department_scoped and uid in _requester_user_ids(target):
                 continue
         recipients.add(uid)
-    return NotificationRoute(recipients, route.recipient_label, route.action_required, route.instruction)
+    return NotificationRoute(recipients, route.recipient_label, route.action_required, route.instruction,
+                             route.requester_input_ids)
 
 
 def _unfiltered_notification_route(db: SASession, action: models.ApprovalAction, target) -> NotificationRoute | None:
@@ -1053,7 +1096,7 @@ def _unfiltered_notification_route(db: SASession, action: models.ApprovalAction,
         return NotificationRoute(_user_ids(target.owner_id), "Cycle Owner", True,
             "You own this test cycle. Review its current status and continue the lifecycle.")
 
-    assigned_route = _assigned_user_route(target)
+    assigned_route = _security_remediation_route(db, target) or _assigned_user_route(target)
     if assigned_route:
         logger.info(
             "SMTP workflow route evaluated reference=%s status=%s owner=individual eligible_recipient_count=%s",
@@ -1460,6 +1503,16 @@ def deliver_pending_async() -> None:
     to make one additional pass after its current batch. The durable outbox
     and periodic poller remain the cross-process reliability mechanism.
     """
+    if notification_worker_mode() == 'dedicated':
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            wake_notification_worker()
+        else:
+            # A synchronous ORM commit can run inside an async upload/comment
+            # handler. Keep this bounded Redis hint off that handler's loop.
+            loop.run_in_executor(None, wake_notification_worker)
+        return
     global _delivery_worker_running, _delivery_rerun_requested
     with _delivery_scheduler_lock:
         if _delivery_worker_running:
@@ -1488,6 +1541,8 @@ def deliver_pending_async() -> None:
 
 def start_outbox_poller() -> None:
     """Retry delayed outbox items even when no later workflow action occurs."""
+    if notification_worker_mode() == 'dedicated':
+        return
     global _poller_started
     if _poller_started:
         return
@@ -1503,6 +1558,25 @@ def start_outbox_poller() -> None:
             time.sleep(60)
 
     threading.Thread(target=_poll, name="email-outbox-poller", daemon=True).start()
+
+
+def notification_worker_mode() -> str:
+    from .config import settings
+    mode = os.getenv('NOTIFICATION_WORKER_MODE', settings.notification_worker_mode).strip().lower()
+    if mode not in {'embedded', 'dedicated'}:
+        raise ValueError('NOTIFICATION_WORKER_MODE must be dedicated or embedded')
+    return mode
+
+
+def wake_notification_worker() -> None:
+    """Best-effort wake hint; committed Oracle outbox rows remain recoverable."""
+    try:
+        from .redis_runtime import coordination_key, get_client
+        get_client().set(coordination_key('notifications:wake'), '1', ex=120)
+    except Exception:
+        # Nothing after commit may turn an otherwise successful workflow
+        # action into an API error. The dedicated worker polls Oracle too.
+        logger.warning('Notification worker wake unavailable; committed messages remain queued')
 
 
 def _after_rollback(session: SASession) -> None:
