@@ -28,6 +28,7 @@ import { ENVIRONMENTS, DEFECT_REASSIGNABLE_STATUSES, QA_REQUEST_CREATOR_ROLES, h
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { internalNavigationPath } from '../../requestNavigation'
 import { createLatestRequestGate } from '../../latestRequest'
+import { defectLinkTarget, resolveDefect } from '../../defectLookup'
 import { defectStageOwnership } from '../../defectOwnership'
 
 const STATUSES = ['Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised', 'Closed']
@@ -1268,10 +1269,11 @@ export default function Defects() {
   // DefectOut before showing the detail panel.
   const openDefect = useCallback(async (keyOrId: number | string) => {
     const generation = detailRequests.begin()
+    setError(null)
+    setSelected(null)
     if (typeof keyOrId === 'number') setOpeningDefectId(keyOrId)
     try {
-      const path = typeof keyOrId === 'number' ? `/api/defects/${keyOrId}` : `/api/defects/by-key/${encodeURIComponent(keyOrId)}`
-      const detail = await api.get<DefectOut>(path)
+      const detail = await resolveDefect<DefectOut>(keyOrId, (path) => api.get<DefectOut>(path))
       if (detailRequests.isCurrent(generation)) setSelected(detail)
     } catch (err) {
       if (detailRequests.isCurrent(generation)) setError(err)
@@ -1279,6 +1281,19 @@ export default function Defects() {
       if (detailRequests.isCurrent(generation)) setOpeningDefectId(null)
     }
   }, [detailRequests])
+
+  // Global search can change the key without remounting this page. Resolve
+  // it independently of optional picker data and discard superseded loads.
+  const linkedDefect = defectLinkTarget(searchParams)
+  useEffect(() => {
+    if (linkedDefect !== null) void openDefect(linkedDefect)
+    else {
+      setSelected(null)
+      setOpeningDefectId(null)
+      setError(null)
+    }
+    return () => detailRequests.invalidate()
+  }, [linkedDefect, openDefect, detailRequests])
 
   const load = useCallback(async () => {
     try {
@@ -1311,8 +1326,6 @@ export default function Defects() {
       setRequests(qaRequests); setUsers(allUsers); setDepartments(activeDepartments); setDuplicateCandidates(duplicates)
       setContexts(executionContexts)
       loadDashboard()
-      const openKey = searchParams.get('open')
-      if (openKey) openDefect(openKey)
       if (initialExecutionId) setCreateMode('execution')
     } catch (err) { setError(err) }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1378,10 +1391,10 @@ export default function Defects() {
       <div className="defect-toolbar"><label className="defect-search"><span>⌕</span><input value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search defects" placeholder="Search ID, title, application or module…" /></label><select aria-label="Filter by status" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{STATUSES.map((value) => <option key={value}>{value}</option>)}</select><select aria-label="Filter by severity" value={severity} onChange={(e) => setSeverity(e.target.value)}><option value="">All severities</option>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select><select aria-label="Filter by priority" value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">All priorities</option>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>{hasFilters && <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>}</div>
       <Table<DefectListOut>
         tableId="defect-management" rowKey="id" rows={defects}
-        onRowClick={(defect) => { openDefect(defect.id); setSearchParams({ open: defect.defect_key }) }}
+        onRowClick={(defect) => setSearchParams({ open: defect.defect_key, openId: String(defect.id) })}
         server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading: defectsLoading }}
         columns={[
-        { key: 'title', header: 'Defect', render: (defect) => <span className="defect-title-cell"><span><button className="link-btn" onClick={(event) => { event.stopPropagation(); openDefect(defect.id) }}>{openingDefectId === defect.id ? 'Opening…' : defect.defect_key}</button><small>{defect.application_name}</small></span><strong>{defect.title}</strong><small>{defect.module_feature}</small></span> },
+        { key: 'title', header: 'Defect', render: (defect) => <span className="defect-title-cell"><span><button className="link-btn" onClick={(event) => { event.stopPropagation(); setSearchParams({ open: defect.defect_key, openId: String(defect.id) }) }}>{openingDefectId === defect.id ? 'Opening…' : defect.defect_key}</button><small>{defect.application_name}</small></span><strong>{defect.title}</strong><small>{defect.module_feature}</small></span> },
         { key: 'severity', header: 'Risk', render: (defect) => <span className="defect-risk-cell"><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><small>{defect.priority}</small></span> },
         { key: 'status', header: 'Workflow', render: (defect) => <span className="defect-workflow-cell"><Badge status={defect.status} />{defect.status === 'Duplicate' && <small className="defect-canonical-reference">Canonical: {defect.duplicate_of_key || (defect.duplicate_of_id ? `Defect #${defect.duplicate_of_id}` : 'Not recorded')}</small>}<small>{defect.assignee_name || 'Unassigned'}</small><small className="defect-workflow-department">{defect.assigned_team || 'Department not assigned'}</small></span> },
         { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${!defect.execution_id ? 'incomplete' : ''}`}><strong>{defect.qa_request_key || (defect.qa_request_id ? `Request #${defect.qa_request_id}` : 'No QA request linked')}</strong><small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small></span> },

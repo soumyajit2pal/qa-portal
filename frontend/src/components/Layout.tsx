@@ -1,4 +1,5 @@
 import { useRequestNavigation } from '../hooks/useRequestNavigation'
+import { clearGlobalSearchDestination, globalSearchDestination } from '../globalSearch'
 import { api } from '../api'
 import React, { useEffect, useState, useRef, ReactNode } from 'react'
 import {NavLink, useLocation} from 'react-router-dom'
@@ -161,39 +162,6 @@ function navGroups(user: UserOut | null, workspaceOptions: WorkspaceAccessEntry[
   return groups.filter((group) => group.items.length > 0)
 }
 
-// Maps each request type's own ID prefix (see models.py's gen_id calls) to
-// the module that owns it, for the topbar search box (submitSearch below).
-// Every new business ID shares the TQA namespace and has a module segment.
-// Legacy Suppression/Sign-off aliases remain searchable for records created
-// before the standardized ID convention was introduced.
-const ID_PREFIX_ROUTES: { prefix: string; path: string }[] = [
-  { prefix: 'TQA-FUNC', path: '/functional-requests' },
-  { prefix: 'TQA-SAST', path: '/sast' },
-  { prefix: 'TQA-DAST', path: '/dast' },
-  { prefix: 'TQA-PERF', path: '/performance' },
-  { prefix: 'TQA-SUP', path: '/suppression' },
-  { prefix: 'TQA-SIGN', path: '/signoff' },
-  { prefix: 'TQA-PROJ', path: '/test-projects' },
-  { prefix: 'TQA-PLAN', path: '/test-projects' },
-  { prefix: 'TQA-TC', path: '/test-repository' },
-  { prefix: 'TQA-CYCLE', path: '/test-execution' },
-  { prefix: 'DEF-', path: '/defects' },
-  { prefix: 'SUP', path: '/suppression' },
-  { prefix: 'QA-CERT', path: '/signoff' },
-]
-
-// Shorthand accepted by Global Search. Suppression deliberately stays out
-// of this list because legacy records already use the real `SUP-*` prefix;
-// rewriting those would make valid historical IDs impossible to open.
-const TQA_ID_SHORTHAND = /^(FUNC|SAST|DAST|PERF|SIGN|PROJ|TC|CYCLE)-/i
-
-// Same CR/EPIC number shape QARequests/validation.ts enforces at wizard
-// submit time (CR_OR_EPIC_NUMBER_REGEX) -- kept as its own copy here rather
-// than importing across the QARequests/components boundary, since this is
-// only used to recognise the shape of a typed search term, not to validate
-// a form field.
-const CR_OR_EPIC_NUMBER_REGEX = /^(?:CR-[0-9]{1,12}|EPIC-[0-9]{1,10})$/
-
 function initials(name?: string | null): string {
   if (!name) return '?'
   const parts = name.trim().split(/\s+/)
@@ -312,6 +280,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
       params.get('cr_number') ||
       params.get('search') ||
       params.get('open') ||
+      params.get('openId') ||
       ''
     )
   }, [location.pathname, location.search])
@@ -380,60 +349,16 @@ export default function Layout({ children }: { children?: ReactNode }) {
 
   function clearGlobalSearch() {
     setSearch('')
-    const params = new URLSearchParams(location.search)
-    const hadActiveSearch = ['cr_number', 'search', 'open'].some((key) => params.has(key))
-    if (!hadActiveSearch) return
-    params.delete('cr_number')
-    params.delete('search')
-    params.delete('open')
-    const remaining = params.toString()
-    navigate(`${location.pathname}${remaining ? `?${remaining}` : ''}`, { replace: true })
+    const destination = clearGlobalSearchDestination(location.pathname, location.search)
+    if (destination) navigate(destination, { replace: true })
   }
 
   function submitSearch(e: React.FormEvent) {
     e.preventDefault()
-    const term = search.trim()
-    if (!term) return
+    const destination = globalSearchDestination(search)
+    if (!destination) return
     setSearchOpen(false)
-    // Reported directly: this used to always navigate to
-    // `/qa-requests?search=...`, whose own search only matches the QA
-    // Request gateway's own request_id/application_name/epic_number (see
-    // `search` on GET /api/qa-requests) -- so typing in a SAST/DAST/
-    // Functional QA/Performance/Suppression/Sign-off request ID (which all
-    // use their own distinct ID prefix, see models.py's gen_id calls) landed
-    // on an empty/irrelevant QA Requests list every time. Detect the prefix
-    // and deep-link straight to that request's own module instead, reusing
-    // the `?open=<request_id>` pattern each of those pages already supports
-    // (see e.g. Functional.tsx) for jumping straight to a specific row's
-    // detail drawer. Anything that doesn't match a known ID prefix (a QA
-    // Request ID itself, or a free-text application name/epic number) still
-    // falls through to the QA Request gateway search, unchanged.
-    const upper = term.toUpperCase()
-    if (upper.startsWith('ESIG-')) {
-      navigate(`/verify-signature?id=${encodeURIComponent(upper)}`)
-      return
-    }
-    const normalizedTerm = !upper.startsWith('TQA-') && TQA_ID_SHORTHAND.test(upper)
-      ? `TQA-${upper}`
-      : term
-    const normalizedUpper = normalizedTerm.toUpperCase()
-    if (normalizedTerm !== term) setSearch(normalizedTerm)
-    const idRoute = ID_PREFIX_ROUTES.find((r) => normalizedUpper.startsWith(r.prefix))
-    if (idRoute) {
-      navigate(`${idRoute.path}?open=${encodeURIComponent(normalizedTerm)}`)
-    } else if (CR_OR_EPIC_NUMBER_REGEX.test(normalizedUpper)) {
-      // Reported directly: "if any one wants to search by cr number as
-      // well, can we get all requests details based on that cr?" -- a CR/
-      // EPIC number goes to the QA Requests list's own exact-match
-      // cr_number param (GET /api/qa-requests?cr_number=...) rather than
-      // the free-text `search` param, so CR-102 doesn't also pull in
-      // CR-1023/CR-1024 via substring matching. The list shows every QA
-      // Request raised under that exact CR, and each row's own linked
-      // Functional/SAST/DAST/Performance/Sign-off IDs alongside it.
-      navigate(`/qa-requests?cr_number=${encodeURIComponent(normalizedUpper)}`)
-    } else {
-      navigate(`/qa-requests?search=${encodeURIComponent(normalizedTerm)}`)
-    }
+    navigate(destination)
   }
 
   return (
