@@ -94,10 +94,12 @@ function isWorkspaceAccessMissing(user: UserOut | null): boolean {
 function isLdapEmailCompletionRequired(user: UserOut | null): boolean {
   return !!user
     && user.login_type === 'LDAP'
-    && !user.needs_department_selection
-    && !user.needs_role_review
-    && user.roles.length > 0
-    && !user.email?.trim()
+    && (user.needs_email_confirmation || (
+      !user.needs_department_selection
+      && !user.needs_role_review
+      && user.roles.length > 0
+      && !user.email?.trim()
+    ))
 }
 
 function AccessApprovalPending() {
@@ -221,14 +223,14 @@ const TestReports = lazyModule(() => import('./modules/test-management/TestRepor
 // that the backend correctly denies until access approval is complete.
 function AuthenticatedChrome({ user, children }: { user: UserOut; children: ReactNode }) {
   let onboarding: ReactNode | null = null
-  if (user.needs_department_selection) {
+  if (isLdapEmailCompletionRequired(user)) {
+    onboarding = <main className="access-pending-page" aria-label="Confirm notification email"><EmailCompletionPrompt /></main>
+  }
+  else if (user.needs_department_selection) {
     onboarding = <main className="access-pending-page" aria-label="Complete account setup"><DepartmentPrompt /></main>
   }
   else if (isWorkspaceAccessMissing(user)) onboarding = <WorkspaceAccessRequired />
   else if (isAccessApprovalPending(user)) onboarding = <AccessApprovalPending />
-  else if (isLdapEmailCompletionRequired(user)) {
-    onboarding = <main className="access-pending-page" aria-label="Complete notification email"><EmailCompletionPrompt /></main>
-  }
   if (onboarding) {
     return (
       <MaintenanceWindowProvider>

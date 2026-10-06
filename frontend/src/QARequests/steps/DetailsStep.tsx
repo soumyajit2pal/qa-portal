@@ -6,7 +6,7 @@ import SearchableSelect from "../../components/SearchableSelect";
 import { CHANGE_TYPES, DEPLOYMENT_ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
 import { ApplicationMasterOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
-import { CR_OR_EPIC_NUMBER_REGEX } from "../validation";
+import { CHANGE_REFERENCE_REGEX, CHANGE_REFERENCE_MAX_LENGTH, CHANGE_REFERENCE_FORMAT_ERROR } from "../../changeReference";
 
 // Sentinel dropdown value for "Other" -- never a real application name (all
 // real names are always upper-cased, see backend routers/qa_requests.py::
@@ -177,8 +177,8 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
           <Field label="CR Number/EPIC Number *">
             <input
               required
-              maxLength={15}
-              placeholder="e.g. CR-1234 or EPIC-123456"
+              maxLength={CHANGE_REFERENCE_MAX_LENGTH}
+              placeholder="e.g. IN-46, CR-1234 or EPIC-123456"
               value={form.cr_number}
               onChange={(e) => {
                 set("cr_number", e.target.value.toUpperCase());
@@ -188,8 +188,8 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
                 if (crError) setCrError("");
               }}
               onBlur={(e) => {
-                if (e.target.value && !CR_OR_EPIC_NUMBER_REGEX.test(e.target.value)) {
-                  setCrError("Invalid format. Example: CR-1234 or EPIC-123456");
+                if (e.target.value.trim() && !CHANGE_REFERENCE_REGEX.test(e.target.value.trim())) {
+                  setCrError(CHANGE_REFERENCE_FORMAT_ERROR);
                 } else {
                   setCrError("");
                 }
@@ -213,10 +213,23 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
               options={CHANGE_TYPES}
               onChange={(value) => {
                 set("change_type", value);
-                if (value !== "Bug Fix") set("bug_fix_source_request_id", "");
+                if (value !== "Bug Fix") {
+                  set("bug_fix_source_request_id", "");
+                  set("business_defect_number", "");
+                }
               }}
             />
           </Field>
+          {form.change_type === "Bug Fix" && (
+            <Field label="Defect Number (Raised By Business)">
+              <input
+                value={form.business_defect_number}
+                maxLength={64}
+                placeholder="Enter the defect number raised by business"
+                onChange={(event) => set("business_defect_number", event.target.value)}
+              />
+            </Field>
+          )}
           {form.change_type === "Bug Fix" && (
             <Field label="Previous Completed Request ID (optional)">
               <SearchableSelect

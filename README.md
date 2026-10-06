@@ -220,6 +220,28 @@ block fix submission while pending; they do not block QA from retrieving other
 eligible targets. Apply migration `9d4e6f8a2b13` with `alembic upgrade head` and
 deploy backend and frontend together.
 
+Bug Fix QA requests can capture an optional **Defect Number (Raised By Business)**
+alongside the previous completed request reference. It accepts up to 64 characters,
+is retained when drafts are reopened, and is cleared when the change type is no
+longer Bug Fix. Apply migration `e3b8c5d1a902` with `alembic upgrade head` before
+starting the updated backend; it adds a nullable `business_defect_number` column
+to `qap_requests` and leaves existing requests unchanged.
+
+If Oracle reports `ORA-00904` for `BUSINESS_DEFECT_NUMBER`, the updated model
+is running against a schema that has not received this column. This can affect
+request lists and linked modules even for non-Bug-Fix records, because their
+queries load the parent QA request. Apply `alembic upgrade head` using the same
+environment file and database schema as the API, then restart the workers.
+Verify the deployed schema before opening traffic:
+
+```sql
+SELECT column_name, data_type, char_length, nullable
+FROM user_tab_columns
+WHERE table_name = 'QAP_REQUESTS'
+  AND column_name = 'BUSINESS_DEFECT_NUMBER';
+-- Expected: one row, VARCHAR2, 64 characters, nullable Y.
+```
+
 Apply migration `7b8c2d4e6f10` through the existing deployment's `alembic upgrade head`
 procedure before starting the updated backend, then rebuild/restart both services. The
 migration adds durable repository queue, validation and fix-submitter references. Older
@@ -756,7 +778,10 @@ confirmation because bind credentials and user passwords will lack transport enc
 create an LDAP user up front. The first time someone logs in with a username the app doesn't
 recognize, it attempts an LDAP bind with the credentials they supplied. A successful bind creates
 a local `User` row (`login_type=LDAP`, with profile fields filled from the directory when available)
-without granting an application role. The user selects a department and submits an access request,
+without granting an application role. Before continuing, the user confirms the LDAP-provided
+notification email or corrects it in the same textbox; a missing email can be added. This is
+confirmation by the user, not an email OTP or mailbox ownership check. The confirmed address is
+saved locally and later LDAP sign-ins do not overwrite it. The user then selects a department and submits an access request,
 then remains blocked at the sign-in screen until a System Administrator or a coordinator for that
 department assigns the permitted roles and approves the request. Approval also places the user in
 the active workspace selected by the reviewer. Failed LDAP credentials return the same
@@ -768,6 +793,13 @@ the request is emailed to active System Administrators instead, with the user's 
 link to Users & Access for assigning roles and workspace access. Repeated sign-ins do not send
 the onboarding request again. External Document Portal accounts retain their existing immediate
 System Administrator notification on first login.
+
+New LDAP accounts created by an Administrator also require this one-time email confirmation.
+Confirmation does not approve roles or change department/workspace access. After confirmation,
+later email corrections remain managed by an Administrator or Department Coordinator; existing
+approved LDAP users with no email retain their self-service add-email option. Existing accounts
+with an email are not reprompted by the migration. Deployments must run `alembic upgrade head`
+from `backend` before starting the updated API to add `qap_users.needs_email_confirmation`.
 
 ### Non-production mock LDAP
 

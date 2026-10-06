@@ -547,6 +547,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
             <DetailField label="Application Owner">{req.application_owner || '—'}</DetailField>
             <DetailField label="Change Type">{req.change_type || '—'}</DetailField>
             {req.change_type === 'Bug Fix' && <DetailField label="Previous Completed Request ID">{req.bug_fix_source_request_id || '—'}</DetailField>}
+            {req.change_type === 'Bug Fix' && <DetailField label="Defect Number (Raised By Business)">{req.business_defect_number || '—'}</DetailField>}
             <DetailField label="Request Type">{req.request_type || '—'}</DetailField>
           </DetailSection>
 

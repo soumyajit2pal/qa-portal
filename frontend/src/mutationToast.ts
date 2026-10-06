@@ -3,6 +3,7 @@ import type { ApiMutationEvent } from './api'
 export interface MutationSuccessCopy {
   title: string
   message: string
+  presentation?: 'confirmation'
 }
 
 function normalizedPath(path: string): string {
@@ -29,7 +30,7 @@ export function mutationSuccessCopy({ path, method }: ApiMutationEvent): Mutatio
   ) return null
 
   if (method === 'POST' && (/\/delegations$/.test(value) || /\/child-delegations\/[^/]+\/\d+$/.test(value))) {
-    return { title: 'Input delegated', message: 'The selected user can now provide input on this request.' }
+    return { title: 'Input delegated', message: 'The selected user can now provide input on this request.', presentation: 'confirmation' }
   }
   if (action === 'recall') {
     return { title: 'Delegation recalled', message: 'Input control has been returned to the requester.' }
@@ -38,7 +39,7 @@ export function mutationSuccessCopy({ path, method }: ApiMutationEvent): Mutatio
     return { title: 'Input returned', message: 'The request was returned to its requester successfully.' }
   }
   if (/(^|-)(assign|reassign)(-|$)/.test(action)) {
-    return { title: 'Assignment updated', message: 'The selected assignee has been saved successfully.' }
+    return { title: 'Assignment updated', message: 'The selected assignment has been saved successfully.', presentation: 'confirmation' }
   }
   if (/(^|-)(approve|approval|decision|review|signoff)(-|$)/.test(action) || action.includes('sign-off')) {
     return { title: 'Decision recorded', message: 'Your workflow decision was saved successfully.' }

@@ -464,6 +464,9 @@ export function Modal({
     function onKeyDown(event: KeyboardEvent) {
       const dialog = dialogRef.current;
       if (!dialog) return;
+      // A native modal (search or assignment confirmation) owns focus while
+      // open. Do not move keyboard focus into the underlying record drawer.
+      if (document.querySelector("dialog[open][aria-modal='true']")) return;
       const openDialogs = document.querySelectorAll<HTMLElement>("[role='dialog'][aria-modal='true']");
       if (openDialogs[openDialogs.length - 1] !== dialog) return;
       if (event.key === "Escape") {

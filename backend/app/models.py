@@ -213,6 +213,9 @@ class User(Base):
     username = Column(String(64), unique=True, nullable=False)
     full_name = Column(String(150), nullable=False)
     email = Column(String(150))
+    # One-time self-service confirmation/correction for newly created LDAP
+    # accounts. Existing accounts retain their current notification address.
+    needs_email_confirmation = Column(Boolean, nullable=False, default=False, server_default=text("0"))
     # 2026-08 "one user can be on multiple departments" CR -- a user's real
     # department membership now lives in department_assignments (many-to-many
     # via UserDepartment, same pattern as role_assignments/UserRole below).
@@ -859,6 +862,7 @@ class QARequest(Base):
     bug_fix_source_request_id = Column(
         String(40), ForeignKey("qap_requests.request_id"), nullable=True,
     )
+    business_defect_number = Column(String(64), nullable=True)
     vendor_si_partner = Column(String(150))
     technology_stack = Column(String(150))
     release_version = Column(String(64))
@@ -1262,6 +1266,10 @@ class FunctionalRequest(Base):
     @property
     def bug_fix_source_request_id(self):
         return self.qa_request.bug_fix_source_request_id if self.qa_request else None
+
+    @property
+    def business_defect_number(self):
+        return self.qa_request.business_defect_number if self.qa_request else None
 
     @property
     def environment(self):
@@ -1930,6 +1938,10 @@ class PerformanceRequest(Base):
     @property
     def bug_fix_source_request_id(self):
         return self.qa_request.bug_fix_source_request_id if self.qa_request else None
+
+    @property
+    def business_defect_number(self):
+        return self.qa_request.business_defect_number if self.qa_request else None
 
     @property
     def application_owner(self):

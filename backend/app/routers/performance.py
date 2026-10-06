@@ -818,6 +818,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
             ("Department", obj.department),
             ("Change Type", obj.change_type),
             ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type == "Bug Fix" else None),
+            ("Defect Number (Raised By Business)", obj.business_defect_number if obj.change_type == "Bug Fix" else None),
             ("Request Type", obj.request_type),
         ]),
         ("Test Parameters & Environment", [

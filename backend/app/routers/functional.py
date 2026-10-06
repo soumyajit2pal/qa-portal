@@ -1753,6 +1753,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
             ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Change Type", obj.change_type),
             ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type == "Bug Fix" else None),
+            ("Defect Number (Raised By Business)", obj.business_defect_number if obj.change_type == "Bug Fix" else None),
             ("Department", obj.department),
         ]),
         ("Environment & Release", [

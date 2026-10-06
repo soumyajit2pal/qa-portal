@@ -173,6 +173,12 @@ def _validate_request_types(db: Session, request_types: list[str]) -> None:
         raise HTTPException(400, f"Disabled Request Type(s) cannot be selected: {', '.join(inactive)}")
 
 
+def _business_defect_number(value: Optional[str], change_type: Optional[str]) -> Optional[str]:
+    if change_type != "Bug Fix":
+        return None
+    return (value or "").strip() or None
+
+
 def _validated_bug_fix_source(db: Session, source_request_id: Optional[str], change_type: Optional[str],
                               application_name: Optional[str], department: Optional[str]) -> Optional[str]:
     """Normalize and validate the optional Bug Fix traceability reference.
@@ -540,7 +546,7 @@ def list_requests(params: pagination.PageParams = Depends(),
     # CR-102 would also match CR-1023/CR-1024 via substring search. This
     # dedicated param does an exact (case-insensitive) match instead; the
     # topbar global search uses it whenever the typed term matches the
-    # CR-<digits>/EPIC-<digits> pattern (see Layout.tsx's submitSearch).
+    # <letters>-<digits> pattern, including IN-46 (see globalSearch.ts).
     if cr_number:
         normalized_cr_number = cr_number.strip().upper()
         q = q.filter(or_(
@@ -1333,6 +1339,9 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     # resolved after flush, once this row has an id to link back to.
     application_name_in = data.pop("application_name")
     name_upper = (application_name_in or "").strip().upper()
+    data["business_defect_number"] = _business_defect_number(
+        data.get("business_defect_number"), data.get("change_type"),
+    )
     data["bug_fix_source_request_id"] = _validated_bug_fix_source(
         db,
         data.get("bug_fix_source_request_id"),
@@ -1459,6 +1468,9 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     final_application_name = ((application_name_in or "").strip().upper()
                               if application_name_in is not None else obj.application_name)
     final_change_type = data.get("change_type", obj.change_type)
+    data["business_defect_number"] = _business_defect_number(
+        data.get("business_defect_number", obj.business_defect_number), final_change_type,
+    )
     final_bug_fix_source = data.get("bug_fix_source_request_id", obj.bug_fix_source_request_id)
     data["bug_fix_source_request_id"] = _validated_bug_fix_source(
         db,
@@ -1641,6 +1653,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
         obj.application_name,
         obj.department,
     )
+    obj.business_defect_number = _business_defect_number(obj.business_defect_number, obj.change_type)
     # The one and only place request_id is ever assigned -- see its column
     # comment on models.QARequest. A Draft that gets cancelled instead of
     # raised never reaches this line, so it never burns a real ID.
@@ -1832,6 +1845,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
             ("CR Number/EPIC Number", obj.cr_number),
             ("Change Type", obj.change_type),
             ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type == "Bug Fix" else None),
+            ("Defect Number (Raised By Business)", obj.business_defect_number if obj.change_type == "Bug Fix" else None),
             ("Change Description", obj.change_description),
             ("Vendor / SI Partner", obj.vendor_si_partner),
             ("Technology Stack", obj.technology_stack),

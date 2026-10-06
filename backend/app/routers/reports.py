@@ -154,6 +154,7 @@ def qa_request_summary(date_from: str | None = None, date_to: str | None = None,
             "Application Name": r.application_name,
             "CR Number/EPIC Number": r.cr_number or r.epic_number,
             "Previous Completed Request ID": r.bug_fix_source_request_id if r.change_type == "Bug Fix" else None,
+            "Defect Number (Raised By Business)": r.business_defect_number if r.change_type == "Bug Fix" else None,
             "Request Type(s)": ",".join(
                 value for value in (r.request_types or "").split(",") if value in REQUEST_TYPES
             ),
@@ -216,6 +217,7 @@ def functional_request_register(date_from: str | None = None, date_to: str | Non
         "Change Description": item.change_description,
         "CR Number/EPIC Number": item.cr_number or item.epic_number,
         "Previous Completed Request ID": item.bug_fix_source_request_id if item.change_type == "Bug Fix" else None,
+        "Defect Number (Raised By Business)": item.business_defect_number if item.change_type == "Bug Fix" else None,
         "Change Type": item.change_type,
         "Environment": item.environment,
         "Target Promotion Environment": item.target_promotion_environment,
@@ -650,6 +652,7 @@ def performance_testing_report(date_from: str | None = None, date_to: str | None
         "Request ID": item.request_id, "Application": item.application_name,
         "CR Number/EPIC Number": item.cr_number or item.epic_number,
         "Previous Completed Request ID": item.bug_fix_source_request_id if item.change_type == "Bug Fix" else None,
+        "Defect Number (Raised By Business)": item.business_defect_number if item.change_type == "Bug Fix" else None,
         "Department": item.department, "Request Type": item.request_type,
         "Environment": item.environment,
         "Target Promotion Environment": item.target_promotion_environment,

@@ -32,6 +32,7 @@ from .database import (
 )
 from . import cache, models, email_notifications  # noqa: F401  (models ensures models are registered before create_all)
 from .session_security import resolve_session
+from .deps import ldap_email_completion_required
 from .constants import is_document_portal_only
 from .audit_service import normalize_request_id, request_audit_target, write_audit
 from .documents import migrate_legacy_document_layout
@@ -403,20 +404,7 @@ _DOCUMENT_PORTAL_ALLOWED_API_PATHS = {
 
 
 def _ldap_email_completion_required(user: models.User) -> bool:
-    """Whether an approved LDAP account must supply its notification email.
-
-    Department choice and role review must finish first.  This avoids
-    presenting two blocking onboarding actions at once and ensures that a
-    person whose access is still pending cannot infer that their request has
-    been approved merely because the email form appeared.
-    """
-    return bool(
-        user.login_type == "LDAP"
-        and not user.needs_department_selection
-        and not user.needs_role_review
-        and user.roles
-        and not (user.email or "").strip()
-    )
+    return ldap_email_completion_required(user)
 
 
 _GUARD_IDENTITY_UNSET = object()
@@ -454,6 +442,7 @@ def _session_guard_identity(request: Request) -> dict | None:
                 "needs_department_selection": bool(user.needs_department_selection),
                 "login_type": user.login_type,
                 "email": user.email,
+                "ldap_email_completion_required": _ldap_email_completion_required(user),
             }
     request.state.session_guard_identity = identity
     if identity:
@@ -496,7 +485,7 @@ async def pending_access_approval_api_guard(request, call_next):
 
 @app.middleware("http")
 async def ldap_email_completion_api_guard(request, call_next):
-    """Require a notification address before exposing approved LDAP access.
+    """Require first-login email confirmation or legacy blank-email recovery.
 
     The mandatory browser modal gives users a clear recovery path, and this
     companion guard closes the direct-URL/API bypass path while their account
@@ -511,18 +500,14 @@ async def ldap_email_completion_api_guard(request, call_next):
         return await call_next(request)
     allow_request = bool(
         not identity["is_active"]
-        or identity["login_type"] != "LDAP"
-        or identity["needs_department_selection"]
-        or identity["needs_role_review"]
-        or not identity["roles"]
-        or str(identity["email"] or "").strip()
+        or not identity["ldap_email_completion_required"]
     )
     if allow_request:
         return await call_next(request)
     return JSONResponse(
         status_code=403,
         content={
-            "detail": "Add your notification email address before using QA Portal.",
+            "detail": "Confirm or add your notification email address before using QA Portal.",
             "status_code": 403,
         },
     )

@@ -45,6 +45,7 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
     epic_number: '',
     change_type: editing.change_type || 'New',
     bug_fix_source_request_id: editing.bug_fix_source_request_id || '',
+    business_defect_number: editing.business_defect_number || '',
     vendor_si_partner: editing.vendor_si_partner || '',
     technology_stack: editing.technology_stack || '',
     change_description: editing.change_description || '',

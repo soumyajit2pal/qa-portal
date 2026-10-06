@@ -142,6 +142,7 @@ class UserOut(ORMModel):
     username: str
     full_name: str
     email: Optional[str] = None
+    needs_email_confirmation: bool = False
     # 2026-08 "one user can be on multiple departments" CR -- `department`
     # (singular) is kept for every existing consumer that only expects one
     # value. It's the raw legacy column, but every write path now keeps it
@@ -292,13 +293,8 @@ class DepartmentSelection(BaseModel):
 
 
 class LdapEmailCompletion(BaseModel):
-    """The notification address an approved LDAP user confirms themselves.
-
-    LDAP may not return a mail attribute for every identity.  This separate,
-    deliberately narrow payload keeps the required post-approval profile
-    completion endpoint from becoming a general self-service profile editor.
-    """
-    email: EmailStr
+    """One notification address; never accepts roles or department changes."""
+    email: EmailStr = Field(max_length=150)
 
 
 class AdminTestEmailRequest(BaseModel):
@@ -711,6 +707,7 @@ class QARequestCreate(BaseModel):
     epic_number: Optional[str] = None
     change_type: Optional[str] = None
     bug_fix_source_request_id: Optional[str] = None
+    business_defect_number: Optional[str] = Field(default=None, max_length=64)
     vendor_si_partner: Optional[str] = None
     technology_stack: Optional[str] = None
     release_version: Optional[str] = None
@@ -858,6 +855,7 @@ class QARequestOut(ORMModel):
     epic_number: Optional[str] = None
     change_type: Optional[str] = None
     bug_fix_source_request_id: Optional[str] = None
+    business_defect_number: Optional[str] = Field(default=None, max_length=64)
     vendor_si_partner: Optional[str] = None
     technology_stack: Optional[str] = None
     release_version: Optional[str] = None
@@ -1097,6 +1095,7 @@ class FunctionalOut(ORMModel):
     change_description: Optional[str] = None
     change_type: Optional[str] = None
     bug_fix_source_request_id: Optional[str] = None
+    business_defect_number: Optional[str] = Field(default=None, max_length=64)
     environment: Optional[str] = None
     target_promotion_environment: Optional[str] = None
     release_version: Optional[str] = None
@@ -1857,6 +1856,7 @@ class PerformanceOut(ORMModel):
     request_type: Optional[str] = None
     change_type: Optional[str] = None
     bug_fix_source_request_id: Optional[str] = None
+    business_defect_number: Optional[str] = Field(default=None, max_length=64)
     vendor_si_partner: Optional[str] = None
     technology_stack: Optional[str] = None
     release_version: Optional[str] = None

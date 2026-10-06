@@ -1,0 +1,23 @@
+.assignment-confirmation {
+  width: min(480px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 48px);
+  margin: auto; padding: 0; overflow: auto; border: 1px solid #cbe2d4; border-radius: 20px;
+  background: #fff; color: var(--text); box-shadow: 0 24px 80px rgba(16, 35, 58, .24);
+}
+.assignment-confirmation::backdrop { background: rgba(15, 25, 40, .48); backdrop-filter: blur(3px); }
+.assignment-confirmation-content { display: grid; justify-items: center; gap: 16px; padding: 32px; }
+.assignment-confirmation-icon {
+  display: grid; place-items: center; width: 64px; height: 64px; border-radius: 50%;
+  background: #e7f6ec; color: #188347; font-size: 34px; font-weight: 750;
+}
+.assignment-confirmation h2 { margin: 0; font-size: 24px; line-height: 1.3; color: #193b29; text-align: center; }
+.assignment-confirmation p { margin: 0; color: #526577; font-size: 15px; line-height: 1.6; text-align: center; }
+.assignment-confirmation-details { width: 100%; display: grid; gap: 12px; margin: 4px 0; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: #f7fafb; }
+.assignment-confirmation-details > div { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px; }
+.assignment-confirmation dt { font-size: 13px; color: var(--muted); }
+.assignment-confirmation dd { margin: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
+.assignment-confirmation-done { width: 100%; min-height: 46px; font-size: 15px; }
+.assignment-confirmation small { color: var(--muted); font-size: 12px; }
+@media (max-width: 480px) {
+  .assignment-confirmation-content { padding: 24px; }
+  .assignment-confirmation-details > div { grid-template-columns: 1fr; gap: 4px; }
+}

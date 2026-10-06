@@ -387,24 +387,34 @@ def require_document_portal_manager(current_user: models.User = Depends(get_docu
     return current_user
 
 
+def ldap_email_completion_required(user: models.User) -> bool:
+    """New LDAP confirmation first; retain legacy approved-user blank recovery."""
+    return bool(
+        user.login_type == "LDAP"
+        and (
+            user.needs_email_confirmation
+            or (
+                not user.needs_department_selection
+                and not user.needs_role_review
+                and user.roles
+                and not (user.email or "").strip()
+            )
+        )
+    )
+
+
 def _require_ldap_notification_email(current_user: models.User) -> None:
     """Mirror the core API's mandatory LDAP email-completion guard.
 
     Document Portal runs in a separate process and therefore cannot rely on
     core ``main.py`` middleware.  Keeping this check in the shared document
-    access dependencies closes the direct-URL bypass while allowing first
-    login department selection/access review to complete normally.
+    access dependencies closes the direct-URL bypass until email setup is
+    complete. Department selection and role review retain their own controls.
     """
-    if (
-        current_user.login_type == "LDAP"
-        and not current_user.needs_department_selection
-        and not current_user.needs_role_review
-        and current_user.roles
-        and not (current_user.email or "").strip()
-    ):
+    if ldap_email_completion_required(current_user):
         raise HTTPException(
             status_code=403,
-            detail="Add your notification email address before using QA Portal.",
+            detail="Confirm or add your notification email address before using QA Portal.",
         )
 
 

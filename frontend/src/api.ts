@@ -90,6 +90,26 @@ const activityListeners = new Set<(pending: number) => void>()
 export interface ApiMutationEvent {
   path: string
   method: string
+  requestId?: string
+  applicationName?: string
+  assigneeName?: string
+}
+
+// Publish only display context, never a complete response or request payload.
+export function apiMutationEvent(path: string, method: string, result: unknown): ApiMutationEvent {
+  const event: ApiMutationEvent = { path, method }
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return event
+  const response = result as Record<string, unknown>
+  const record = response.request && typeof response.request === 'object' && !Array.isArray(response.request)
+    ? response.request as Record<string, unknown> : response
+  const text = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : undefined
+  const requestId = text(record.defect_key) || text(record.request_id) || text(record.cycle_key) || text(record.project_key)
+  const applicationName = text(record.application_name)
+  const assigneeName = text(record.assignee_name) || text(record.assigned_to_name)
+  if (requestId) event.requestId = requestId
+  if (applicationName) event.applicationName = applicationName
+  if (assigneeName) event.assigneeName = assigneeName
+  return event
 }
 
 const mutationListeners = new Set<(event: ApiMutationEvent) => void>()
@@ -408,7 +428,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
     try {
       try {
         const result = await executeRequest<T>(path, opts)
-        if (method !== 'GET') mutationListeners.forEach((listener) => listener({ path, method }))
+        if (method !== 'GET') mutationListeners.forEach((listener) => listener(apiMutationEvent(path, method, result)))
         if (key && !opts.isBlob && requestGeneration === cacheGeneration) {
           completedGets.set(key, { value: result, expiresAt: Date.now() + GET_CACHE_TTL_MS })
         }
@@ -421,7 +441,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
         if (!retryable) throw error
         await new Promise((resolve) => window.setTimeout(resolve, 350))
         const result = await executeRequest<T>(path, opts)
-        if (method !== 'GET') mutationListeners.forEach((listener) => listener({ path, method }))
+        if (method !== 'GET') mutationListeners.forEach((listener) => listener(apiMutationEvent(path, method, result)))
         if (key && !opts.isBlob && requestGeneration === cacheGeneration) {
           completedGets.set(key, { value: result, expiresAt: Date.now() + GET_CACHE_TTL_MS })
         }
@@ -632,7 +652,7 @@ export const api = {
         cacheGeneration += 1
         completedGets.clear()
         inFlightGets.clear()
-        mutationListeners.forEach((listener) => listener({ path, method: 'POST' }))
+        mutationListeners.forEach((listener) => listener(apiMutationEvent(path, 'POST', payload)))
         resolve(payload as T)
         return
       }

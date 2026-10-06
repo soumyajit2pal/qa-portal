@@ -45,6 +45,7 @@ export interface UserOut {
   login_type: string
   is_active: boolean
   needs_role_review: boolean
+  needs_email_confirmation: boolean
   // True right after this person's first-ever LDAP login, until they pick
   // their own department via the department-selection popup (see
   // components/DepartmentPrompt.tsx, PATCH /api/auth/me).
@@ -470,6 +471,7 @@ export interface QARequestOut {
   epic_number?: string | null
   change_type?: string | null
   bug_fix_source_request_id?: string | null
+  business_defect_number?: string | null
   vendor_si_partner?: string | null
   technology_stack?: string | null
   release_version?: string | null
@@ -582,6 +584,7 @@ export interface FunctionalOut {
   change_description?: string | null
   change_type?: string | null
   bug_fix_source_request_id?: string | null
+  business_defect_number?: string | null
   environment?: string | null
   target_promotion_environment?: string | null
   release_version?: string | null
@@ -1003,6 +1006,7 @@ export interface PerformanceOut {
   request_type?: string | null
   change_type?: string | null
   bug_fix_source_request_id?: string | null
+  business_defect_number?: string | null
   vendor_si_partner?: string | null
   technology_stack?: string | null
   release_version?: string | null

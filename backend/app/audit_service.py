@@ -129,6 +129,7 @@ def user_snapshot(user: models.User) -> dict:
         "username": user.username,
         "full_name": user.full_name,
         "email": user.email,
+        "needs_email_confirmation": bool(user.needs_email_confirmation),
         "department": user.department,
         # 2026-08 "one user can be on multiple departments" CR: capture the
         # full multi-department set too, alongside the legacy single

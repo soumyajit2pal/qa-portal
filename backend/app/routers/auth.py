@@ -357,7 +357,7 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
         # Unknown username: just-in-time provision from LDAP rather than requiring
         # an admin to pre-create the account. A successful directory bind on this
         # first login creates a local User row with *no* application role.
-        # The person must first select their department, then an Administrator
+        # The person confirms their email and selects their department, then an Administrator
         # or that department's Coordinator approves access by assigning roles.
         # This deliberately never grants Requester (or any other) access from
         # an unaudited self-service selection.
@@ -383,6 +383,7 @@ def login(request: Request, response: Response, form_data = Depends(encrypted_lo
             username=username,
             full_name=profile.get("full_name") or username,
             email=profile.get("email"),
+            needs_email_confirmation=True,
             department=OTHER_DEPARTMENT if document_only_ldap_account else profile.get("department"),
             department_assignments=(
                 [models.UserDepartment(department=OTHER_DEPARTMENT)]
@@ -567,23 +568,28 @@ def complete_ldap_email(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Save the mandatory notification address for an approved LDAP account.
+    """Confirm/correct a new LDAP account's email once, or fill a legacy blank.
 
-    The browser displays this only when an LDAP account has completed its
-    access review and the directory supplied no email.  Enforcing the same
-    condition here prevents the endpoint from being used as a broader
-    profile-edit API, while still allowing an already-approved person to
-    recover from the missing LDAP attribute without waiting for an admin.
+    Lock and reload the row so concurrent/stale onboarding submissions cannot
+    overwrite an address after the one-time permission has been consumed.
     """
+    current_user = (
+        db.query(models.User)
+        .filter(models.User.id == current_user.id)
+        .populate_existing()
+        .with_for_update()
+        .one()
+    )
     if current_user.login_type != LoginType.LDAP:
         raise HTTPException(status_code=403, detail="This email completion step applies only to LDAP accounts.")
-    if current_user.needs_department_selection or current_user.needs_role_review or not current_user.roles:
+    confirming = bool(current_user.needs_email_confirmation)
+    if not confirming and (current_user.needs_department_selection or current_user.needs_role_review or not current_user.roles):
         raise HTTPException(
             status_code=403,
             detail="Your access must be approved before you can complete the notification email step.",
         )
 
-    if (current_user.email or "").strip():
+    if not confirming and (current_user.email or "").strip():
         raise HTTPException(
             status_code=409,
             detail="A notification email is already configured. Ask an Administrator or Department Coordinator to change it.",
@@ -593,12 +599,13 @@ def complete_ldap_email(
 
     before = user_snapshot(current_user)
     current_user.email = email
+    current_user.needs_email_confirmation = False
     db.commit()
     db.refresh(current_user)
     write_audit(
         db,
         event_type="ACCESS_MANAGEMENT",
-        action="LDAP_NOTIFICATION_EMAIL_COMPLETED",
+        action="LDAP_NOTIFICATION_EMAIL_CONFIRMED" if confirming else "LDAP_NOTIFICATION_EMAIL_COMPLETED",
         actor=current_user,
         request=request,
         status_code=200,
@@ -624,6 +631,8 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
             status_code=403,
             detail="Department self-selection is available only during first-time LDAP onboarding. Ask an Administrator to change or add departments.",
         )
+    if current_user.needs_email_confirmation:
+        raise HTTPException(status_code=403, detail="Confirm your notification email before selecting your department.")
     primary_department = payload.department.strip()
     _validate_department(db, primary_department)
     before = user_snapshot(current_user)
@@ -941,6 +950,7 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
     user = models.User(
         username=payload.username, full_name=payload.full_name, email=payload.email,
         department=departments[0] if departments else None, login_type=login_type,
+        needs_email_confirmation=login_type == LoginType.LDAP,
         show_in_user_dropdowns=payload.show_in_user_dropdowns,
         role_assignments=[models.UserRole(role=r) for r in roles],
         department_assignments=[models.UserDepartment(department=d) for d in departments],

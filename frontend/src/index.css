@@ -909,6 +909,9 @@ samp,
 .app-footer .app-version-label { margin-left:8px; }
 .login-page-footer .app-version-label { margin:0 2px; color:#245568; }
 .access-pending-version { margin-top:24px; display:flex; justify-content:center; }
+.email-confirmation-field { display:grid; gap:8px; width:100%; }
+.email-confirmation-field > span { color:var(--text); font-size:14px; font-weight:600; }
+.form-field.email-confirmation-field > input { width:100%; min-width:0; min-height:48px; padding:12px 14px; font-size:16px; line-height:1.5; }
 .public-help-actions { display:flex; align-items:center; gap:10px; }
 .document-fullscreen-credit .app-version-label { color:#245568; }
 @media (max-width:480px) { .public-help-actions { flex-wrap:wrap; justify-content:flex-end; } }
@@ -7509,9 +7512,8 @@ td { padding: 12px; }
 .navigation-v8 .main .badge-teal { color:var(--qo-blue-800);background:var(--qo-blue-100); }
 
 /* Global mutation feedback -------------------------------------------------
-   Every successful POST/PUT/PATCH/DELETE is announced through one compact,
-   fixed toast surface. This keeps workflow feedback consistent across
-   all lazy-loaded modules without duplicating local success state. */
+   Assignments use a persistent confirmation dialog. Other successful
+   POST/PUT/PATCH/DELETE operations use this compact toast surface. */
 .toast-viewport {
   position: fixed;
   top: 18px;

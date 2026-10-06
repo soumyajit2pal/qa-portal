@@ -1,3 +1,5 @@
+import { CHANGE_REFERENCE_REGEX } from './changeReference'
+
 // Search destinations use each entity's owning module and existing deep link.
 const ID_PREFIX_ROUTES = [
   { prefix: 'TQA-FUNC', path: '/functional-requests' },
@@ -18,7 +20,6 @@ const ID_PREFIX_ROUTES = [
 ]
 
 const TQA_ID_SHORTHAND = /^(FUNC|SAST|DAST|PERF|SIGN|PROJ|TC|CYCLE)-/i
-const CR_OR_EPIC_NUMBER_REGEX = /^(?:CR-[0-9]{1,12}|EPIC-[0-9]{1,10})$/
 
 export function clearGlobalSearchDestination(pathname: string, query: string): string | null {
   const params = new URLSearchParams(query)
@@ -40,7 +41,7 @@ export function globalSearchDestination(value: string): string | null {
   const normalizedUpper = normalizedTerm.toUpperCase()
   const idRoute = ID_PREFIX_ROUTES.find((route) => normalizedUpper.startsWith(route.prefix))
   if (idRoute) return `${idRoute.path}?open=${encodeURIComponent(normalizedTerm)}`
-  // Exact CR/EPIC matching prevents CR-102 from also finding CR-1023.
-  if (CR_OR_EPIC_NUMBER_REGEX.test(normalizedUpper)) return `/qa-requests?cr_number=${encodeURIComponent(normalizedUpper)}`
+  // Exact change-reference matching prevents IN-46 from also finding IN-460.
+  if (CHANGE_REFERENCE_REGEX.test(normalizedUpper)) return `/qa-requests?cr_number=${encodeURIComponent(normalizedUpper)}`
   return `/qa-requests?search=${encodeURIComponent(normalizedTerm)}`
 }

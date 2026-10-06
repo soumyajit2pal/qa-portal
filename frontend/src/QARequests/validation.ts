@@ -1,5 +1,6 @@
 import { QARequestForm, SAST_COMPONENT_FIELDS } from './types'
 import { validEnvironmentPromotion, validTargetPromotionOptions } from '../constants'
+import { CHANGE_REFERENCE_REGEX, CHANGE_REFERENCE_FORMAT_ERROR } from '../changeReference'
 
 // Mandatory text fields on the "Application & Change Details" / "Release &
 // Environment" steps (everything marked "(*)" in the QA Request field spec).
@@ -32,17 +33,6 @@ const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
   // { key: 'build_number', label: 'Build Number / Hash Value' },
 ]
 
-// Exported so steps/DetailsStep.tsx's inline onBlur error text checks the
-// exact same rule as the real gate below, instead of keeping its own
-// separate copy that could silently drift out of sync with this one.
-//
-// Reported directly: "max length 15" -- both alternatives now cap out at 15
-// characters total (prefix included): CR-<up to 12 digits> or EPIC-<up to
-// 10 digits>. DetailsStep.tsx's own `maxLength={11}` on the input was
-// already inconsistent with this regex even before this change (11 is
-// shorter than EPIC-123456789's 14 chars), so that's raised to 15 too.
-export const CR_OR_EPIC_NUMBER_REGEX = /^(?:CR-[0-9]{1,12}|EPIC-[0-9]{1,10})$/
-
 // Because each wizard step's fields are unmounted once you move to another
 // step, the browser's native `required` attribute can't catch a missing
 // field from an earlier step at final-submit time -- these checks run
@@ -59,8 +49,8 @@ export function detailsStepError(f: QARequestForm): string | null {
   // Enforced here instead, the same place every other mandatory-field rule
   // already lives, so it actually blocks Next/Submit like the on-screen
   // error implies it should.
-  if (!CR_OR_EPIC_NUMBER_REGEX.test(f.cr_number.trim())) {
-    return 'CR Number/EPIC Number is not in a valid format. Example: CR-1234 or EPIC-123456'
+  if (!CHANGE_REFERENCE_REGEX.test(f.cr_number.trim())) {
+    return `CR Number/EPIC Number: ${CHANGE_REFERENCE_FORMAT_ERROR}`
   }
   // Reported directly -- see this function's own header comment for the
   // full story. Only enforced when there's actually a valid choice
