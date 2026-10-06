@@ -9085,14 +9085,21 @@ td { padding: 12px; }
 .sast-repository-progress > header p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .sast-repository-progress > header > span { flex: 0 0 auto; padding: 5px 10px; border-radius: 20px; background: #fff7e8; color: #8c5b12; font-size: 12px; font-weight: 750; }
 .sast-repository-progress > header > span.complete { background: #edf8f1; color: #247344; }
-.sast-repository-progress-scroll { overflow-x: auto; }
-.sast-repository-progress table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 11px; }
-.sast-repository-progress th,.sast-repository-progress td { padding: 10px 9px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.sast-repository-progress-scroll { max-width: 100%; min-width: 0; overflow-x: auto; }
+.sast-repository-progress table { width: 100%; min-width: 900px; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
+.sast-progress-validation-column { width: 64px; }
+.sast-progress-target-column { width: 34%; }
+.sast-progress-state-column { width: 17%; }
+.sast-progress-source-column { width: 24%; }
+.sast-progress-import-column { width: 12%; }
+.sast-progress-findings-column { width: 13%; }
+.sast-repository-progress th,.sast-repository-progress td { padding: 12px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
 .sast-repository-progress thead th { color: var(--muted); font-size: 10px; }
 .sast-repository-progress thead th small { display: block; margin-top: 4px; font-weight: 400; text-transform: none; letter-spacing: normal; }
-.sast-repository-progress tbody th { max-width: 280px; overflow-wrap: anywhere; font-weight: 650; }
-.sast-repository-progress td small { display: block; margin-top: 4px; max-width: 200px; color: var(--muted); overflow-wrap: anywhere; }
-.sast-repository-state { display: inline-block; padding: 4px 7px; border-radius: 6px; color: #566476; background: #eef1f5; white-space: nowrap; }
+.sast-repository-progress tbody th { color: var(--text); font-size: 12px; text-transform: none; letter-spacing: normal; font-weight: 650; }
+.sast-repository-progress td small { display: block; margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
+.sast-repository-progress td:nth-last-child(3) small { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.sast-repository-state { display: inline-block; max-width: 100%; padding: 4px 7px; border-radius: 6px; color: #566476; background: #eef1f5; white-space: normal; }
 .sast-repository-state.state-clear { color: #247344; background: #edf8f1; }
 .sast-repository-state.state-ready_for_rescan,.sast-repository-state.state-awaiting_validation { color: #29568c; background: #eef4fc; }
 .sast-repository-state.state-waiting_for_fix,.sast-repository-state.state-stale { color: #8c5b12; background: #fff7e8; }
