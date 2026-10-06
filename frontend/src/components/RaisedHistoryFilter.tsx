@@ -33,9 +33,11 @@ function dateRange(preset: Exclude<Preset, "all" | "custom">): RaisedHistoryRang
 export default function RaisedHistoryFilter({
   value,
   onChange,
+  compact = false,
 }: {
   value: RaisedHistoryRange;
   onChange: (next: RaisedHistoryRange) => void;
+  compact?: boolean;
 }) {
   const [preset, setPreset] = useState<Preset>("all");
 
@@ -46,9 +48,9 @@ export default function RaisedHistoryFilter({
   }
 
   return (
-    <div className="raised-history-filter">
+    <div className={`raised-history-filter${compact ? " is-compact" : ""}`}>
       <label>
-        Historical completed requests
+        {compact ? "History" : "Historical completed requests"}
         <select aria-label="Historical completed requests raised-date range" value={preset} onChange={(event) => changePreset(event.target.value as Preset)}>
           <option value="all">All history</option>
           <option value="7d">Last 7 days</option>
@@ -64,7 +66,7 @@ export default function RaisedHistoryFilter({
           <label>To <input type="date" value={value.to} onChange={(event) => onChange({ ...value, to: event.target.value })} /></label>
         </div>
       )}
-      <span className="raised-history-filter-note">Filters closed, cancelled, and rejected requests by raised date. Active work stays visible.</span>
+      <span className="raised-history-filter-note" title={compact ? "Filters closed, cancelled, and rejected requests by raised date." : undefined}>{compact ? "Active work stays visible." : "Filters closed, cancelled, and rejected requests by raised date. Active work stays visible."}</span>
     </div>
   );
 }

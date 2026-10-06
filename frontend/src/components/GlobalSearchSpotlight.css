@@ -1,0 +1,64 @@
+.global-search-spotlight {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  box-sizing: border-box;
+  margin: 0;
+  padding: clamp(64px, 18vh, 180px) 24px 24px;
+  border: 0;
+  background: transparent;
+  color: #18304e;
+}
+
+.global-search-spotlight[open] { display: flex; align-items: flex-start; justify-content: center; }
+.global-search-spotlight::backdrop { background: #18304e30; backdrop-filter: blur(5px); }
+.spotlight-panel { width: min(760px, 100%); animation: spotlight-arrive 140ms ease-out; }
+.spotlight-search {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 82px;
+  padding: 16px 24px;
+  border: 1px solid #d3dce7;
+  border-radius: 28px;
+  background: #fffffff5;
+  box-shadow: 0 24px 70px #142b4a38, 0 4px 12px #142b4a12;
+}
+.spotlight-search > svg { width: 30px; height: 30px; flex-shrink: 0; color: #64758b; }
+.spotlight-input { flex: 1; min-width: 0; }
+.spotlight-search .spotlight-input input {
+  width: 100%;
+  min-width: 0;
+  height: 48px;
+  padding: 0 36px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #18304e;
+  font-size: 26px;
+  font-weight: 400;
+  letter-spacing: -.025em;
+  outline: none;
+  box-shadow: none;
+}
+.spotlight-search .spotlight-input input::placeholder { color: #7a8696; }
+.spotlight-search .spotlight-input input:focus { border: 0; outline: none; box-shadow: none; }
+.spotlight-search .clearable-search-button { color: #64758b; }
+.spotlight-dismiss { flex-shrink: 0; padding: 5px 8px; border: 1px solid #dde4ed; border-radius: 7px; background: #f5f7fa; color: #64758b; font-size: 12px; cursor: pointer; }
+.spotlight-dismiss:hover { color: #18304e; background: #eaf0f7; }
+.spotlight-search button:focus-visible { outline: 2px solid #205b96; outline-offset: 3px; }
+.spotlight-help { display: flex; justify-content: space-between; gap: 16px; padding: 14px 24px; color: #334961; font-size: 12px; }
+.spotlight-enter { display: inline-flex; gap: 6px; white-space: nowrap; }
+.spotlight-enter kbd { font-family: inherit; }
+@keyframes spotlight-arrive { from { opacity: 0; transform: translateY(-6px) scale(.99); } to { opacity: 1; transform: none; } }
+@media (max-width: 600px) {
+  .global-search-spotlight { padding: 64px 14px 14px; }
+  .spotlight-search { min-height: 68px; padding: 12px 16px; gap: 10px; border-radius: 22px; }
+  .spotlight-search > svg { width: 24px; height: 24px; }
+  .spotlight-search .spotlight-input input { font-size: 20px; }
+  .spotlight-help { padding: 12px 16px; font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) { .spotlight-panel { animation: none; } }

@@ -1,0 +1,35 @@
+/* Shared treatment for the portal's creation and signature shortcuts. */
+.navigation-v8 .btn.portal-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 9px 18px;
+  border: 1px solid #173f73;
+  border-radius: 10px;
+  color: #fff;
+  background: linear-gradient(135deg, #2b72ae 0%, #1d4f85 52%, #173f73 100%);
+  box-shadow: 0 5px 13px #0c294f40, inset 0 1px 0 #ffffff38;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: .01em;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.navigation-v8 .btn.portal-action-button:hover:not(:disabled) {
+  color: #fff;
+  border-color: #0c294f;
+  background: linear-gradient(135deg, #357fbc 0%, #194778 52%, #0c294f 100%);
+  box-shadow: 0 7px 17px #0c294f4f, inset 0 1px 0 #ffffff38;
+  transform: translateY(-1px);
+}
+.navigation-v8 .btn.portal-action-button:active:not(:disabled) {
+  transform: none;
+  box-shadow: 0 2px 6px #0c294f33, inset 0 1px 0 #ffffff2e;
+}
+.navigation-v8 .btn.portal-action-button:focus-visible { outline: 3px solid #2b72ae66; outline-offset: 3px; }
+.navigation-v8 .btn.portal-action-button svg { flex-shrink: 0; width: 16px; height: 16px; }
+.navigation-v8 .btn.portal-action-button:disabled { color: #ffffffdb; background: #82999e; border-color: #82999e; box-shadow: none; transform: none; }
+@media (pointer: coarse) { .navigation-v8 .btn.portal-action-button { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .navigation-v8 .btn.portal-action-button:hover:not(:disabled) { transform: none; } }

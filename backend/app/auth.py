@@ -8,13 +8,14 @@ import re
 import bcrypt
 import jwt
 from jwt import PyJWTError as JWTError
-from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE, Tls
+from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE
 from ldap3.core.exceptions import LDAPException
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.utils.dn import escape_rdn
 
 from .config import settings
 from . import ldap_settings
+from .ldap_tls import DirectoryTls
 
 
 SECRET_KEY = settings.secret_key
@@ -170,6 +171,13 @@ _LDAP_PUBLIC_ERRORS = {
         "guidance": "Confirm that you are on the required network or VPN, then contact the portal administrator to verify the LDAP certificate chain and configured CA certificate.",
         "retryable": False,
     },
+    "LDAP_TLS_HANDSHAKE_ERROR": {
+        "status": 503,
+        "cause": "LDAP TLS negotiation failed",
+        "message": "QualityOps could not negotiate a secure connection with the LDAP endpoint.",
+        "guidance": "Verify that the hostname and port provide LDAPS (usually port 636), and that the endpoint supports TLS 1.2 or newer. Uploading another CA certificate will not fix a protocol or cipher mismatch.",
+        "retryable": False,
+    },
     "LDAP_CONNECTION_TIMEOUT": {
         "status": 503,
         "cause": "LDAP connection timed out",
@@ -262,6 +270,46 @@ _AUTHENTICATION_REJECTED_DETAIL = {
 }
 
 
+_LDAP_TLS_GUIDANCE = {
+    "hostname_mismatch": "The LDAP server hostname does not match its certificate. Use the DNS hostname listed in the server certificate's Subject Alternative Name. An IP address works only if the certificate contains that IP address as an IP Subject Alternative Name; uploading a CA cannot fix this mismatch.",
+    "untrusted_issuer": "The server certificate could not be chained to a trusted CA. Upload the CA that actually issued the directory certificate, including the required root and intermediate certificates, or configure the directory to send its intermediate chain.",
+    "expired": "The directory certificate or a certificate in its CA chain has expired. Renew the expired certificate and update the directory or uploaded CA bundle as appropriate.",
+    "not_yet_valid": "A certificate in the directory's chain is not valid yet. Check the backend clock and the validity dates of the server and CA certificates.",
+    "invalid_ca": "The directory's certificate chain contains an invalid CA or violates its CA constraints. Use the correct issuing CA chain and correct the directory's certificate configuration.",
+    "weak_certificate": "The directory certificate chain uses a key or signature rejected by modern TLS. Replace the affected certificate with one that meets the backend's TLS security requirements.",
+}
+
+
+def _ldap_tls_reason(exc: BaseException, normalized: str) -> str | None:
+    # ldap3 wraps SSL errors as text, so recognize both native verify codes
+    # and their wrapped messages. Never include the raw hostname or path in
+    # the browser response or audit record.
+    verify_code = getattr(exc, "verify_code", None)
+    if verify_code in {62, 64} or any(token in normalized for token in (
+        "hostname mismatch", "ip address mismatch", "doesn't match", "does not match",
+        "doesn't contain a subjectalternativename",
+    )):
+        return "hostname_mismatch"
+    if verify_code == 10 or "certificate has expired" in normalized:
+        return "expired"
+    if verify_code == 9 or "certificate is not yet valid" in normalized:
+        return "not_yet_valid"
+    if verify_code in {2, 18, 19, 20, 21} or any(token in normalized for token in (
+        "unable to get issuer", "unable to get local issuer", "unable to verify the first certificate",
+        "unable to verify leaf signature", "self-signed certificate", "self signed certificate", "unknown ca",
+    )):
+        return "untrusted_issuer"
+    if verify_code in {24, 25, 32, 79} or any(token in normalized for token in (
+        "invalid ca certificate", "path length constraint", "key usage does not include certificate signing",
+    )):
+        return "invalid_ca"
+    if verify_code in {66, 67, 68} or any(token in normalized for token in (
+        "key too small", "digest too weak", "signature algorithm too weak",
+    )):
+        return "weak_certificate"
+    return None
+
+
 def authentication_rejected_detail() -> dict:
     """Return the one public 401 response used for every login rejection.
 
@@ -289,6 +337,7 @@ class LDAPAuthError(Exception):
         code: str = "LDAP_UNAVAILABLE",
         cause_type: str | None = None,
         operation: str | None = None,
+        tls_reason: str | None = None,
     ):
         definition = _LDAP_PUBLIC_ERRORS.get(code, _LDAP_PUBLIC_ERRORS["LDAP_UNAVAILABLE"])
         self.code = code if code in _LDAP_PUBLIC_ERRORS else "LDAP_UNAVAILABLE"
@@ -300,6 +349,9 @@ class LDAPAuthError(Exception):
         self.diagnostic = str(diagnostic or cause_type or self.code)
         self.cause_type = cause_type or type(self).__name__
         self.operation = operation
+        self.tls_reason = tls_reason if tls_reason in _LDAP_TLS_GUIDANCE else None
+        if self.code == "LDAP_TLS_CERTIFICATE_ERROR" and self.tls_reason:
+            self.guidance = _LDAP_TLS_GUIDANCE[self.tls_reason]
         super().__init__(self.diagnostic)
 
     def public_detail(self) -> dict:
@@ -333,6 +385,8 @@ class LDAPAuthError(Exception):
             "error_type": re.sub(r"[^A-Za-z0-9_.-]", "", self.cause_type)[:80] or "LDAPError",
             "retryable": self.retryable,
         }
+        if self.tls_reason:
+            detail["tls_reason"] = self.tls_reason
         if result_match:
             detail["ldap_result_code"] = int(result_match.group(1))
         if description_match:
@@ -411,10 +465,17 @@ def _ldap_exception_error(exc: BaseException, stage: str) -> LDAPAuthError | Non
         return account_error
     if stage == "user_bind" and "invalid credential" in normalized:
         return None
-    if "certificate" in normalized or "certverification" in normalized or "unknown ca" in normalized:
+    tls_reason = _ldap_tls_reason(exc, normalized)
+    if tls_reason or "certificate" in normalized or "certverification" in normalized or "unknown ca" in normalized:
         code = "LDAP_TLS_CERTIFICATE_ERROR"
     elif "timed out" in normalized or "timeout" in normalized:
         code = "LDAP_CONNECTION_TIMEOUT"
+    elif "configuration" in normalized or "invalid server" in normalized or "invalid tls" in normalized:
+        code = "LDAP_NOT_CONFIGURED"
+    elif isinstance(exc, ssl.SSLError) or any(token in normalized for token in (
+        "ssl", "tls", "handshake", "wrong_version_number", "no shared cipher",
+    )):
+        code = "LDAP_TLS_HANDSHAKE_ERROR"
     elif stage == "service_bind" and ("invalid credential" in normalized or "ldapbinderror" in normalized):
         code = "LDAP_SERVICE_BIND_FAILED"
     elif stage == "directory_search":
@@ -424,11 +485,9 @@ def _ldap_exception_error(exc: BaseException, stage: str) -> LDAPAuthError | Non
         "name or service not known", "getaddrinfo", "communication", "server down",
     )):
         code = "LDAP_SERVER_UNREACHABLE"
-    elif "configuration" in normalized or "invalid server" in normalized or "invalid tls" in normalized:
-        code = "LDAP_NOT_CONFIGURED"
     else:
         code = "LDAP_PROTOCOL_ERROR"
-    return LDAPAuthError(diagnostic, code=code, cause_type=type(exc).__name__)
+    return LDAPAuthError(diagnostic, code=code, cause_type=type(exc).__name__, tls_reason=tls_reason)
 
 
 def _mock_ldap_profile(username: str, password: str):
@@ -542,13 +601,9 @@ def _ldap_bind_and_fetch(username: str, password: str, db=None, config_override:
 
     stage = "connect"
     try:
-        # PROTOCOL_TLS_CLIENT selects modern client-side TLS defaults (TLS 1.2+
-        # with the OpenSSL/Python versions supported by this application).
-        # ldap3 performs hostname matching after the handshake when validation
-        # is CERT_REQUIRED, so both chain and endpoint identity are checked.
-        tls = Tls(
-            validate=ssl.CERT_REQUIRED,
-            version=ssl.PROTOCOL_TLS_CLIENT,
+        # Native TLS verifies the chain and actual endpoint hostname, sends
+        # SNI, and supports explicitly trusted issuing CA certificates.
+        tls = DirectoryTls(
             ca_certs_file=None if ca_certificate_pem else (ca_cert_file or None),
             ca_certs_data=ca_certificate_pem or None,
         )

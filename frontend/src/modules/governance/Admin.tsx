@@ -1043,6 +1043,7 @@ function LDAPSettingsCard() {
       <section style={{ marginTop: 18 }}>
         <h4>LDAP TLS CA certificate</h4>
         <p className="muted small">Upload a certificate from this device for LDAPS verification. The certificate contents are sent securely; the local file path is never sent or stored. PEM bundles may contain more than one CA certificate.</p>
+        <p className="muted small">Use the CA certificates that issued the directory server certificate. The LDAP server hostname must also match that certificate; a CA upload cannot fix a hostname mismatch. An IP address requires a matching IP Subject Alternative Name in the server certificate.</p>
         <div className={`document-upload-summary${certificateAction === 'keep' ? '' : ' partial'}`} style={{ marginTop: 10 }}>
           <strong>{certificateAction === 'replace' ? 'Replacement selected' : certificateAction === 'remove' ? 'Certificate removal pending' : certificateSourceLabel}</strong>
           <span>{certificateAction === 'replace'

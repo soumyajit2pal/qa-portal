@@ -11,11 +11,13 @@ import {
   IconPlus, IconCheckCircle, IconLogout, IconUsers, IconApps, IconPlay, IconBell,
   IconHelp,
 } from './Icons'
-import ClearableSearchInput from './ClearableSearchInput'
+import GlobalSearchSpotlight from './GlobalSearchSpotlight'
 import WorkspaceSwitcher from './WorkspaceSwitcher'
 import { beginWorkspaceTransition, persistWorkspaceTransition, endWorkspaceTransition } from '../workspaceTransition'
 import AppVersion from './AppVersion'
 import { MaintenanceWindowBanner } from './MaintenanceWindowNotice'
+import './BalancedHeader.css'
+import './PortalActionButton.css'
 
 interface NavItem {
   to: string
@@ -203,6 +205,8 @@ export default function Layout({ children }: { children?: ReactNode }) {
   const location = useLocation()
   const navigate = useRequestNavigation()
   const [search, setSearch] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const searchTriggerRef = useRef<HTMLButtonElement>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('qa_nav_collapsed') === 'true')
   // Nav-group toggle buttons now default to closed -- the effect below still
@@ -294,12 +298,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
   }
 
   const groups = navGroups(user, workspaceOptions)
-  const activeGroup = groups.find((group) => group.items.some((item) => (
-    item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to)
-  )))
-  const activeItem = activeGroup?.items.find((item) => (
-    item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to)
-  ))
+  const isQARequestsPage = location.pathname === '/qa-requests'
 
   useEffect(() => { setSidebarOpen(false) }, [location.pathname])
   useEffect(() => { setUserMenuOpen(false) }, [location.pathname])
@@ -339,7 +338,9 @@ export default function Layout({ children }: { children?: ReactNode }) {
     function focusGlobalSearch(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
+        setSearchOpen(true)
         searchInputRef.current?.focus()
+        searchInputRef.current?.select()
       }
     }
     window.addEventListener('keydown', focusGlobalSearch)
@@ -348,10 +349,9 @@ export default function Layout({ children }: { children?: ReactNode }) {
 
   useEffect(() => {
     function focusRequestSearch() {
-      window.requestAnimationFrame(() => {
-        searchInputRef.current?.focus()
-        searchInputRef.current?.select()
-      })
+      setSearchOpen(true)
+      searchInputRef.current?.focus()
+      searchInputRef.current?.select()
     }
     window.addEventListener('request-search-focus', focusRequestSearch)
     return () => window.removeEventListener('request-search-focus', focusRequestSearch)
@@ -394,6 +394,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
     e.preventDefault()
     const term = search.trim()
     if (!term) return
+    setSearchOpen(false)
     // Reported directly: this used to always navigate to
     // `/qa-requests?search=...`, whose own search only matches the QA
     // Request gateway's own request_id/application_name/epic_number (see
@@ -499,19 +500,13 @@ export default function Layout({ children }: { children?: ReactNode }) {
       </aside>
 
       <div className="main">
-        <div className="topbar">
-          <button className="mobile-nav-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><span /><span /><span /></button>
-          <div className="topbar-context">
-            <span><b>QualityOps</b><i>/</i>{activeGroup?.label || 'Workspace'}</span>
-            <strong>{activeItem?.label || 'Dashboard'}</strong>
-          </div>
-          <form className="search-box" onSubmit={submitSearch}>
-            <IconSearch width={16} height={16} />
-            <ClearableSearchInput ref={searchInputRef} aria-label="Global search" placeholder="Search requests, applications or IDs…" value={search} onChange={(e) => setSearch(e.target.value)} onClear={clearGlobalSearch} clearLabel="Clear global search" wrapperClassName="search-grow" />
-            <kbd>⌘ K</kbd>
-          </form>
-          <div className="right-group">
-            {canVerifySignatures(user) && <NavLink to="/verify-signature" className="btn btn-sm" title="Verify a digital signature or PDF" aria-label="Verify Signature"><IconShield width={16} height={16} /><span>Verify Signature</span></NavLink>}
+        <header className="topbar balanced-header" aria-label="Application header">
+          <div className="balanced-header-chrome">
+            <button type="button" className="mobile-nav-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><span /><span /><span /></button>
+            <div className="balanced-header-brand">
+              <img src="/qualityops-logo.png" alt="" aria-hidden="true" />
+              <span>QualityOps</span>
+            </div>
             {workspaceOptions.length > 0 && (
               <div className="qa-workspace-switcher">
                 <WorkspaceSwitcher
@@ -523,28 +518,37 @@ export default function Layout({ children }: { children?: ReactNode }) {
                 {workspaceSwitchError && <small className="workspace-switch-error" role="alert">{workspaceSwitchError}</small>}
               </div>
             )}
-            {hasRole(user, ...QA_REQUEST_CREATOR_ROLES) && (
-              <button className="btn btn-primary btn-sm" onClick={() => navigate('/qa-requests', { state: { openNew: true } })}>
-                <IconPlus width={14} height={14} /> New QA request
+            <div className="balanced-header-toolbar">
+              <button type="button" ref={searchTriggerRef} className="search-box global-search-trigger" aria-label="Open global search" aria-haspopup="dialog" aria-expanded={searchOpen} aria-keyshortcuts="Control+k Meta+k" onClick={() => setSearchOpen(true)}>
+                <IconSearch width={18} height={18} aria-hidden="true" />
+                <span className="global-search-trigger-label">{search || 'Search all requests or IDs…'}</span>
+                <kbd>⌘ K</kbd>
               </button>
-            )}
+              {canVerifySignatures(user) && <NavLink to="/verify-signature" className="btn portal-action-button balanced-header-verify" title="Verify a digital signature or PDF" aria-label="Verify Signature"><IconShield width={16} height={16} aria-hidden="true" /><span>Verify signature</span></NavLink>}
+              {!isQARequestsPage && hasRole(user, ...QA_REQUEST_CREATOR_ROLES) && (
+                <button type="button" className="btn portal-action-button balanced-header-create" onClick={() => navigate('/qa-requests', { state: { openNew: true } })}>
+                  <IconPlus width={16} height={16} aria-hidden="true" /> New QA request
+                </button>
+              )}
+            </div>
             {user && (
               <div className="topbar-user-menu" ref={userMenuRef}>
                 <button
                   type="button"
                   className="topbar-user-context"
                   onClick={() => setUserMenuOpen((v) => !v)}
+                  aria-label={`${user.full_name} account`}
                   aria-expanded={userMenuOpen}
+                  aria-controls={userMenuOpen ? 'topbar-account-details' : undefined}
                 >
                   <span className="topbar-avatar">{initials(user.full_name)}</span>
                   <span className="topbar-user-summary">
                     <strong className="topbar-user-name">{user.full_name}</strong>
-                    <small>{(user.roles || []).map((role) => ROLE_LABELS[role] || role)[0] || 'Portal user'}</small>
                   </span>
                   <i className={`topbar-user-caret ${userMenuOpen ? 'open' : ''}`}>⌄</i>
                 </button>
                 {userMenuOpen && (
-                  <div className="topbar-user-popover">
+                  <div className="topbar-user-popover" id="topbar-account-details">
                     <div className="topbar-user-popover-name">{user.full_name}</div>
                     <div className="topbar-user-popover-email">{user.username}</div>
                     <div className="topbar-user-popover-row">
@@ -565,7 +569,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
             )}
             {!user && <span className="topbar-user-context"><span className="status-dot" />Signed in</span>}
           </div>
-        </div>
+        </header>
         <MaintenanceWindowBanner />
         <div className="content">{children}</div>
         {/* Moved out of the sidebar's own footer (previously .portal-credit,
@@ -586,6 +590,18 @@ export default function Layout({ children }: { children?: ReactNode }) {
           <AppVersion />
         </div>
       </div>
+      {searchOpen && (
+        <GlobalSearchSpotlight
+          inputRef={searchInputRef}
+          value={search}
+          onChange={setSearch}
+          onClear={clearGlobalSearch}
+          onSubmit={submitSearch}
+          onDismiss={() => {
+            setSearchOpen(false)
+          }}
+        />
+      )}
     </div>
   )
 }

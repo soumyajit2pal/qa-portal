@@ -1361,7 +1361,7 @@ export default function Defects() {
 
   return <div className="tm-page defect-page defect-module">
     <header className="defect-command-header">
-      <div className="defect-command-copy"><span>QUALITY OPERATIONS · DEFECTS</span><div><h2>Defect Management</h2><b>{dashboard?.total || 0}</b></div><p>Track issues, prioritize fixes, and verify resolution.</p></div>
+      <div className="defect-command-copy"><div><h2>Defect Management</h2><b>{dashboard?.total || 0} defects</b></div><p>Track issues, prioritize fixes, and verify resolution.</p></div>
       <div className="defect-command-actions"><button className="btn btn-sm" onClick={() => { void api.downloadFile('/api/defects/export-xlsx', 'defect-management-register.xlsx').catch(setError) }}>Export</button>{canCreateDefect && <><button className="btn btn-sm" onClick={() => setCreateMode('standalone')}>+ New defect</button><button className="btn btn-primary btn-sm" disabled={!contexts.length} onClick={() => setCreateMode('execution')}>+ Report from execution</button></>}</div>
     </header>
     <ErrorText error={error} title="Defect Management could not be loaded" />

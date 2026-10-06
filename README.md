@@ -720,6 +720,20 @@ certificate mount. A path from the administrator's workstation cannot be used be
 cannot read the browser's local filesystem. Upload only public CA certificates: private keys,
 PFX/PKCS#12, and PKCS#7 files are unsupported.
 
+The TLS client sends the directory hostname as SNI and verifies it using Python's native
+certificate checks. Use a DNS hostname present in the directory certificate's Subject
+Alternative Name; an IP URI requires a matching IP Subject Alternative Name. A CA upload
+cannot correct a hostname mismatch. An explicitly uploaded issuing/intermediate CA can
+anchor the verified chain, and a root-plus-intermediate PEM bundle also works when the
+directory omits its intermediate certificate. Chain signatures, validity dates, hostname
+validation and TLS 1.2 or newer remain required.
+
+Connection failures distinguish certificate validation from TLS protocol negotiation. The
+error guidance identifies hostname mismatch, an untrusted issuer, expired/not-yet-valid
+certificates, invalid CA constraints, or weak certificate keys/signatures without exposing
+directory names, paths or credentials. `LDAP_TLS_HANDSHAKE_ERROR` means to check the
+LDAPS port and TLS/cipher support rather than repeatedly uploading a different certificate.
+
 The Admin page also provides a connection-and-user test that evaluates the unsaved form values. Test
 credentials are never stored. The service-account bind password is write-only in the UI and is
 stored with authenticated encryption derived from the deployment `SECRET_KEY`; keep that key

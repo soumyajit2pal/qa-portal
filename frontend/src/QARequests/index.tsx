@@ -19,6 +19,10 @@ import { NewRequestModal } from "./NewRequestModal";
 import { RequestDetail } from "./RequestDetail";
 import ClearableSearchInput from "../components/ClearableSearchInput";
 import RaisedHistoryFilter from "../components/RaisedHistoryFilter";
+import { IconPlus } from "../components/Icons";
+import { QA_REQUEST_CREATOR_ROLES, hasRole } from "../constants";
+import "./QARequests.css";
+import "../components/PortalActionButton.css";
 import { usePaginatedList } from "../hooks/usePaginatedList";
 import { useAuth } from "../context/AuthContext";
 
@@ -250,22 +254,34 @@ export default function QARequests() {
   }
 
   return (
-    <div>
+    <div className="qa-requests-page">
       <ErrorText error={error} />
-      {/* "Raise QA Request" lives in the topbar instead (see
-          components/Layout.tsx's "New QA request" button, gated on the same
-          REQUESTER/BUSINESS_ANALYST roles) -- not duplicated here. */}
       <PageHeader
+        eyebrow="Request management"
         title={crNumber ? `${crNumber} traceability` : "QA Requests"}
         count={total}
         subtitle={crNumber
           ? "Every visible QA gateway and linked workflow raised under this exact CR/EPIC number. Select a linked record to open it in its owning module."
-          : "The intake gateway — raise a request here, then track progress on each linked Functional/SAST/DAST/Performance request from its own page."}
+          : "Create requests and track linked testing work."}
+        actions={hasRole(user, ...QA_REQUEST_CREATOR_ROLES) ? (
+          <button type="button" className="btn btn-primary portal-action-button" onClick={() => setShowNew(true)}>
+            <IconPlus width={16} height={16} aria-hidden="true" /> New QA request
+          </button>
+        ) : undefined}
       />
       <div className={`toolbar qa-request-toolbar ${crNumber ? "is-traceability" : ""}`}>
+        <div className="tabs qa-request-scope-tabs" style={{ margin: 0 }}>
+          <button type="button" className={!assignedOnly ? "active" : ""} aria-pressed={!assignedOnly} onClick={() => setAssignedOnly(false)}>
+            All requests
+          </button>
+          <button type="button" className={assignedOnly ? "active" : ""} aria-pressed={assignedOnly} onClick={() => setAssignedOnly(true)}>
+            My drafts / delegated
+          </button>
+        </div>
         {!crNumber && (
           <ClearableSearchInput
-            placeholder="Filter QA Requests by ID, application, CR number, or project..."
+            aria-label="Filter QA requests"
+            placeholder="Filter by ID, application, CR or project…"
             value={search}
             onChange={(e) => { setSearch(e.target.value); setCrNumber(""); }}
             onClear={clearSearch}
@@ -273,17 +289,7 @@ export default function QARequests() {
             wrapperClassName="search-grow qa-request-local-search"
           />
         )}
-        <div className="qa-request-filter-row">
-          <div className="tabs qa-request-scope-tabs" style={{ margin: 0 }}>
-            <button type="button" className={!assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(false)}>
-              All Requests
-            </button>
-            <button type="button" className={assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(true)}>
-              My Drafts / Delegated
-            </button>
-          </div>
-          <RaisedHistoryFilter value={raisedHistory} onChange={setRaisedHistory} />
-        </div>
+        <RaisedHistoryFilter value={raisedHistory} onChange={setRaisedHistory} compact />
       </div>
 
       {crNumber && !loading && (
@@ -306,7 +312,7 @@ export default function QARequests() {
         </div>
       )}
 
-      <Card>
+      <Card className="qa-request-register">
         <Table
           rowKey="id"
           onRowClick={(r) => openRequest(r)}

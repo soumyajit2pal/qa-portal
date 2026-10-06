@@ -1,8 +1,7 @@
 /* Scoped register and detail styling, including embedded defect reviews. */
 .defect-module { gap:12px; }
 .defect-module .defect-command-header { min-height:0; padding:4px 0 10px; gap:16px; border-bottom:1px solid #dce6e9; }
-.defect-module .defect-command-copy > span { font-size:9px; letter-spacing:.1em; }
-.defect-module .defect-command-copy h2 { font-size:23px; letter-spacing:-.03em; }
+.defect-module .defect-command-copy h2 { margin:0; font-size:24px; letter-spacing:-.03em; }
 .defect-module .defect-command-copy p { font-size:12px; color:#6a8089; }
 .defect-module .defect-command-copy b { background:#eaf3f5; color:#246979; border-radius:6px; font-size:11px; height:25px; }
 .defect-module .defect-command-actions { flex-wrap:wrap; }

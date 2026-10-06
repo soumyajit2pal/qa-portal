@@ -216,6 +216,11 @@ def test_admin_ldap_settings(
         )
     except LDAPAuthError as exc:
         diagnostic = exc.audit_detail()
+        logger.warning(
+            "LDAP configuration test failure code=%s operation=%s error_type=%s tls_reason=%s",
+            diagnostic.get("ldap_error_code"), diagnostic.get("operation"),
+            diagnostic.get("error_type"), diagnostic.get("tls_reason", "-"),
+        )
         write_audit(
             db, event_type="SYSTEM_CONFIGURATION", action="LDAP_CONFIGURATION_TESTED",
             outcome="FAILED", actor=current_user, request=request, status_code=502,
@@ -269,7 +274,7 @@ def _raise_ldap_login_error(
     diagnostic = exc.audit_detail()
     logger.warning(
         "LDAP login failure code=%s operation=%s error_type=%s result=%s "
-        "description=%s directory_subcode=%s retryable=%s",
+        "description=%s directory_subcode=%s retryable=%s tls_reason=%s",
         diagnostic.get("ldap_error_code"),
         diagnostic.get("operation"),
         diagnostic.get("error_type"),
@@ -277,6 +282,7 @@ def _raise_ldap_login_error(
         diagnostic.get("ldap_result_description", "-"),
         diagnostic.get("directory_subcode", "-"),
         diagnostic.get("retryable"),
+        diagnostic.get("tls_reason", "-"),
     )
     if exc.status_code == status.HTTP_401_UNAUTHORIZED:
         _record_login_failure(request, username)
