@@ -630,7 +630,7 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
     _set_user_departments(db, current_user, [primary_department])
     _set_user_department_units(db, current_user, [])
     current_user.needs_department_selection = False
-    coordinator_notifications = email_notifications.queue_department_access_review_notifications(db, current_user)
+    access_review_notifications = email_notifications.queue_department_access_review_notifications(db, current_user)
 
     db.commit()
     db.refresh(current_user)
@@ -645,7 +645,7 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
                     "changes": snapshot_changes(before, user_snapshot(current_user)),
                     "department": primary_department,
                     "approvers": ["Administrator", "Department Coordinator"],
-                    "coordinator_notifications_queued": coordinator_notifications,
+                    "access_review_notifications_queued": access_review_notifications,
                 })
     return current_user
 

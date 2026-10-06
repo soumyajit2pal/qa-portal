@@ -762,6 +762,13 @@ department assigns the permitted roles and approves the request. Approval also p
 the active workspace selected by the reviewer. Failed LDAP credentials return the same
 "Invalid username or password" response as any other failed sign-in and do not create an account.
 
+When SMTP is enabled, completing first-login department selection notifies that department's
+active coordinators. If no active coordinator in an active workspace has a notification email,
+the request is emailed to active System Administrators instead, with the user's details and a
+link to Users & Access for assigning roles and workspace access. Repeated sign-ins do not send
+the onboarding request again. External Document Portal accounts retain their existing immediate
+System Administrator notification on first login.
+
 ### Non-production mock LDAP
 
 Development and UAT can exercise the complete first-login workflow without a directory server.

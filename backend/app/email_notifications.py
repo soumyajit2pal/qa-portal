@@ -291,7 +291,7 @@ def _queue_email_notification(
     return True
 
 
-def queue_access_review_notifications(db: SASession, user: models.User) -> int:
+def queue_access_review_notifications(db: SASession, user: models.User, *, review_reason: str | None = None) -> int:
     """Queue one access-review email for each active Administrator.
 
     Account-access review is a real approval event but not a business-request
@@ -313,7 +313,7 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
         )
         .all()
     )
-    recipients = [admin for admin in admins if (admin.email or "").strip()]
+    recipients = sorted({admin.email.strip().lower() for admin in admins if (admin.email or "").strip()})
     if not recipients:
         logger.warning("SMTP access-review notification skipped user=%s reason=no_active_admin_recipient", user.username)
         return 0
@@ -323,22 +323,26 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
     path = "/admin"
     url = f"{portal_url}{path}" if portal_url else path
     subject = f"Access review required: {user.full_name} ({user.username})"
+    reason_text = f"Reason: {review_reason}\n\n" if review_reason else ""
+    reason_html = f"<p>Reason: {escape(review_reason)}</p>" if review_reason else ""
     body = (
         "QA PORTAL ACCESS REVIEW REQUIRED\n\n"
         "A newly provisioned LDAP account requires access review.\n\n"
         f"User: {user.full_name}\nUsername: {user.username}\n"
         f"Department: {department}\n"
         f"Current role(s): {format_role_labels(user.roles) or 'No portal role assigned'}\n\n"
+        f"{reason_text}"
+        "Review the account and assign the appropriate roles and workspace access.\n\n"
         f"Review access: {url}\n"
     )
     html_body = _html_email(
         "New LDAP access request", "Access review required",
-        "Review this account and assign the appropriate portal role.",
+        "Review this account and assign the appropriate roles and workspace access.",
         status="Access review pending", panel_title="Access request",
         panel_html=(
             f"<ul style=\"margin:8px 0 0;padding-left:20px\"><li>User: {escape(user.full_name)}</li>"
             f"<li>Username: {escape(user.username)}</li><li>Department: {escape(department)}</li>"
-            f"<li>Current role(s): {escape(format_role_labels(user.roles) or 'No portal role assigned')}</li></ul>"
+            f"<li>Current role(s): {escape(format_role_labels(user.roles) or 'No portal role assigned')}</li></ul>{reason_html}"
         ),
         action_label="Review in QA Portal", action_url=url,
         footer="This is an automated QA Portal access-management notification.",
@@ -350,12 +354,11 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
         actor_id=user.id,
         actor_role=user.roles_csv,
         decision="Access review requested",
-        comments=f"New LDAP account mapped to {department}.",
+        comments=f"New LDAP account mapped to {department}." + (f" {review_reason}" if review_reason else ""),
     )
     db.add(action)
     queued_count = 0
-    for admin in recipients:
-        email = admin.email.strip()
+    for email in recipients:
         if _queue_email_notification(
             db, action, email, subject=subject, body=body, html_body=html_body,
             category="access_review",
@@ -366,7 +369,7 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
 
 
 def queue_department_access_review_notifications(db: SASession, user: models.User) -> int:
-    """Notify the selected department's active coordinators after onboarding.
+    """Notify department coordinators, or System Admins if none can receive mail.
 
     Workspace placement is chosen by the reviewer, so notify coordinators
     across that department's workspaces rather than the onboarding workspace.
@@ -396,8 +399,14 @@ def queue_department_access_review_notifications(db: SASession, user: models.Use
         if email:
             recipients.add(email)
     if not recipients:
-        logger.warning('SMTP department access-review skipped user=%s reason=no_active_coordinator_recipient', user.username)
-        return 0
+        logger.info('SMTP department access-review escalated user=%s reason=no_active_coordinator_recipient', user.username)
+        return queue_access_review_notifications(
+            db, user,
+            review_reason=(
+                f'No active Department Coordinator with a notification email is available for {department or "the selected department"}. '
+                'System Admin approval is required for this first-login access request.'
+            ),
+        )
     action = models.ApprovalAction(
         entity_type='USER_ACCESS', entity_id=user.id, step_name='Department access review',
         actor_id=user.id, actor_role=user.roles_csv, decision='Access review requested',
