@@ -1073,6 +1073,14 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
                     <Badge status="Pending" />
                   </div>
                 </div>
+                <div className="execution-cycle-required-warning suppression-scale-warning" role="alert">
+                  <strong>Approval required from Scale 5 or above only</strong>
+                  <span>
+                    Suppression requests must be approved by a Department Head at Scale 5 or above.
+                    Confirm your scale before approving. If you are below Scale 5, obtain approval
+                    from an eligible Department Head to avoid a return from the Security Team.
+                  </span>
+                </div>
                 <div className="suppression-workflow-content">
                   <ApprovalDecisionButtons
                     userName={user?.full_name}

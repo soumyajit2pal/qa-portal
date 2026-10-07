@@ -3393,6 +3393,9 @@ tbody tr:hover { background: #f8f9fc; }
 .execution-cycle-required-warning { display: grid; gap: 3px; margin: 8px 0 11px; padding: 11px 13px; border: 1px solid #edcf86; border-radius: 9px; background: #fff9e9; }
 .execution-cycle-required-warning strong { color: #805a12; font-size: 10px; }
 .execution-cycle-required-warning span { color: #806c42; font-size: 9px; line-height: 1.45; }
+.suppression-scale-warning { margin:16px 20px 0; padding:14px 16px; gap:6px; }
+.suppression-scale-warning strong { font-size:13px; }
+.suppression-scale-warning span { font-size:12px; line-height:1.6; }
 .security-scan-linked-suppressions { display: grid; gap: 7px; margin: 12px 0; padding: 10px 12px; border: 1px solid #d7e5e7; border-radius: 9px; background: #f7fbfb; }
 .security-scan-linked-suppression-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 7px; border-top: 1px solid #e3ecee; font-size: 12px; }
 .suppression-id-links { display: inline-flex; flex-wrap: wrap; gap: 6px; }
