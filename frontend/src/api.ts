@@ -473,6 +473,14 @@ function triggerDownload(blob: Blob, filename: string) {
 }
 
 export const api = {
+  searchSuggestions: <T = any>(query: string, signal?: AbortSignal): Promise<T> =>
+    request<T>(`/api/search/suggestions?q=${encodeURIComponent(query)}`, {
+      signal, cache: false, retry: false, trackActivity: false, timeoutMs: 8_000,
+    }),
+  mentionOptions: <T = any>(entityType: string, entityId: number, query: string, signal?: AbortSignal): Promise<T> =>
+    request<T>(`/api/approvals/${entityType}/${entityId}/mention-options?search=${encodeURIComponent(query)}`, {
+      signal, cache: false, retry: false, trackActivity: false, timeoutMs: 8_000,
+    }),
   get: <T = any>(path: string): Promise<T> => request<T>(path),
   // Revisioned admin editors must always compare against the origin's latest
   // envelope, especially while recovering from an optimistic-lock conflict.

@@ -1203,6 +1203,31 @@ def _portal_link(action: models.ApprovalAction, reference: str) -> str:
     return f"{route}?open={quote(reference, safe='')}&openId={action.entity_id}"
 
 
+def queue_activity_mentions(db: SASession, action: models.ApprovalAction,
+                            author: models.User, recipients: list[models.User]) -> int:
+    """Queue alongside the immutable comment; the commit listener delivers it."""
+    if not _enabled() or not recipients:
+        return 0
+    target = _target(action, db)
+    reference = _portal_reference(action, target)
+    link = os.getenv("PORTAL_BASE_URL", "").rstrip("/") + _portal_link(action, reference)
+    actor = author.full_name or author.username
+    subject = f"{actor} mentioned you in Activity: {reference}"
+    body = f"{actor} mentioned you in a comment on {reference}.\n\n{action.comments or ''}\n\nOpen record: {link}"
+    html_body = _html_email(
+        "You were mentioned in Activity", reference,
+        f"{actor} mentioned you in a comment. Open the record to view Activity and reply.",
+        status=None, panel_title="Comment",
+        panel_html='<div style="white-space:pre-wrap;overflow-wrap:anywhere">'
+                   + escape(action.comments or "") + '</div>',
+        action_label="Open record", action_url=link,
+    )
+    return sum(int(_queue_email_notification(
+        db, action, email, subject=subject, body=body, html_body=html_body,
+        category="activity_mention",
+    )) for email in sorted({user.email.strip().lower() for user in recipients}))
+
+
 def _status_label(value) -> str:
     """Make stored status codes readable without degrading acronyms (SM/QA)."""
     words = str(value or "—").replace("_", " ").split()

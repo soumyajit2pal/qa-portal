@@ -1,5 +1,16 @@
 import { CHANGE_REFERENCE_REGEX } from './changeReference'
 
+export interface GlobalSearchSuggestion {
+  entity_type: string
+  entity_id: number
+  reference: string
+  title: string
+  category: string
+  status: string | null
+  change_reference: string | null
+  destination: string
+}
+
 // Search destinations use each entity's owning module and existing deep link.
 const ID_PREFIX_ROUTES = [
   { prefix: 'TQA-FUNC', path: '/functional-requests' },

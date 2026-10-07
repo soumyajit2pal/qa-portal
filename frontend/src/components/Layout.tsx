@@ -517,11 +517,17 @@ export default function Layout({ children }: { children?: ReactNode }) {
       </div>
       {searchOpen && (
         <GlobalSearchSpotlight
+          key={`${user?.id}:${user?.active_workspace_id}`}
           inputRef={searchInputRef}
           value={search}
           onChange={setSearch}
           onClear={clearGlobalSearch}
           onSubmit={submitSearch}
+          onSelect={(suggestion) => {
+            setSearch(suggestion.reference)
+            setSearchOpen(false)
+            navigate(suggestion.destination)
+          }}
           onDismiss={() => {
             setSearchOpen(false)
           }}

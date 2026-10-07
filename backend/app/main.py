@@ -43,7 +43,7 @@ from .routers import (
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, test_reports, audit, checklist_config, request_type_config,
     pending_approvals, defects, jobs, qa_workspaces, system_settings, signatures,
-    operations,
+    operations, global_search,
 )
 
 
@@ -255,6 +255,7 @@ _MODULE_PATH_PREFIXES = [
     ("/api/suppressions", "SUPPRESSION"),
     ("/api/performance-requests", "PERFORMANCE_REQUEST"),
     ("/api/approvals", "APPROVAL"),
+    ("/api/search", "GLOBAL_SEARCH"),
     ("/api/signoffs", "SIGNOFF"),
     ("/api/signatures", "SIGNATURE_VERIFICATION"),
     ("/api/dashboard", "DASHBOARD"),
@@ -686,6 +687,7 @@ app.include_router(sast_dast.router)
 app.include_router(suppression.router)
 app.include_router(performance.router)
 app.include_router(approvals.router)
+app.include_router(global_search.router)
 app.include_router(signoff.router)
 app.include_router(signatures.router)
 app.include_router(dashboard.router)

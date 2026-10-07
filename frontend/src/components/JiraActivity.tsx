@@ -27,6 +27,7 @@ import { isMarkdownTableSeparator, parseMarkdownHeading, splitMarkdownTableRow }
 import { isActivityReadOnly } from '../activityAccess'
 import { ACTIVITY_MAX_ATTACHMENTS, activityAttachmentError, activityAttachmentKind, activityImageBlob } from '../activityAttachments'
 import { ActivityAttachmentCard, ActivityAttachmentPicker, PendingActivityAttachment } from './ActivityAttachments'
+import { activityMentionAtCaret, insertActivityMention, ActivityMentionUser } from '../activityMentions'
 
 type ActivityFilter = 'all' | 'comments' | 'history'
 const INLINE_IMAGE_PATTERN = /^!\[([^\]]*)\]\(attachment:([^)]+)\)$/
@@ -381,6 +382,29 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
   const [characterCount, setCharacterCount] = useState(0)
+  const mentionRange = useRef<Range | null>(null)
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null)
+  const [mentionUsers, setMentionUsers] = useState<ActivityMentionUser[]>([])
+  const [mentionIndex, setMentionIndex] = useState(0)
+  const [mentionLoading, setMentionLoading] = useState(false)
+  const [mentionError, setMentionError] = useState('')
+  const mentionListId = `activity-mentions-${entityType}-${entityId}`
+  useEffect(() => {
+    if (mentionQuery === null || busy || isReadOnly) return
+    let cancelled = false
+    const controller = new AbortController()
+    setMentionUsers([])
+    setMentionIndex(0)
+    setMentionLoading(true)
+    setMentionError('')
+    const timer = window.setTimeout(() => {
+      api.mentionOptions<ActivityMentionUser[]>(entityType, entityId, mentionQuery, controller.signal)
+        .then(users => { if (!cancelled) setMentionUsers(users) })
+        .catch(() => { if (!cancelled) setMentionError('Could not load users. Type @ to try again.') })
+        .finally(() => { if (!cancelled) setMentionLoading(false) })
+    }, 200)
+    return () => { cancelled = true; window.clearTimeout(timer); controller.abort() }
+  }, [mentionQuery, entityType, entityId, busy, isReadOnly])
 
   const { images, addImages, removeImage, clearImages, pasteImages } = useRichTextImages({
     filenamePrefix: 'pasted-image',
@@ -418,6 +442,22 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
 
   function syncEditor() {
     setCharacterCount(editorContentToMarkdown(editorRef.current).length)
+    const mention = activityMentionAtCaret(editorRef.current)
+    mentionRange.current = mention?.range || null
+    if ((mention?.query ?? null) !== mentionQuery) {
+      setMentionUsers([])
+      setMentionIndex(0)
+      setMentionLoading(true)
+      setMentionError('')
+    }
+    setMentionQuery(mention?.query ?? null)
+  }
+
+  function chooseMention(user: ActivityMentionUser) {
+    if (posting.current || isReadOnly) return
+    if (insertActivityMention(editorRef.current, mentionRange.current, user.username)) syncEditor()
+    mentionRange.current = null
+    setMentionQuery(null)
   }
 
   function runCommand(command: string, value?: string) {
@@ -438,6 +478,8 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
 
   function clearComposer() {
     if (posting.current) return
+    mentionRange.current = null
+    setMentionQuery(null)
     if (editorRef.current) editorRef.current.innerHTML = ''
     clearImages()
     inlineImagesRef.current = []
@@ -518,7 +560,7 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
     const validationError = activityAttachmentError(files)
     if (validationError) { setError(validationError); return }
     posting.current = true
-    setBusy(true); setError('')
+    setBusy(true); setError(''); setMentionQuery(null)
     try {
       const created = await api.uploadFormFiles<ApprovalActionOut>(
         `/api/approvals/${entityType}/${entityId}/rich-comments`,
@@ -581,27 +623,61 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
               inputRef={linkInputRef}
             />
           )}
+          <div className="activity-mention-editor">
           <div
             ref={editorRef}
             className="jira-rich-editor"
             contentEditable={!busy}
             role="textbox"
             aria-multiline="true"
-            data-placeholder="Add a comment…"
+            aria-label="Activity comment"
+            aria-autocomplete="list"
+            aria-expanded={mentionQuery !== null && !busy}
+            aria-controls={mentionQuery !== null ? mentionListId : undefined}
+            aria-activedescendant={mentionQuery !== null && !mentionLoading && mentionUsers[mentionIndex] ? `${mentionListId}-${mentionUsers[mentionIndex].id}` : undefined}
+            data-placeholder="Add a comment… Type @ to mention someone"
             onFocus={() => setExpanded(true)}
             onInput={syncEditor}
+            onClick={syncEditor}
+            onKeyUp={(event) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') syncEditor() }}
             onPaste={onPaste}
             onBlur={() => {
+              setMentionQuery(null)
+              mentionRange.current = null
               if (!editorContentToMarkdown(editorRef.current) && editorRef.current) editorRef.current.innerHTML = ''
             }}
             onKeyDown={(event) => {
               if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
                 event.preventDefault()
                 postComment()
+                return
+              }
+              if (mentionQuery !== null) {
+                if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setMentionQuery(null) }
+                else if (mentionUsers.length && !mentionLoading && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+                  event.preventDefault()
+                  setMentionIndex(index => (index + (event.key === 'ArrowDown' ? 1 : -1) + mentionUsers.length) % mentionUsers.length)
+                } else if (mentionUsers.length && !mentionLoading && event.key === 'Enter') {
+                  event.preventDefault()
+                  chooseMention(mentionUsers[mentionIndex])
+                }
               }
             }}
             suppressContentEditableWarning
           />
+          {mentionQuery !== null && !busy && <div className="activity-mention-picker">
+            <div className="activity-mention-heading">Mention someone · email after posting</div>
+            <div id={mentionListId} role="listbox" aria-label="Users you can mention">
+              {mentionLoading ? <p role="status">Finding users…</p> : mentionError ? <p role="status">{mentionError}</p> : mentionUsers.length ? mentionUsers.map((person, index) => (
+                <button key={person.id} id={`${mentionListId}-${person.id}`} type="button" role="option" aria-selected={index === mentionIndex}
+                  tabIndex={-1} onMouseDown={event => event.preventDefault()} onClick={() => chooseMention(person)}>
+                  <span className="jira-avatar">{initials(person.full_name || person.username)}</span>
+                  <span><strong>{person.full_name || person.username}</strong><small>@{person.username}</small></span>
+                </button>
+              )) : <p role="status">No users with access and a confirmed notification email found.</p>}
+            </div>
+          </div>}
+          </div>
           <RichTextPastedImages images={images} onRemove={removeInlineImage} />
           <ActivityAttachmentPicker files={attachments} inlineImageCount={images.length} disabled={busy} onFiles={addAttachments} onRemove={removeAttachment} />
           {expanded && <div className="jira-composer-actions"><div><button className="btn btn-primary btn-sm" disabled={busy || characterCount > 5000 || (characterCount === 0 && images.length === 0 && attachments.length === 0)} onClick={postComment}>{busy ? 'Posting…' : 'Comment'}</button><button className="btn btn-sm" disabled={busy} onClick={clearComposer}>Cancel</button></div><span className={characterCount > 5000 ? 'over-limit' : ''}>{characterCount}/5000 · Rich text · Paste images with Ctrl/Cmd+V</span></div>}

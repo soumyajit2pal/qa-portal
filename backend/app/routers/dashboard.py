@@ -2636,7 +2636,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
     scope = dashboard_department_scope(current_user)
 
     for r in _join_qa_department(
-            _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.updated_at, date_from, date_to)
+            _in_period(db.query(models.FunctionalRequest).options(selectinload(models.FunctionalRequest.qa_request)), models.FunctionalRequest.updated_at, date_from, date_to)
             .filter(models.FunctionalRequest.status.in_(list(STAGE_LABELS.keys()))),
             models.FunctionalRequest, scope, db, current_user).all():
         age = _age_days(r.updated_at)
@@ -2651,7 +2651,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         })
 
     sast_requests = _join_qa_department(
-            _in_period(db.query(models.SASTRequest), models.SASTRequest.updated_at, date_from, date_to).filter(
+            _in_period(db.query(models.SASTRequest).options(selectinload(models.SASTRequest.qa_request)), models.SASTRequest.updated_at, date_from, date_to).filter(
                 models.SASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)),
             models.SASTRequest, scope, db, current_user).all()
     sast_scans = _latest_scan_by_request(db, "SAST", [r.id for r in sast_requests])
@@ -2669,7 +2669,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         })
 
     dast_requests = _join_qa_department(
-            _in_period(db.query(models.DASTRequest), models.DASTRequest.updated_at, date_from, date_to).filter(
+            _in_period(db.query(models.DASTRequest).options(selectinload(models.DASTRequest.qa_request)), models.DASTRequest.updated_at, date_from, date_to).filter(
                 models.DASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)),
             models.DASTRequest, scope, db, current_user).all()
     dast_scans = _latest_scan_by_request(db, "DAST", [r.id for r in dast_requests])
@@ -2687,7 +2687,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         })
 
     for r in _join_qa_department(
-            _in_period(db.query(models.PerformanceRequest), models.PerformanceRequest.updated_at, date_from, date_to)
+            _in_period(db.query(models.PerformanceRequest).options(selectinload(models.PerformanceRequest.qa_request)), models.PerformanceRequest.updated_at, date_from, date_to)
             .filter(models.PerformanceRequest.status.notin_(PERFORMANCE_TERMINAL_STATUSES)),
             models.PerformanceRequest, scope, db, current_user).all():
         age = _age_days(r.updated_at)
@@ -2711,7 +2711,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
         "SECURITY_TEAM_VERIFICATION": "Security Team",
     }
-    _suppression_q = _scope_suppressions(_in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.updated_at, date_from, date_to), db, current_user).filter(
+    _suppression_q = _scope_suppressions(_in_period(db.query(models.SuppressionRequest).options(selectinload(models.SuppressionRequest.items)), models.SuppressionRequest.updated_at, date_from, date_to), db, current_user).filter(
         models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
     for s in _suppression_q.all():
         age = _age_days(s.updated_at)

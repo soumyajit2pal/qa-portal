@@ -5,7 +5,8 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from starlette.datastructures import Headers
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import func, or_
 
 from .. import models, schemas, pagination
 from ..database import get_db
@@ -17,6 +18,7 @@ from ..deps import (
 from .. import documents as doc_store
 from ..constants import GatewayStatus, Role, format_role_labels
 from ..upload_limits import validate_document_file_types
+from ..activity_mentions import mentioned_usernames, mentionable_username
 
 router = APIRouter(prefix="/api/approvals", tags=["approval-workflow-engine"])
 
@@ -64,10 +66,35 @@ def _resolve_request_ref(db: Session, entity_type: str, entity_id: int) -> Optio
     return None
 
 
-def _to_out(db: Session, row: models.ApprovalAction) -> dict:
+def _request_refs(db: Session, rows) -> dict:
+    """Batch display references without loading full requests or their CLOBs."""
+    sources = {
+        "QA_REQUEST": (models.QARequest, "request_id"),
+        "FUNCTIONAL_REQUEST": (models.FunctionalRequest, "request_id"),
+        "SAST": (models.SASTRequest, "request_id"),
+        "DAST": (models.DASTRequest, "request_id"),
+        "PERFORMANCE": (models.PerformanceRequest, "request_id"),
+        "SUPPRESSION": (models.SuppressionRequest, "suppression_id"),
+        "SIGNOFF": (models.QASignOff, "certificate_id"),
+        "DEFECT": (models.Defect, "defect_key"),
+    }
+    keys = {(row.entity_type, row.entity_id) for row in rows}
+    refs = {}
+    for kind in {key[0] for key in keys}:
+        candidates = [(models.SASTRequest, "request_id"), (models.DASTRequest, "request_id")] if kind == "SAST_DAST" else ([sources[kind]] if kind in sources else [])
+        identifiers = [identifier for entity_type, identifier in keys if entity_type == kind]
+        for model, attribute in candidates:
+            for identifier, ref in db.query(model.id, getattr(model, attribute)).filter(model.id.in_(identifiers)):
+                # Legacy SAST_DAST resolves SAST first, even if its ID is blank.
+                refs.setdefault((kind, identifier), ref)
+    return refs
+
+
+def _to_out(db: Session, row: models.ApprovalAction, request_refs=None) -> dict:
     return {
         "id": row.id, "entity_type": row.entity_type, "entity_id": row.entity_id,
-        "request_ref": _resolve_request_ref(db, row.entity_type, row.entity_id),
+        "request_ref": (_resolve_request_ref(db, row.entity_type, row.entity_id) if request_refs is None
+                        else request_refs.get((row.entity_type, row.entity_id))),
         "step_name": row.step_name, "actor_id": row.actor_id, "actor_name": row.actor_name,
         "actor_role": format_role_labels(row.actor_role),
         "decision": row.decision, "comments": row.comments, "created_at": row.created_at,
@@ -133,7 +160,7 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
     lookup against a different table, not one joinable column) -- so this
     stays a pull-2000-then-filter-in-Python shape rather than a real SQL
     WHERE clause."""
-    q = db.query(models.ApprovalAction)
+    q = db.query(models.ApprovalAction).options(selectinload(models.ApprovalAction.actor))
     if approval_action_id is not None:
         q = q.filter(models.ApprovalAction.id == approval_action_id)
     if entity_type:
@@ -174,7 +201,13 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         from ..workflow_authority import record_department
-        rows = [r for r in rows if r.decision == "Commented" or resolve_entity_department(db, r.entity_type, r.entity_id) in scope
+        departments = {}
+        def department(row):
+            key = (row.entity_type, row.entity_id)
+            if key not in departments:
+                departments[key] = resolve_entity_department(db, *key)
+            return departments[key]
+        rows = [r for r in rows if r.decision == "Commented" or department(r) in scope
                 or (r.entity_type == "SUPPRESSION" and r.entity_id in invited_suppression_ids)
                 or (r.entity_type == 'DEFECT' and record_department(db, r, current_user)[1] in scope)]
     # Always run the entity visibility resolver. For ordinary business users
@@ -213,7 +246,9 @@ def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] =
     them; see list_approval_history's own docstring for the one consumer
     (the standalone, no-entity_id Approval Workflow Log) that genuinely
     browses this feed page by page and was migrated instead."""
-    return [_to_out(db, r) for r in _filtered_approval_rows(db, current_user, entity_type, entity_id)]
+    rows = _filtered_approval_rows(db, current_user, entity_type, entity_id)
+    refs = _request_refs(db, rows)
+    return [_to_out(db, r, refs) for r in rows]
 
 
 def _assignment_entity_department(db: Session, entity_type: str, entity_id: int) -> Optional[str]:
@@ -284,11 +319,12 @@ def list_approval_history(entity_type: Optional[str] = None, params: pagination.
     itself so scoping could run in SQL instead of Python -- out of scope
     for this pagination rollout."""
     rows = _filtered_approval_rows(db, current_user, entity_type)
+    refs = _request_refs(db, rows) if params.search else None
     if params.search:
         needle = params.search.casefold()
         filtered = []
         for row in rows:
-            request_ref = _resolve_request_ref(db, row.entity_type, row.entity_id)
+            request_ref = refs.get((row.entity_type, row.entity_id))
             searchable = (
                 row.entity_type, request_ref, f"#{row.entity_id}", row.step_name,
                 row.decision, row.actor_name, format_role_labels(row.actor_role), row.comments,
@@ -301,7 +337,8 @@ def list_approval_history(entity_type: Optional[str] = None, params: pagination.
     start = (params.page - 1) * params.page_size
     page_rows = rows[start:start + params.page_size]
     total_pages = max(1, -(-total // params.page_size)) if params.page_size else 1
-    result = pagination.PaginationResult(items=[_to_out(db, r) for r in page_rows], total=total, total_pages=total_pages)
+    refs = _request_refs(db, page_rows) if refs is None else refs
+    result = pagination.PaginationResult(items=[_to_out(db, r, refs) for r in page_rows], total=total, total_pages=total_pages)
     return pagination.to_page_response(result, params)
 
 
@@ -331,7 +368,11 @@ _COMMENT_ATTACHMENT_LIMIT = 8
 _COMMENT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
 
 
-def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, current_user: models.User):
+_PROJECT_VISIBILITY_UNSET = object()
+
+
+def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, current_user: models.User,
+                           *, visible_project_ids=_PROJECT_VISIBILITY_UNSET):
     normalized_type = entity_type.strip().upper()
     model = _COMMENT_ENTITY_MODELS.get(normalized_type)
     if not model:
@@ -345,7 +386,10 @@ def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, curren
         return normalized_type
     if normalized_type in {"TEST_PROJECT", "TEST_CASE", "TEST_CYCLE"}:
         project_id = obj.id if normalized_type == "TEST_PROJECT" else obj.project_id
-        visible_ids = viewable_project_ids(db, current_user)
+        # Callers checking many records for this same user/workspace can
+        # reuse the live project scope resolved earlier in this request.
+        visible_ids = (viewable_project_ids(db, current_user)
+                       if visible_project_ids is _PROJECT_VISIBILITY_UNSET else visible_project_ids)
         if visible_ids is not None and project_id not in visible_ids:
             raise HTTPException(403, "You do not have access to this record")
         if normalized_type == "TEST_CYCLE":
@@ -382,6 +426,80 @@ def _validated_comment_body(body: str, allow_empty: bool = False) -> str:
     if len(text) > 5000:
         raise HTTPException(400, "Comment cannot exceed 5,000 characters")
     return text
+
+
+_MENTION_WORKSPACE_UNSET = object()
+
+
+def _can_receive_mention(db: Session, entity_type: str, entity_id: int,
+                         recipient: models.User, author: models.User, *,
+                         owner_workspace=_MENTION_WORKSPACE_UNSET) -> bool:
+    from ..deps import ldap_email_completion_required
+    from ..workspace_service import selectable_workspace_ids, workspace_context
+    from ..workflow_authority import workflow_context
+    if (recipient.id == author.id or not recipient.is_active
+            or not (recipient.email or "").strip()
+            or recipient.needs_department_selection or recipient.needs_role_review
+            or not recipient.roles
+            or ldap_email_completion_required(recipient)
+            or not mentionable_username(recipient.username)):
+        return False
+    accessible = selectable_workspace_ids(db, recipient)
+    if owner_workspace is _MENTION_WORKSPACE_UNSET:
+        owner_workspace = resolve_entity_workspace_id(db, entity_type, entity_id)
+    # Shared project content may also be readable from a participating workspace.
+    scopes = ([owner_workspace] if owner_workspace in accessible else [])
+    if entity_type in {"TEST_PROJECT", "TEST_CASE", "TEST_CYCLE", "DEFECT"}:
+        scopes.extend(sorted(accessible - set(scopes)))
+    previous = getattr(recipient, "active_qa_workspace_id", None)
+    try:
+        for workspace_id in scopes:
+            recipient.active_qa_workspace_id = workspace_id
+            with workspace_context(workspace_id, (workspace_id,)), workflow_context(recipient), db.no_autoflush:
+                try:
+                    _comment_target_or_404(db, entity_type, entity_id, recipient)
+                    return True
+                except HTTPException as exc:
+                    if exc.status_code not in {403, 404}:
+                        raise
+        return False
+    finally:
+        recipient.active_qa_workspace_id = previous
+
+
+def _mention_candidates(db: Session):
+    # Load directory/access relationships in batches instead of per keystroke/user.
+    return db.query(models.User).options(
+        selectinload(models.User.role_assignments),
+        selectinload(models.User.department_assignments),
+        selectinload(models.User.qa_workspace_memberships).selectinload(models.QAWorkspaceMember.workspace),
+        selectinload(models.User.department_coordinator_assignments).selectinload(models.DepartmentCoordinatorAssignment.workspace),
+    ).filter(models.User.is_active == True)  # noqa: E712
+
+
+@router.get("/{entity_type}/{entity_id}/mention-options")
+def mention_options(entity_type: str, entity_id: int, search: str = "",
+                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    normalized = _comment_target_or_404(db, entity_type, entity_id, current_user)
+    # Keep the one target alive in the session's identity map while checking
+    # recipients, rather than reloading its full record for each directory row.
+    target = db.get(_COMMENT_ENTITY_MODELS[normalized], entity_id)
+    owner_workspace = resolve_entity_workspace_id(db, normalized, target.id)
+    term = search.strip()[:64].lower()
+    candidates = _mention_candidates(db)
+    if term:
+        candidates = candidates.filter(or_(
+            func.lower(models.User.username).contains(term, autoescape=True),
+            func.lower(models.User.full_name).contains(term, autoescape=True),
+        ))
+    results = []
+    for recipient in candidates.order_by(models.User.username, models.User.id).limit(100):
+        if _can_receive_mention(db, normalized, entity_id, recipient, current_user, owner_workspace=owner_workspace):
+            results.append({"id": recipient.id, "username": recipient.username,
+                            "full_name": recipient.full_name})
+            if len(results) == 20:
+                break
+    return results
 
 
 def _validate_comment_attachments(files: List[UploadFile]) -> None:
@@ -436,6 +554,16 @@ def _create_comment(db: Session, normalized_type: str, entity_id: int, body: str
         decision="Commented", comments=body or None,
     )
     db.add(row)
+    names = mentioned_usernames(body)
+    if names:
+        from ..email_notifications import queue_activity_mentions
+        with db.no_autoflush:
+            target = db.get(_COMMENT_ENTITY_MODELS[normalized_type], entity_id)
+            owner_workspace = resolve_entity_workspace_id(db, normalized_type, target.id)
+            recipients = [recipient for recipient in _mention_candidates(db).filter(
+                func.lower(models.User.username).in_(names),
+            ).all() if _can_receive_mention(db, normalized_type, entity_id, recipient, current_user, owner_workspace=owner_workspace)]
+            queue_activity_mentions(db, row, current_user, recipients)
     if commit:
         db.commit()
         db.refresh(row)

@@ -285,6 +285,44 @@ back it up, and use the same value in every backend worker. If omitted, the seal
 derived from `SECRET_KEY`. Changing the effective key makes earlier signatures/PDFs
 unverifiable, so retain the original key when rotating unrelated authentication secrets.
 
+## Global search suggestions
+
+Global search shows up to 10 matching records after typing two characters, with a
+short debounce. Matches include request/application names, record IDs, CR/EPIC/IN
+references, defects, projects, test cases and cycles. Exact IDs and change references
+rank first. Click a suggestion or use Arrow Up/Down and Enter to open that record.
+Enter without a selected suggestion retains the existing search behavior, including
+exact change-reference matching. Escape closes Spotlight.
+
+Suggestions use the active workspace and existing record access rules, including
+private drafts, delegates, invited suppression reviewers and restricted cycle
+folders. Input changes and closing the dialog cancel superseded lookups. The new
+`GET /api/search/suggestions` endpoint requires no database migration; deploy the
+backend together with the updated frontend.
+
+## Activity mentions
+
+Type `@` in the shared Activity comment editor and search by name or username.
+Choose a user with the mouse or Arrow Up/Down and Enter; Escape closes the picker.
+Posting a comment containing `@username` queues an email with the comment and the
+existing direct link to that record. SMTP must be enabled and configured as below.
+The picker returns up to 20 eligible users; type more of a name to narrow the search.
+
+Recipients must be active, have completed account/email setup, have a notification
+email, and already have access to the record. Mentions do not grant access. The
+server checks access again when posting, including workspace boundaries, private
+drafts, active delegates and invited suppression reviewers. Repeated tags or users
+sharing a mailbox create one email per posted comment; the author is excluded.
+Email addresses, URLs and code examples do not count as mentions. Ordinary tags use
+usernames containing letters, digits, dots, underscores or hyphens (up to 64 characters).
+For email-style or domain-qualified directory usernames, the picker inserts the
+explicit `@[username]` form, which also supports these identities without treating
+a pasted email address as a tag.
+
+The comment, attachments and mention emails share one database transaction. A failed
+save does not create mail; ordinary workflow emails are not triggered by a comment.
+Existing comments are not reprocessed, and this feature requires no new migration.
+
 ## Activity attachments
 
 The shared Activity composer accepts multiple files through **Attach files** or drag and
@@ -971,3 +1009,59 @@ coverage is in `backend/tests/test_session_security.py`.
 ### Login payload encryption
 
 Login now requires encrypted JSON. Deploy backend/frontend images together and provision the private RSA key before starting the release; see `Login_Encryption_Deployment.md`. Compose mounts `LOGIN_ENCRYPTION_KEY_HOST_DIR` (default `./secrets`) read-only in backend, separate from uploads. The old plaintext form API is rejected. HTTPS and a trusted proxy allowlist remain required.
+
+## Performance review — v1.0.3
+
+The October 7, 2026 review identified and corrected repeated database reads in
+Spotlight suggestions, Activity mentions, approval history and the pending-work
+(3W) dashboard. Search now selects compact candidate labels and checks the actual
+record permissions in final ranking order until the result list is full.
+Project visibility is reused only within that same user/workspace request.
+Mentions reuse the target and its workspace; typing lookups cancel when superseded,
+use an eight-second deadline, skip retries and caching, and avoid the page-wide
+loading indicator. Approval history batches record references and actors and
+resolves each entity's department once. The 3W dashboard batches parent requests
+and suppression items rather than loading them separately for every row.
+
+An isolated SQLite fixture contained 1,000 QA requests, 1,000 SAST requests,
+1,000 projects, 120 users, 500 approval events and 10 KB request descriptions.
+The measured handler database-query counts were:
+
+| Handler | Before | After |
+| --- | ---: | ---: |
+| Application search suggestions | 104 | 70 |
+| Empty @user picker (20 results) | 115 | 58 |
+| Approval-history search (25 displayed events) | 1,034 | 12 |
+| Pending-work dashboard (1,000 pending requests) | 1,010 | 12 |
+
+At 10,000 records **per source**, suggestions and approval-history query counts
+remained unchanged; dashboard queries rose to 30 because parent loading uses
+batches. Warm median handler times on this development machine were about 113 ms
+for application suggestions, 66 ms for an ID search, 9 ms for the @user picker,
+5 ms for approval-history search and 306 ms for the pending-work dashboard.
+These are sequential handler measurements, excluding HTTP transport,
+authentication, response serialization, audit writes, Oracle network latency and
+concurrent users. They are not production latency guarantees.
+
+Reproduce the offline probe from `backend/`:
+
+```sh
+python3 scripts/benchmark_interactive_reads.py
+python3 scripts/benchmark_interactive_reads.py --records 10000 --samples 3
+```
+
+This script creates an in-memory SQLite database and disables SMTP in its own
+process. It does not connect to the configured database, LDAP or mail servers.
+Query-count regressions are covered in `backend/tests/test_interactive_query_cost.py`;
+existing privacy, workspace, delegation and navigation tests remain in place.
+
+The historical local application logs also contain slow dashboard/request-list
+and export calls, including a dashboard requests call lasting 23.5 seconds and a
+Performance request-list call lasting 15.3 seconds. Those measurements do not
+establish the cause or show that these changes introduced the delays. Production
+Oracle execution plans, deployed indexes/migrations, pool pressure and concurrent
+load still require verification. Substring autocomplete predicates may scan many
+rows as the directory grows; the pending-work response still includes all pending
+items; approval history retains its existing 2,000-candidate/500-visible-event
+ceiling. The build retains its existing warning about a JavaScript chunk above
+500 KB. No database pool or production cache settings were changed by this review.

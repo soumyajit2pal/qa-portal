@@ -23,6 +23,7 @@ _VIEW_ONLY_ROLE_GATED_READ_PREFIXES = (
     "/api/suppressions",
     "/api/signoffs",
     "/api/approvals",
+    "/api/search",
     "/api/dashboard",
     "/api/export",
     "/api/reports",

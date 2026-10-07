@@ -3273,6 +3273,16 @@ tbody tr:hover { background: #f8f9fc; }
 .jira-activity-filters button span { margin-left: 3px; color: #9ba2b1; }
 .jira-activity-read-only { margin-bottom: 18px; padding: 10px 12px; border: 1px solid #dce4ec; border-radius: 7px; background: #f7f9fb; color: #626d7d; font-size: 10.5px; line-height: 1.5; }
 .jira-comment-composer { display: grid; grid-template-columns: 32px 1fr; gap: 10px; margin-bottom: 18px; }
+.activity-mention-editor { position: relative; min-width: 0; }
+.activity-mention-picker { position: absolute; z-index: 20; top: calc(100% + 5px); left: 0; width: min(100%, 380px); border: 1px solid #cbd9e5; border-radius: 10px; background: #fff; box-shadow: 0 10px 30px #18345126; overflow: hidden; }
+.activity-mention-heading { padding: 10px 12px; color: #52677b; background: #f5f8fc; font-size: 12px; }
+.activity-mention-picker [role="listbox"] { max-height: 240px; overflow-y: auto; }
+.activity-mention-picker button { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; padding: 10px 12px; background: #fff; color: #20384f; text-align: left; cursor: pointer; }
+.activity-mention-picker button[aria-selected="true"], .activity-mention-picker button:hover { background: #eaf3ff; }
+.activity-mention-picker strong, .activity-mention-picker small { display: block; overflow-wrap: anywhere; }
+.activity-mention-picker strong { font-size: 13px; }
+.activity-mention-picker small, .activity-mention-picker p { font-size: 12px; color: #627981; }
+.activity-mention-picker p { padding: 10px 12px; margin: 0; }
 .jira-avatar { width: 32px; height: 32px; flex-shrink: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: #5964a8; color: #fff; font-size: 9px; font-weight: 750; }
 .jira-avatar.current { background: #635bdf; }
 .jira-avatar.system { background: #eef0f4; color: #7c8495; font-size: 13px; }
