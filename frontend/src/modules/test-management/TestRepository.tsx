@@ -25,6 +25,7 @@ import RoleGroupLink from '../../components/RoleGroupLink'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconArchive, IconFolder, IconGrid, IconInbox, IconTrash } from '../../components/Icons'
 import { testCaseRejectionNote } from '../../testCaseRejectionNote'
+import { testCaseStepErrors } from '../../testCaseSteps'
 import { canRecycleTestCase, canPurgeTestCase, requiresTestCaseArchive } from '../../testCaseRecycleEligibility'
 import { createLatestRequestGate } from '../../latestRequest'
 import { resolvePreferredProjectId } from '../../projectPreferences'
@@ -656,7 +657,7 @@ function StepsEditor({ steps, onChange }: { steps: TestStepIn[]; onChange: (s: T
         <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 8 }}>
           <span className="muted small" style={{ paddingTop: 8 }}>{i + 1}.</span>
           <textarea required aria-label={`Step ${i + 1}`} placeholder="Step *" value={s.step_text || ''} onChange={(e) => update(i, 'step_text', e.target.value)} style={{ flex: 1 }} />
-          <textarea required aria-label={`Expected Result ${i + 1}`} placeholder="Expected Result *" value={s.expected_result || ''} onChange={(e) => update(i, 'expected_result', e.target.value)} style={{ flex: 1 }} />
+          <textarea aria-label={`Expected Result ${i + 1}`} placeholder="Expected Result" value={s.expected_result || ''} onChange={(e) => update(i, 'expected_result', e.target.value)} style={{ flex: 1 }} />
           <button type="button" className="btn btn-sm" onClick={() => remove(i)}>Remove</button>
         </div>
       ))}
@@ -1910,20 +1911,17 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
-    const incompleteSteps = steps
-      .map((step, index) => ({ step, number: index + 1 }))
-      .filter(({ step }) => !step.step_text?.trim() || !step.expected_result?.trim())
+    const stepErrors = testCaseStepErrors(steps)
     const missing: string[] = []
     if (!testType.trim()) missing.push('Test Type')
     if (!moduleName.trim()) missing.push('Module Name')
     if (!priority.trim()) missing.push('Priority')
     if (!scenario.trim()) missing.push('Test Scenario')
     if (!description.trim()) missing.push('Description')
-    if (!steps.length) missing.push('at least one Step')
-    if (missing.length || incompleteSteps.length) {
+    if (missing.length || stepErrors.length) {
       const messages: string[] = []
       if (missing.length) messages.push(`Complete the mandatory fields: ${missing.join(', ')}.`)
-      if (incompleteSteps.length) messages.push(`Provide both Step and Expected Result for step ${incompleteSteps.map(({ number }) => number).join(', ')}.`)
+      messages.push(...stepErrors)
       setError(new Error(messages.join(' ')))
       return
     }
@@ -2117,6 +2115,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
           <textarea required value={description} onChange={(e) => setDescription(e.target.value)} disabled={readOnly} />
         </Field>
         <Field label="Steps *">
+          <p className="muted small">Provide an expected result at each verification step, or one overall expected result for the complete testcase. At least one expected result is required.</p>
           {readOnly ? (
             <table className="simple-table">
               <thead><tr><th>#</th><th>Step</th><th>Expected Result</th></tr></thead>

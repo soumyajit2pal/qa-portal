@@ -229,10 +229,13 @@ def _lock_case_version_states(db: Session, cases: List[models.TestCase]) -> None
 
 
 def _validate_steps(steps: List[models.TestCaseVersionStep]) -> None:
-    """TC-003 -- reject empty step text, duplicate step numbers, or a step
-    with no expected result. Called at submit time, not at every draft
-    save, so authors can save incomplete work-in-progress freely (VER-001:
-    a version only truly matters once it's been submitted for review)."""
+    """Require step text, unique numbers, and at least one expected result.
+
+    An expected result may describe the complete testcase sequence or an
+    individual verification step. Validate the existing rows as stored so
+    imported cases with one overall result need no edits or data migration.
+    Called at submission, allowing incomplete work-in-progress draft saves.
+    """
     if not steps:
         raise HTTPException(400, "Add at least one step before submitting for review")
     seen_numbers = set()
@@ -242,8 +245,8 @@ def _validate_steps(steps: List[models.TestCaseVersionStep]) -> None:
         seen_numbers.add(step.step_no)
         if not (step.step_text or "").strip():
             raise HTTPException(400, f"Step {step.step_no} cannot have blank step text")
-        if not (step.expected_result or "").strip():
-            raise HTTPException(400, f"Step {step.step_no} is missing an expected result")
+    if not any((step.expected_result or "").strip() for step in steps):
+        raise HTTPException(400, "Add at least one expected result for this testcase before submitting for review")
 
 
 def _replace_draft_steps(db: Session, case: models.TestCase, version: models.TestCaseVersion,

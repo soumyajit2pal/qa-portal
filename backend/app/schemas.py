@@ -3180,8 +3180,8 @@ class TestCaseCreate(BaseModel):
         for index, step in enumerate(self.steps, start=1):
             if not (step.step_text or "").strip():
                 raise ValueError(f"Step {index} cannot be blank")
-            if not (step.expected_result or "").strip():
-                raise ValueError(f"Expected Result for step {index} cannot be blank")
+        if not any((step.expected_result or "").strip() for step in self.steps):
+            raise ValueError("Add at least one expected result for this testcase")
         return self
 
 
