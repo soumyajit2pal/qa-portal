@@ -1,3 +1,4 @@
+import TestingScopeNotice, { additionalTestingOptions } from '../../components/TestingScopeNotice'
 import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
@@ -1252,6 +1253,7 @@ export function FunctionalDetail({
       </div>
       <ErrorText error={error} />
 
+      <TestingScopeNotice missing={req.missing_testing_types} parentId={req.qa_request_id} />
       {tab === "overview" && (
         <div>
           <LifecyclePreview
@@ -1526,7 +1528,7 @@ export function FunctionalDetail({
               {canResubmit && (
                 <button
                   className="btn btn-primary btn-sm"
-                  disabled={!!busyAction || pendingMandatoryEvidence.length > 0}
+                  disabled={!!busyAction || pendingMandatoryEvidence.length > 0 || !!req.missing_testing_types?.length}
                   onClick={() => act("resubmit")}
                 >
                   {resubmitLabel}
@@ -1540,6 +1542,7 @@ export function FunctionalDetail({
 
               {canSMDecide && (
                 <ApprovalDecisionButtons
+                  additionalTestingOptions={additionalTestingOptions(req.request_types, req.qa_request_id)}
                   userName={user?.full_name}
                   comments={comments}
                   busy={!!busyAction}
@@ -1557,8 +1560,8 @@ export function FunctionalDetail({
                       comments: signed,
                     })
                   }
-                  onReturn={(actionNote) =>
-                    act("sm-decision", { decision: "Returned", comments: actionNote })
+                  onReturn={(actionNote, requiredTestingTypes) =>
+                    act("sm-decision", { decision: "Returned", comments: actionNote, required_testing_types: requiredTestingTypes })
                   }
                   onReject={(actionNote) =>
                     act("sm-decision", { decision: "Rejected", comments: actionNote })
@@ -1568,6 +1571,7 @@ export function FunctionalDetail({
 
               {canDepartmentHeadDecide && (
                 <ApprovalDecisionButtons
+                  additionalTestingOptions={additionalTestingOptions(req.request_types, req.qa_request_id)}
                   userName={user?.full_name}
                   comments={comments}
                   busy={!!busyAction}
@@ -1588,10 +1592,11 @@ export function FunctionalDetail({
                       comments: signed,
                     })
                   }
-                  onReturn={(actionNote) =>
+                  onReturn={(actionNote, requiredTestingTypes) =>
                     act("department-head-decision", {
                       decision: "Returned",
                       comments: actionNote,
+                      required_testing_types: requiredTestingTypes,
                     })
                   }
                   onReject={(actionNote) =>

@@ -1,3 +1,4 @@
+from ..request_scope import record_return_requirement, require_scope_satisfied
 import os
 from typing import List, Optional
 
@@ -379,6 +380,7 @@ def resubmit_performance(req_id: int, db: Session = Depends(get_db), current_use
     if obj.active_delegation:
         raise HTTPException(400, "The active delegation must be returned or recalled before resubmission")
     _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER"], "Resubmit")
+    require_scope_satisfied(db, obj)
     doc_store.require_mandatory_checklist_evidence(
         db, "PERFORMANCE_ITEM", obj.checklist_items,
     )
@@ -435,6 +437,7 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
         obj.status = "SM_REJECTED"
     else:
         raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
+    record_return_requirement(db, obj, payload, current_user)
     _log(db, obj.id, "SM Approval", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)
@@ -466,6 +469,7 @@ def department_head_decision(req_id: int, payload: schemas.PerformanceDeptHeadDe
         obj.status = "DEPARTMENT_HEAD_REJECTED"
     else:
         raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
+    record_return_requirement(db, obj, payload, current_user)
     _log(db, obj.id, "Department Head Approval", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)

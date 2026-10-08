@@ -314,7 +314,7 @@ def _missing_mandatory_draft_evidence(db: Session, qa_request: "models.QARequest
     return [item for module, item in required if module not in available_modules]
 
 
-def _promote_draft_checklist_evidence(db: Session, qa_request: "models.QARequest") -> None:
+def _promote_draft_checklist_evidence(db: Session, qa_request: "models.QARequest", request_types: Optional[list[str]] = None) -> None:
     """Moves Draft-wizard evidence onto the actual checklist rows created by
     _sync_linked_child_requests. Only database keys change; stored_path keeps
     pointing at the same physical file, so promotion is atomic with submit."""
@@ -329,7 +329,14 @@ def _promote_draft_checklist_evidence(db: Session, qa_request: "models.QARequest
         ("performance", "PERFORMANCE_ITEM", models.PerformanceChecklistItem,
          "performance_request_id", models.PerformanceRequest),
     ]
+    selected_kinds = None if request_types is None else {
+        kind for kind, types in [("functional", FUNCTIONAL_BUCKET_TYPES), ("sast", ["SAST"]),
+                                 ("dast", ["DAST"]), ("performance", ["Performance Testing"])]
+        if any(value in request_types for value in types)
+    }
     for kind, destination_module, item_model, parent_fk, parent_model in destinations:
+        if selected_kinds is not None and kind not in selected_kinds:
+            continue
         parent = db.query(parent_model).filter_by(qa_request_id=qa_request.id).first()
         if not parent:
             continue
@@ -654,6 +661,11 @@ def get_request(req_id: int, db: Session = Depends(get_db), current_user: models
         db.query(models.QASignOff).filter(models.QASignOff.testing_request_id.in_(func_ids)).all()
         if func_ids else []
     )
+    if obj.status == GatewayStatus.RAISED and obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN, Role.SECURITY_ANALYST):
+        out = schemas.QARequestOut.model_validate(obj)
+        for target in out.draft_dast_components:
+            target.test_credentials = None
+        return out
     return obj
 
 
@@ -1381,6 +1393,78 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     return obj
 
 
+def _scope_editor(db: Session, req_id: int, user: models.User):
+    from ..request_scope import can_add_types, lock_parent
+    obj = db.get(models.QARequest, req_id)
+    if not obj:
+        raise HTTPException(404, "QA Request not found")
+    _require_gateway_visibility(db, obj, user)
+    if obj.requester_id != user.id and not user.has_role(Role.ADMIN):
+        raise HTTPException(403, "Only the requester or an admin can add testing types")
+    obj = lock_parent(db, req_id)
+    if not can_add_types(obj):
+        raise HTTPException(400, "Testing types can only be added while a linked request is returned by SM or Department Head; resolve active delegations first")
+    if obj.application_master_status not in (None, "APPROVED"):
+        raise HTTPException(400, "The Application Name must be approved before adding testing types")
+    return obj
+
+
+def _validate_scope_types(db: Session, obj: models.QARequest, types: list[str]):
+    from ..request_scope import existing_families, family
+    _validate_request_types(db, types)
+    if not types or len(set(types)) != len(types):
+        raise HTTPException(400, "Select at least one unique additional testing type")
+    if any(family(value) in existing_families(obj) for value in types):
+        raise HTTPException(409, "One of these testing types is already linked; refresh the QA request")
+
+
+@router.put("/{req_id}/scope-additions", response_model=schemas.QARequestOut)
+def save_scope_additions(req_id: int, payload: schemas.QARequestScopeAdditionIn,
+                         db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = _scope_editor(db, req_id, current_user)
+    _validate_scope_types(db, obj, payload.request_types)
+    reason = payload.reason.strip()
+    if not reason:
+        raise HTTPException(400, "Explain why additional testing is required")
+    data = payload.model_dump()
+    performance = {key: value for key, value in data.items() if key.startswith("performance_") and key != "performance_checked_items"}
+    classification = {key: value for key, value in data.items()
+                      if key.startswith(("functional_", "sast_", "dast_"))
+                      and key not in {"sast_components", "dast_components", "sast_checked_items", "dast_checked_items"}}
+    staged = json.loads(_stash_draft_details(
+        set(payload.checked_items), data["sast_components"], data["dast_components"],
+        performance, set(payload.performance_checked_items), classification,
+        sast_checked_items=set(payload.sast_checked_items), dast_checked_items=set(payload.dast_checked_items),
+    ))
+    staged.update(scope_addition_types=payload.request_types, scope_addition_reason=reason)
+    obj.draft_child_details = json.dumps(staged)
+    _log(db, obj.id, "Testing Scope", current_user, "Additions Saved", ", ".join(payload.request_types) + ": " + reason)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.post("/{req_id}/scope-additions/submit", response_model=schemas.QARequestOut)
+def submit_scope_additions(req_id: int, db: Session = Depends(get_db),
+                           current_user: models.User = Depends(get_current_user)):
+    obj = _scope_editor(db, req_id, current_user)
+    types = obj.scope_addition_types
+    _validate_scope_types(db, obj, types)
+    details = _validate_child_intake(db, obj, types)
+    checked, sast, dast, perf, perf_checked, classification, sast_checked, dast_checked = details
+    _sync_linked_child_requests(db, obj, types, current_user, checked, sast, dast, perf,
+        performance_checked_items=perf_checked, classification=classification,
+        sast_checked_items=sast_checked, dast_checked_items=dast_checked)
+    _promote_draft_checklist_evidence(db, obj, request_types=types)
+    obj.request_types = ",".join(dict.fromkeys([*(obj.request_types or "").split(","), *types]))
+    _log(db, obj.id, "Testing Scope", current_user, "Testing Types Added",
+         ", ".join(types) + ": " + obj.scope_addition_reason)
+    obj.draft_child_details = None
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
 @router.put("/{req_id}", response_model=schemas.QARequestOut)
 def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(get_current_user)):
@@ -1571,6 +1655,134 @@ def cancel_request(req_id: int, db: Session = Depends(get_db), current_user: mod
     return obj
 
 
+def _validate_child_intake(db: Session, obj: models.QARequest, request_types: list[str]):
+    checked_items, sast_components, dast_components, performance_details, performance_checked_items, classification_details, sast_checked_items, dast_checked_items = _unstash_draft_details(obj.draft_child_details)
+    # Revalidate the stashed SAST rows at the irreversible Draft -> Raised
+    # boundary. Repository references remain mandatory, but their format
+    # is advisory and must not prevent a request from being raised.
+    if "SAST" in request_types:
+        if not sast_components:
+            raise HTTPException(400, "Cannot raise -- add at least one SAST repository with a Repository URL.")
+        validated_sast_components = []
+        for index, component in enumerate(sast_components, start=1):
+            try:
+                validated = schemas.SASTComponentIn.model_validate(component)
+            except ValidationError as exc:
+                message = exc.errors()[0]["msg"]
+                raise HTTPException(400, f"Repository {index}: {message}") from exc
+            if not validated.repository_url:
+                raise HTTPException(
+                    400,
+                    f"Repository {index} URL is required.",
+                )
+            if not (validated.git_branch or '').strip() or not (validated.commit_id or '').strip():
+                raise HTTPException(400, f"Repository {index} Branch and Commit ID are required before raising a SAST request.")
+            validated_sast_components.append(validated.model_dump())
+        sast_components = validated_sast_components
+    if "DAST" in request_types:
+        if not dast_components:
+            raise HTTPException(400, "Cannot raise -- add at least one DAST target.")
+        for index, target in enumerate(dast_components, start=1):
+            if not (target.get("application_url") or "").strip():
+                raise HTTPException(400, f"DAST target {index}: Application URL is required.")
+            # Older intake API clients omit this checkbox; the UI defaults it to No.
+            if target.get("authentication_required") is None:
+                target["authentication_required"] = "No"
+            if target.get("authentication_required") not in {"Yes", "No"}:
+                raise HTTPException(400, f"DAST target {index}: select Yes or No for Authentication Required.")
+            if target.get("authentication_required") == "Yes" and not (target.get("test_credentials") or "").strip():
+                raise HTTPException(400, f"DAST target {index}: Test Credentials are required.")
+
+    # Every linked child now lands straight at SM_APPROVAL_PENDING with no
+    # separate per-module Submit click of its own (see _raise_child_to_sm),
+    # so each module's own mandatory-checklist gate that would otherwise only
+    # fire on its own subsequent submit (e.g. routers/sast_dast.py::
+    # _require_checklist_ready) has to be enforced here instead, before that
+    # child is ever created -- otherwise a requester could raise the gateway
+    # with a mandatory item still unchecked and the linked request would be
+    # born already sitting at SM Approval despite that.
+    #
+    # Covers all four modules now (Functional/SAST/DAST/Performance) --
+    # whatever is currently configured as mandatory for a module (see
+    # checklist_config.py; Admin > Readiness Checklist Configuration) must be
+    # self-declared before Raise, full stop. This used to only actually cover
+    # Functional/SAST/DAST (Performance's checklist had no way to be
+    # mandatory at all -- see _sync_linked_child_requests' own comment on
+    # PerformanceChecklistItem above) -- reported directly: "if I make any
+    # checklist mandatory in that configuration, that will be mandatory"
+    # means every module has to honor it the same way, not just three of
+    # four.
+    pending_checklist_items = []
+    if any(request_type in FUNCTIONAL_BUCKET_TYPES for request_type in request_types):
+        functional_checked_set = set(checked_items)
+        pending_checklist_items += [
+            template.item for template in get_template_items(db, "FUNCTIONAL")
+            if is_mandatory_for_department(template, obj.department) and template.item not in functional_checked_set
+        ]
+    if "SAST" in request_types:
+        sast_checked_set = set(sast_checked_items)
+        pending_checklist_items += [
+            template.item for template in get_template_items(db, "SAST")
+            if is_mandatory_for_department(template, obj.department) and template.item not in sast_checked_set
+        ]
+    if "DAST" in request_types:
+        dast_checked_set = set(dast_checked_items)
+        pending_checklist_items += [
+            template.item for template in get_template_items(db, "DAST")
+            if is_mandatory_for_department(template, obj.department) and template.item not in dast_checked_set
+        ]
+    if "Performance Testing" in request_types:
+        performance_checked_set = set(performance_checked_items)
+        pending_checklist_items += [
+            template.item for template in get_template_items(db, "PERFORMANCE")
+            if is_mandatory_for_department(template, obj.department) and template.item not in performance_checked_set
+        ]
+    if pending_checklist_items:
+        raise HTTPException(
+            400,
+            "Cannot raise -- the following mandatory checklist item(s) must be "
+            "self-declared ready first (Edit Request): "
+            + "; ".join(pending_checklist_items),
+        )
+
+    missing_mandatory_evidence = _missing_mandatory_draft_evidence(db, obj, request_types)
+    if missing_mandatory_evidence:
+        raise HTTPException(
+            400,
+            "Cannot raise -- attach supporting evidence for the following mandatory readiness checklist item(s) first (Edit Request): "
+            + "; ".join(missing_mandatory_evidence),
+        )
+
+    # Reported directly: DAST scans and Performance tests are never run
+    # against Dev or SIT -- DastStep.tsx/PerformanceStep.tsx's own Environment
+    # pickers are already restricted to POST_SIT_ENVIRONMENTS client-side with
+    # no blank option, so this should never actually trip in normal use;
+    # enforced here too anyway (same belt-and-braces reasoning as every other
+    # gate in this function) in case of a stale/tampered request.
+    if "DAST" in request_types:
+        bad_dast_envs = [
+            c.get("environment") for c in (dast_components or [])
+            if c.get("environment") not in POST_SIT_ENVIRONMENTS
+        ]
+        if bad_dast_envs:
+            raise HTTPException(
+                400,
+                f"DAST target Environment must be one of {', '.join(POST_SIT_ENVIRONMENTS)} "
+                "-- DAST is not performed in Dev or SIT.",
+            )
+    if "Performance Testing" in request_types:
+        perf_env = (performance_details or {}).get("performance_environment")
+        if perf_env not in POST_SIT_ENVIRONMENTS:
+            raise HTTPException(
+                400,
+                f"Performance Testing Environment must be one of {', '.join(POST_SIT_ENVIRONMENTS)} "
+                "-- Performance testing is not performed in Dev or SIT.",
+            )
+
+    return (checked_items, sast_components, dast_components, performance_details, performance_checked_items,
+            classification_details, sast_checked_items, dast_checked_items)
+
+
 @router.post("/{req_id}/submit", response_model=schemas.QARequestOut)
 def submit_request(req_id: int, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(*QA_REQUEST_CREATOR_ROLES))):
@@ -1665,114 +1877,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     # was just sitting in draft_child_details until now (see create_request/
     # edit_request). "Linked Requests" is correctly empty right up until
     # this call.
-    checked_items, sast_components, dast_components, performance_details, performance_checked_items, classification_details, sast_checked_items, dast_checked_items = _unstash_draft_details(obj.draft_child_details)
-    # Revalidate the stashed SAST rows at the irreversible Draft -> Raised
-    # boundary. Repository references remain mandatory, but their format
-    # is advisory and must not prevent a request from being raised.
-    if "SAST" in request_types:
-        if not sast_components:
-            raise HTTPException(400, "Cannot raise -- add at least one SAST repository with a Repository URL.")
-        validated_sast_components = []
-        for index, component in enumerate(sast_components, start=1):
-            try:
-                validated = schemas.SASTComponentIn.model_validate(component)
-            except ValidationError as exc:
-                message = exc.errors()[0]["msg"]
-                raise HTTPException(400, f"Repository {index}: {message}") from exc
-            if not validated.repository_url:
-                raise HTTPException(
-                    400,
-                    f"Repository {index} URL is required.",
-                )
-            if not (validated.git_branch or '').strip() or not (validated.commit_id or '').strip():
-                raise HTTPException(400, f"Repository {index} Branch and Commit ID are required before raising a SAST request.")
-            validated_sast_components.append(validated.model_dump())
-        sast_components = validated_sast_components
-    # Every linked child now lands straight at SM_APPROVAL_PENDING with no
-    # separate per-module Submit click of its own (see _raise_child_to_sm),
-    # so each module's own mandatory-checklist gate that would otherwise only
-    # fire on its own subsequent submit (e.g. routers/sast_dast.py::
-    # _require_checklist_ready) has to be enforced here instead, before that
-    # child is ever created -- otherwise a requester could raise the gateway
-    # with a mandatory item still unchecked and the linked request would be
-    # born already sitting at SM Approval despite that.
-    #
-    # Covers all four modules now (Functional/SAST/DAST/Performance) --
-    # whatever is currently configured as mandatory for a module (see
-    # checklist_config.py; Admin > Readiness Checklist Configuration) must be
-    # self-declared before Raise, full stop. This used to only actually cover
-    # Functional/SAST/DAST (Performance's checklist had no way to be
-    # mandatory at all -- see _sync_linked_child_requests' own comment on
-    # PerformanceChecklistItem above) -- reported directly: "if I make any
-    # checklist mandatory in that configuration, that will be mandatory"
-    # means every module has to honor it the same way, not just three of
-    # four.
-    pending_checklist_items = []
-    if any(request_type in FUNCTIONAL_BUCKET_TYPES for request_type in request_types):
-        functional_checked_set = set(checked_items)
-        pending_checklist_items += [
-            template.item for template in get_template_items(db, "FUNCTIONAL")
-            if is_mandatory_for_department(template, obj.department) and template.item not in functional_checked_set
-        ]
-    if "SAST" in request_types:
-        sast_checked_set = set(sast_checked_items)
-        pending_checklist_items += [
-            template.item for template in get_template_items(db, "SAST")
-            if is_mandatory_for_department(template, obj.department) and template.item not in sast_checked_set
-        ]
-    if "DAST" in request_types:
-        dast_checked_set = set(dast_checked_items)
-        pending_checklist_items += [
-            template.item for template in get_template_items(db, "DAST")
-            if is_mandatory_for_department(template, obj.department) and template.item not in dast_checked_set
-        ]
-    if "Performance Testing" in request_types:
-        performance_checked_set = set(performance_checked_items)
-        pending_checklist_items += [
-            template.item for template in get_template_items(db, "PERFORMANCE")
-            if is_mandatory_for_department(template, obj.department) and template.item not in performance_checked_set
-        ]
-    if pending_checklist_items:
-        raise HTTPException(
-            400,
-            "Cannot raise -- the following mandatory checklist item(s) must be "
-            "self-declared ready first (Edit Request): "
-            + "; ".join(pending_checklist_items),
-        )
-
-    missing_mandatory_evidence = _missing_mandatory_draft_evidence(db, obj, request_types)
-    if missing_mandatory_evidence:
-        raise HTTPException(
-            400,
-            "Cannot raise -- attach supporting evidence for the following mandatory readiness checklist item(s) first (Edit Request): "
-            + "; ".join(missing_mandatory_evidence),
-        )
-
-    # Reported directly: DAST scans and Performance tests are never run
-    # against Dev or SIT -- DastStep.tsx/PerformanceStep.tsx's own Environment
-    # pickers are already restricted to POST_SIT_ENVIRONMENTS client-side with
-    # no blank option, so this should never actually trip in normal use;
-    # enforced here too anyway (same belt-and-braces reasoning as every other
-    # gate in this function) in case of a stale/tampered request.
-    if "DAST" in request_types:
-        bad_dast_envs = [
-            c.get("environment") for c in (dast_components or [])
-            if c.get("environment") not in POST_SIT_ENVIRONMENTS
-        ]
-        if bad_dast_envs:
-            raise HTTPException(
-                400,
-                f"DAST target Environment must be one of {', '.join(POST_SIT_ENVIRONMENTS)} "
-                "-- DAST is not performed in Dev or SIT.",
-            )
-    if "Performance Testing" in request_types:
-        perf_env = (performance_details or {}).get("performance_environment")
-        if perf_env not in POST_SIT_ENVIRONMENTS:
-            raise HTTPException(
-                400,
-                f"Performance Testing Environment must be one of {', '.join(POST_SIT_ENVIRONMENTS)} "
-                "-- Performance testing is not performed in Dev or SIT.",
-            )
+    _validate_child_intake(db, obj, request_types)
 
     # The real business ID now exists and validation has succeeded. Promote
     # all Draft uploads before either raising immediately or waiting at the
@@ -1901,13 +2006,20 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
 # Draft. Child checklist IDs do not exist yet; these files are staged by the
 # fixed checklist index, then promoted by submit_request above.
 def _draft_request_for_evidence(db: Session, req_id: int, current_user: models.User,
-                                require_editable: bool = False):
+                                require_editable: bool = False, kind: Optional[str] = None):
     req = db.get(models.QARequest, req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, req, current_user)
     if require_editable:
-        if not _can_edit_draft(req, current_user):
+        if req.status == GatewayStatus.RAISED:
+            req = _scope_editor(db, req_id, current_user)
+            selected = req.scope_addition_types
+            allowed = {key for key, values in [("functional", FUNCTIONAL_BUCKET_TYPES), ("sast", ["SAST"]),
+                ("dast", ["DAST"]), ("performance", ["Performance Testing"])] if any(value in selected for value in values)}
+            if kind not in allowed:
+                raise HTTPException(403, "Evidence can only be changed for saved additional testing types")
+        elif not _can_edit_draft(req, current_user):
             raise HTTPException(403, "Only the current Draft editor can change checklist evidence")
     return req
 
@@ -1966,7 +2078,7 @@ def list_draft_checklist_evidence(req_id: int, kind: str, item_index: int,
 def upload_draft_checklist_evidence(req_id: int, kind: str, item_index: int,
                                     files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                                     current_user: models.User = Depends(get_current_user)):
-    req = _draft_request_for_evidence(db, req_id, current_user, require_editable=True)
+    req = _draft_request_for_evidence(db, req_id, current_user, require_editable=True, kind=kind)
     module = _draft_evidence_module(db, kind, item_index)
     validate_qa_document_sizes(files)
     return doc_store.save_documents(db, module, req_id,
@@ -1991,7 +2103,7 @@ def download_draft_checklist_evidence(req_id: int, kind: str, item_index: int, d
 def delete_draft_checklist_evidence(req_id: int, kind: str, item_index: int, doc_id: int,
                                     db: Session = Depends(get_db),
                                     current_user: models.User = Depends(get_current_user)):
-    _draft_request_for_evidence(db, req_id, current_user, require_editable=True)
+    _draft_request_for_evidence(db, req_id, current_user, require_editable=True, kind=kind)
     doc = doc_store.get_document_or_404(
         db, _draft_evidence_module(db, kind, item_index), req_id, doc_id)
     if not doc_store.can_delete_document(doc, current_user):

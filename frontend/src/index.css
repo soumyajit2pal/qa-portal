@@ -1542,6 +1542,9 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .workflow-confirm-banner.approve > span { background: #278759; }
 .workflow-confirm-banner.return > span { background: #bd8d20; }
 .workflow-confirm-banner.reject > span { background: #bc3f49; }
+/* Reject confirmation: keep the alternative action and consequence visible. */
+.workflow-reject-guidance { margin: 0; padding: 12px 14px; border: 1px solid #f0b9b4; border-radius: 8px; background: #fff4f2; line-height: 1.5; }
+.workflow-reject-guidance, .workflow-reject-guidance strong { color: #b42318; font-weight: 700; }
 .workflow-note-field { display: grid; gap: 6px; }
 .workflow-note-field > span { color: #3d555a; font-size: 10.5px; font-weight: 700; }
 .workflow-note-field em { margin-left: 6px; padding: 2px 6px; border-radius: 100px; color: #66777b; background: #edf2f3; font-size: 7.5px; font-style: normal; text-transform: uppercase; letter-spacing: .06em; }

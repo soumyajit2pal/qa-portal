@@ -1,3 +1,4 @@
+import TestingScopeNotice, { additionalTestingOptions } from '../../components/TestingScopeNotice'
 import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useRequestNavigation, useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
@@ -649,6 +650,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
       </div>
       <ErrorText error={error} />
 
+      <TestingScopeNotice missing={req.missing_testing_types} parentId={req.qa_request_id} />
       {tab === 'overview' && (
         <div>
           {(scanResults.length > 0 || activeTargetWorkflow || requiresReverification) && (
@@ -788,7 +790,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
               )}
               {canResubmit && (
                 <button className="btn btn-primary btn-sm"
-                        disabled={busy || pendingMandatoryEvidence.length > 0 || (['RETURNED_BY_SM', 'SM_REJECTED'].includes(status) && pendingSelfDeclare.length > 0)}
+                        disabled={busy || pendingMandatoryEvidence.length > 0 || !!req.missing_testing_types?.length || (['RETURNED_BY_SM', 'SM_REJECTED'].includes(status) && pendingSelfDeclare.length > 0)}
                         onClick={() => act('resubmit')}>
                   {resubmitLabel}
                 </button>
@@ -807,6 +809,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
 
               {canSMDecide && (
                 <ApprovalDecisionButtons
+                  additionalTestingOptions={additionalTestingOptions(req.request_types, req.qa_request_id)}
                   userName={user?.full_name}
                   comments={comments}
                   busy={busy}
@@ -819,12 +822,13 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
                       : undefined
                   }
                   onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                  onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                  onReturn={(actionNote, requiredTestingTypes) => act('sm-decision', { decision: 'Returned', comments: actionNote, required_testing_types: requiredTestingTypes })}
                   onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
                 />
               )}
               {canDeptHeadDecide && (
                 <ApprovalDecisionButtons
+                  additionalTestingOptions={additionalTestingOptions(req.request_types, req.qa_request_id)}
                   userName={user?.full_name}
                   comments={comments}
                   busy={busy}
@@ -840,7 +844,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
                   extraControl={<RoleGroupLink role="QA_LEAD" label="QA Lead" />}
                   extraReady
                   onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed })}
-                  onReturn={(actionNote) => act('department-head-decision', { decision: 'Returned', comments: actionNote })}
+                  onReturn={(actionNote, requiredTestingTypes) => act('department-head-decision', { decision: 'Returned', comments: actionNote, required_testing_types: requiredTestingTypes })}
                   onReject={(actionNote) => act('department-head-decision', { decision: 'Rejected', comments: actionNote })}
                 />
               )}

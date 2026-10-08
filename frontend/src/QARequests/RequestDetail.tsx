@@ -1,3 +1,4 @@
+import '../components/TestingScopeNotice.css'
 import WorkflowStatusBadge from '../components/WorkflowStatusBadge'
 import { useRequestNavigation } from '../hooks/useRequestNavigation'
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -72,6 +73,7 @@ export function RequestDetail({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const statusRefreshInFlight = useRef(false);
   const [editingReq, setEditingReq] = useState(false);
+  const [addingTypes, setAddingTypes] = useState(false);
   const [evidenceStep, setEvidenceStep] = useState<EvidenceStepKey | undefined>();
   const [evidenceItem, setEvidenceItem] = useState<string | undefined>();
   // Evidence-document count per draft checklist item, keyed "<kind>:<index>".
@@ -218,7 +220,7 @@ export function RequestDetail({
       );
       onChanged(updated);
       load();
-      if (action === "submit") setRaisedNotice(updated);
+      if (action === "submit" || action === "scope-additions/submit") setRaisedNotice(updated);
     } catch (err) {
       setError(err);
     } finally {
@@ -427,6 +429,7 @@ export function RequestDetail({
   const canCancel =
     isRequester && !hasActiveDelegation && GATEWAY_CANCELLABLE_STATUSES.includes(status);
   // Mirrors backend GATEWAY_EDITABLE_STATUSES.
+  const canAddTypes = isRequester && !viewOnly && !!req.can_add_testing_types;
   const canEditRequest = GATEWAY_EDITABLE_STATUSES.includes(status) && (
     isAdmin || isActiveDelegate || (ownsRequest && !hasActiveDelegation)
   );
@@ -808,6 +811,11 @@ export function RequestDetail({
               >
                 Export PDF
               </button>
+              {canAddTypes && <>
+                <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setAddingTypes(true)}>Add testing types</button>
+                {!!req.scope_addition_types?.length && <button className="btn btn-primary btn-sm" disabled={!!busyAction}
+                  onClick={() => act("scope-additions/submit")}>Raise added requests</button>}
+              </>}
               {canEditRequest && (
                 <button
                   className="btn btn-sm"
@@ -860,7 +868,7 @@ export function RequestDetail({
                   Cancel Request
                 </button>
               )}
-              {!canEditRequest && !canAssignForInput && !canReturnToRequester && !canRecallDelegation && !canSubmit && !canCancel && (
+              {!canAddTypes && !canEditRequest && !canAssignForInput && !canReturnToRequester && !canRecallDelegation && !canSubmit && !canCancel && (
                 <span className="muted small">
                   No gateway actions available — this request has been{" "}
                   {(GATEWAY_STATUS_LABELS[status] || status).toLowerCase()}.
@@ -875,6 +883,15 @@ export function RequestDetail({
         </div>
       )}
 
+      {tab === "overview" && !!req.missing_testing_types?.length && <div className="scope-context" role="status">
+        <strong>Additional testing required: {req.missing_testing_types.join(', ')}</strong>
+        <p>Raise these testing requests under this QA request before resubmitting the returned request.</p>
+        {canAddTypes && <button className="btn btn-primary btn-sm" onClick={() => setAddingTypes(true)}>Add required testing</button>}
+      </div>}
+      {tab === "overview" && !!req.scope_addition_types?.length && <div className="scope-context" role="status">
+        <strong>Saved additions: {req.scope_addition_types.join(', ')}</strong>
+        <p>These requests have not been raised yet. Use “Raise added requests” after completing readiness and evidence.</p>
+      </div>}
       {tab === "documents" && (
         <div>
           <Table
@@ -985,6 +1002,9 @@ export function RequestDetail({
         <JiraActivity ownerWorkspaceId={req.qa_workspace_id} entityType="QA_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
+      {addingTypes && <NewRequestModal editing={req} scopeAddition
+        onClose={() => { setAddingTypes(false); void refreshActualStatus(); }}
+        onCreated={(updated) => { setAddingTypes(false); onChanged(updated); void load(); }} />}
       {editingReq && (
         <NewRequestModal
           editing={req}

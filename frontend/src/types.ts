@@ -458,6 +458,10 @@ export interface QARequestListOut {
 }
 
 export interface QARequestOut {
+  can_add_testing_types?: boolean
+  scope_addition_types?: string[]
+  scope_addition_reason?: string
+  missing_testing_types?: string[]
   id: number
   // Only assigned once this gateway is actually raised -- null while Draft.
   request_id?: string | null
@@ -549,6 +553,7 @@ export interface FunctionalListOut {
 }
 
 export interface FunctionalOut {
+  missing_testing_types?: string[]
   id: number
   request_id: string
   status: string
@@ -805,6 +810,8 @@ export interface SASTListOut {
 }
 
 export interface SASTOut {
+  request_types?: string | null
+  missing_testing_types?: string[]
   id: number
   request_id: string
   application_name: string
@@ -906,6 +913,8 @@ export interface DASTListOut {
 }
 
 export interface DASTOut {
+  request_types?: string | null
+  missing_testing_types?: string[]
   id: number
   request_id: string
   risk_category?: string | null
@@ -991,6 +1000,8 @@ export interface PerformanceListOut {
 }
 
 export interface PerformanceOut {
+  request_types?: string | null
+  missing_testing_types?: string[]
   id: number
   request_id: string
   application_name: string

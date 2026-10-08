@@ -1,0 +1,8 @@
+.scope-context { margin: 14px 0; padding: 16px 18px; border: 1px solid #b9cee7; border-left: 4px solid #245b91; border-radius: 10px; background: #f2f7fd; color: #173858; }
+.scope-context p { margin: 8px 0 12px; line-height: 1.5; }
+.scope-options { border: 1px solid #c4d3e3; border-radius: 8px; padding: 12px; }
+.scope-options legend { font-weight: 600; padding: 0 6px; }
+.scope-options label { display: flex; align-items: center; gap: 8px; padding: 7px 0; }
+.scope-options input { width: 18px; height: 18px; }
+
+.qa-wizard-inputs { min-width: 0; padding: 0; margin: 0; border: 0; }

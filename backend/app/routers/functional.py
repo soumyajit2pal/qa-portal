@@ -1,3 +1,4 @@
+from ..request_scope import record_return_requirement, require_scope_satisfied
 import os
 from typing import Optional, List
 
@@ -852,6 +853,7 @@ def resubmit_request(req_id: int, db: Session = Depends(get_db),
     _require(obj, [QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
                    QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD],
              "Resubmit")
+    require_scope_satisfied(db, obj)
     doc_store.require_mandatory_checklist_evidence(
         db, "FUNCTIONAL_ITEM", obj.checklist_items,
     )
@@ -912,6 +914,7 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
         obj.status = QAStatus.SM_REJECTED
     else:
         raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
+    record_return_requirement(db, obj, payload, current_user)
     _log(db, obj.id, "SM Approval", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)
@@ -947,6 +950,7 @@ def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisio
     else:
         raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
 
+    record_return_requirement(db, obj, payload, current_user)
     _log(db, obj.id, "Department Head Approval", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)

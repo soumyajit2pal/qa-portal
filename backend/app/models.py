@@ -945,6 +945,26 @@ class QARequest(Base):
     linked_sast_requests = relationship("SASTRequest", back_populates="qa_request")
     linked_dast_requests = relationship("DASTRequest", back_populates="qa_request")
     linked_performance_requests = relationship("PerformanceRequest", back_populates="qa_request")
+    scope_requirements = relationship("QARequestScopeRequirement", back_populates="qa_request")
+
+    @property
+    def missing_testing_types(self):
+        from .request_scope import missing_for_parent
+        return missing_for_parent(self)
+
+    @property
+    def can_add_testing_types(self):
+        from .request_scope import can_add_types
+        return can_add_types(self)
+
+    @property
+    def scope_addition_types(self):
+        return self._draft_details().get("scope_addition_types", [])
+
+    @property
+    def scope_addition_reason(self):
+        return self._draft_details().get("scope_addition_reason", "")
+
     delegations = relationship(
         "QARequestDelegation", back_populates="qa_request", cascade="all,delete-orphan",
         order_by="QARequestDelegation.assigned_at.desc()",
@@ -1100,6 +1120,11 @@ class FunctionalRequest(Base):
     are the exception -- real, independently-editable columns (see below),
     since those can legitimately differ per request type even on the same
     underlying change."""
+    @property
+    def missing_testing_types(self):
+        from .request_scope import missing_for_child
+        return missing_for_child(self)
+
     __tablename__ = "qap_functional_requests"
     id = pk_column()
     request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["FUNCTIONAL"]))
@@ -1359,6 +1384,15 @@ class ReadinessChecklistItem(Base):
 # Module 4: SAST Request Management
 # ---------------------------------------------------------------------------
 class SASTRequest(Base):
+    @property
+    def missing_testing_types(self):
+        from .request_scope import missing_for_child
+        return missing_for_child(self)
+
+    @property
+    def request_types(self):
+        return self.qa_request.request_types if self.qa_request else None
+
     __tablename__ = "qap_sast_requests"
     id = pk_column()
     request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["SAST"]))
@@ -1591,6 +1625,15 @@ class SASTChecklistItem(Base):
 # Module 5: DAST Request Management
 # ---------------------------------------------------------------------------
 class DASTRequest(Base):
+    @property
+    def missing_testing_types(self):
+        from .request_scope import missing_for_child
+        return missing_for_child(self)
+
+    @property
+    def request_types(self):
+        return self.qa_request.request_types if self.qa_request else None
+
     __tablename__ = "qap_dast_requests"
     id = pk_column()
     request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["DAST"]))
@@ -1872,6 +1915,15 @@ class PerformanceRequest(Base):
     Performance Testing") -- see constants.PERFORMANCE_REQUEST_TYPES/
     CHANGE_TYPES and PerformanceChecklistItem for the accompanying 19-item
     pre-testing readiness checklist."""
+    @property
+    def missing_testing_types(self):
+        from .request_scope import missing_for_child
+        return missing_for_child(self)
+
+    @property
+    def request_types(self):
+        return self.qa_request.request_types if self.qa_request else None
+
     __tablename__ = "qap_performance_requests"
     id = pk_column()
     request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["PERFORMANCE"]))
@@ -2207,6 +2259,21 @@ class SuppressionItem(Base):
 # ---------------------------------------------------------------------------
 # Module 7: Generic Approval Workflow Engine
 # ---------------------------------------------------------------------------
+class QARequestScopeRequirement(Base):
+    """Append-only structured requirements recorded with an approval return."""
+    __tablename__ = "qap_scope_requirements"
+    __table_args__ = (Index("ix_qap_scope_parent", "qa_request_id"),)
+    id = pk_column()
+    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=False)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(Integer, nullable=False)
+    required_types = Column(String(255), nullable=False)
+    reason = Column(Text, nullable=False)
+    actor_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False)
+    created_at = Column(DateTime, default=now, nullable=False)
+    qa_request = relationship("QARequest", back_populates="scope_requirements")
+
+
 class ApprovalAction(Base):
     """
     Generic append-only approval/audit log usable by any entity

@@ -803,6 +803,30 @@ class QARequestCreate(BaseModel):
     performance_checked_items: List[str] = []
 
 
+class QARequestScopeAdditionIn(BaseModel):
+    """Additive module inputs only: no shared application/change fields."""
+    model_config = ConfigDict(extra="forbid")
+    request_types: List[str] = Field(min_length=1, max_length=7)
+    reason: str = Field(min_length=1, max_length=10000)
+    checked_items: List[str] = Field(default_factory=list)
+    functional_priority: Literal["Critical", "High", "Medium", "Low"] = "Medium"
+    functional_risk_rating: Literal["Critical", "High", "Medium", "Low"] = "Medium"
+    sast_components: List[SASTComponentIn] = Field(default_factory=list)
+    sast_priority: Literal["Critical", "High", "Medium", "Low"] = "Medium"
+    sast_risk_category: Literal["Critical", "High", "Medium", "Low"] = "Medium"
+    sast_hash_value: Optional[str] = None
+    sast_checked_items: List[str] = Field(default_factory=list)
+    dast_components: List[DASTTargetIn] = Field(default_factory=list)
+    dast_priority: Literal["Critical", "High", "Medium", "Low"] = "Medium"
+    dast_risk_category: Literal["Critical", "High", "Medium", "Low"] = "Medium"
+    dast_checked_items: List[str] = Field(default_factory=list)
+    performance_request_type: Optional[str] = None
+    performance_priority: Literal["Critical", "High", "Medium", "Low"] = "Medium"
+    performance_risk_category: Literal["Critical", "High", "Medium", "Low"] = "Medium"
+    performance_environment: Optional[str] = None
+    performance_checked_items: List[str] = Field(default_factory=list)
+
+
 class QARequestUpdate(QARequestCreate):
     application_name: Optional[str] = None
 
@@ -840,6 +864,10 @@ class QARequestOut(ORMModel):
     workflow state lives on whichever linked child request(s) below were
     auto-raised (see FunctionalOut for the Functional/Sanity/Regression
     Testing/UAT Support bucket's own full lifecycle)."""
+    missing_testing_types: List[str] = Field(default_factory=list)
+    can_add_testing_types: bool = False
+    scope_addition_types: List[str] = Field(default_factory=list)
+    scope_addition_reason: str = ""
     id: int
     # Optional -- unlike every other business ID in this app, this one is not
     # assigned at Draft-creation time (see models.QARequest.request_id's
@@ -1060,6 +1088,8 @@ class FunctionalOut(ORMModel):
     Closed lifecycle (constants.QAStatus) that used to live directly on
     QARequestOut. Descriptive fields are delegated (read-only) from the
     linked qa_request -- see models.FunctionalRequest."""
+    missing_testing_types: List[str] = Field(default_factory=list)
+    qa_request_id: Optional[int] = None
     id: int
     request_id: str
     status: str
@@ -1121,6 +1151,8 @@ class FunctionalOut(ORMModel):
 
 class WorkflowDecision(BaseModel):
     decision: str          # Approved / Rejected / Returned
+    required_testing_types: List[str] = Field(default_factory=list)
+
     comments: Optional[str] = None
     # Only meaningful for Suppression's security-team-decision, on a
     # "Returned" decision (see routers/suppression.py::security_team_decision)
@@ -1134,6 +1166,8 @@ class WorkflowDecision(BaseModel):
 
     @model_validator(mode="after")
     def require_return_reject_remarks(self):
+        if self.required_testing_types and self.decision != "Returned":
+            raise ValueError("Additional testing types can only be required when returning a request")
         self.comments = _require_return_reject_comments(self.decision, self.comments)
         return self
 
@@ -1142,11 +1176,15 @@ class WorkflowDecision(BaseModel):
 class DepartmentHeadDecisionIn(BaseModel):
     """Department Head reviews the request and assigns its QA Lead from the active workspace."""
     decision: str                          # Approved / Returned / Rejected
+    required_testing_types: List[str] = Field(default_factory=list)
+
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
 
     @model_validator(mode="after")
     def require_return_reject_remarks(self):
+        if self.required_testing_types and self.decision != "Returned":
+            raise ValueError("Additional testing types can only be required when returning a request")
         self.comments = _require_return_reject_comments(self.decision, self.comments)
         return self
 
@@ -1192,12 +1230,16 @@ class SecurityDeptHeadDecisionIn(BaseModel):
 class PerformanceDeptHeadDecisionIn(BaseModel):
     """Performance Department Head decision with QA Lead from the active workspace assignment."""
     decision: str                     # Approved / Returned / Rejected
+    required_testing_types: List[str] = Field(default_factory=list)
+
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
     engineer_id: Optional[int] = None  # legacy alias for qa_lead_id
 
     @model_validator(mode="after")
     def require_return_reject_remarks(self):
+        if self.required_testing_types and self.decision != "Returned":
+            raise ValueError("Additional testing types can only be required when returning a request")
         self.comments = _require_return_reject_comments(self.decision, self.comments)
         return self
 
@@ -1573,6 +1615,8 @@ class SASTListOut(ORMModel):
 
 
 class SASTOut(ORMModel):
+    missing_testing_types: List[str] = Field(default_factory=list)
+    request_types: Optional[str] = None
     id: int
     request_id: str
     application_name: str
@@ -1686,6 +1730,8 @@ class DASTListOut(ORMModel):
 
 
 class DASTOut(ORMModel):
+    missing_testing_types: List[str] = Field(default_factory=list)
+    request_types: Optional[str] = None
     id: int
     request_id: str
     risk_category: Optional[str] = None
@@ -1842,6 +1888,8 @@ class PerformanceListOut(ORMModel):
 
 
 class PerformanceOut(ORMModel):
+    missing_testing_types: List[str] = Field(default_factory=list)
+    request_types: Optional[str] = None
     id: int
     request_id: str
     application_name: str

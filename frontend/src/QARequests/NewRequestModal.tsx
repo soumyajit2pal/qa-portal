@@ -24,6 +24,7 @@ interface NewRequestModalProps {
   onClose: () => void
   onCreated: (req: QARequestOut) => void
   editing?: QARequestOut
+  scopeAddition?: boolean
   delegatedEditing?: boolean
   initialStepKey?: 'functional' | 'sast' | 'dast' | 'performance'
   initialEvidenceItem?: string
@@ -127,7 +128,7 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
   }
 }
 
-export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing = false, initialStepKey, initialEvidenceItem }: NewRequestModalProps) {
+export function NewRequestModal({ onClose, onCreated, editing, scopeAddition = false, delegatedEditing = false, initialStepKey, initialEvidenceItem }: NewRequestModalProps) {
   const { user } = useAuth()
   // 2026-08 "one user can be on multiple departments" CR, follow-up: the
   // department field is no longer locked -- a requester picks which of
@@ -139,7 +140,7 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
   // -- this options list is only for a sane picker, not the source of truth.
   const departmentOptions = userDepartments(user)
   const primaryDepartment = departmentOptions[0] || ''
-  const [form, setForm] = useState<QARequestForm>(() => buildInitialForm(editing, primaryDepartment))
+  const [form, setForm] = useState<QARequestForm>(() => buildInitialForm(scopeAddition && editing ? { ...editing, request_types: (editing.scope_addition_types?.length ? editing.scope_addition_types : editing.missing_testing_types || []).join(',') } : editing, primaryDepartment))
   const [requestTypes, setRequestTypes] = useState<RequestTypeConfigOut[]>(() => REQUEST_TYPES.map((request_type, sort_order) => ({
     id: sort_order + 1, request_type, sort_order, is_active: true,
   })))
@@ -163,6 +164,15 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
   const existingSast = !!editing?.linked_sast_requests?.length
   const existingDast = !!editing?.linked_dast_requests?.length
   const existingPerformance = !!editing?.linked_performance_requests?.length
+  const [scopeReason, setScopeReason] = useState(editing?.scope_addition_reason || '')
+  const existingTypes = editing?.request_types?.split(',') || []
+  const availableTypes = requestTypes.filter((row) => !scopeAddition || !(
+    existingTypes.includes(row.request_type)
+    || (editing?.linked_functional_requests?.length && ['Functional Testing', 'Sanity Testing', 'Regression Testing', 'UAT Support'].includes(row.request_type))
+    || (editing?.linked_sast_requests?.length && row.request_type === 'SAST')
+    || (editing?.linked_dast_requests?.length && row.request_type === 'DAST')
+    || (editing?.linked_performance_requests?.length && row.request_type === 'Performance Testing')
+  ))
   const [files, setFiles] = useState<File[]>([])
   const [checklistEvidence, setChecklistEvidence] = useState<Record<string, File[]>>({})
   // Already-uploaded checklist evidence, keyed the same way as
@@ -190,7 +200,7 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
   // requestClose() below instead.
   const [confirmDiscard, setConfirmDiscard] = useState(false)
 
-  const steps = buildSteps(form.request_types)
+  const steps = buildSteps(form.request_types).filter((step) => !scopeAddition || !['details', 'documents'].includes(step.key))
   useEffect(() => {
     // Clamp both ends -- e.g. if a request type gets unticked and the wizard
     // was sitting on a step that no longer exists, or (belt-and-braces) if
@@ -249,7 +259,7 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
       const idx = steps.findIndex((s) => s.key === key)
       if (idx >= 0) setStepIndex(idx)
     }
-    const detailsErr = detailsStepError(form)
+    const detailsErr = scopeAddition ? null : detailsStepError(form)
     if (detailsErr) {
       setError(new Error(detailsErr))
       goToStep('details')
@@ -273,6 +283,7 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
       goToStep('dast')
       return
     }
+    if (scopeAddition && !scopeReason.trim()) { setError(new Error('Explain why additional testing is required.')); goToStep('type'); return }
     setBusy(true)
     setError(null)
     try {
@@ -304,24 +315,35 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
           test_credentials: c.test_credentials.trim(),
         })),
       }
-      const saved = editing
-        ? await api.put<QARequestOut>(`/api/qa-requests/${editing.id}`, payload)
-        : await api.post<QARequestOut>('/api/qa-requests', payload)
+      const scopePayload = Object.fromEntries(Object.entries(payload).filter(([key]) =>
+        key === 'request_types' || key === 'checked_items' || key.startsWith('functional_')
+        || key.startsWith('sast_') || key.startsWith('dast_') || key.startsWith('performance_')
+      ))
+      const saved = scopeAddition && editing
+        ? await api.put<QARequestOut>(`/api/qa-requests/${editing.id}/scope-additions`, { ...scopePayload, reason: scopeReason.trim() })
+        : editing
+          ? await api.put<QARequestOut>(`/api/qa-requests/${editing.id}`, payload)
+          : await api.post<QARequestOut>('/api/qa-requests', payload)
       if (files.length > 0) {
         // Uploaded after creation so files can be stored under the request's
         // own request_id folder (backend/app/uploads/<request_id>/...).
         await api.uploadFiles(`/api/qa-requests/${saved.id}/documents`, files)
       }
-      await mapWithConcurrency(Object.entries(checklistEvidence), 2, async ([key, evidence]) => {
+      const uploadEvidence = async ([key, evidence]: [string, File[]]) => {
         if (evidence.length === 0) return
         const [kind, itemIndex] = key.split(':')
-        await api.uploadFiles(
-          `/api/qa-requests/${saved.id}/checklist-evidence/${kind}/${itemIndex}/documents`,
-          evidence,
-        )
-      })
+        await api.uploadFiles(`/api/qa-requests/${saved.id}/checklist-evidence/${kind}/${itemIndex}/documents`, evidence)
+        setChecklistEvidence((current) => { const next = { ...current }; delete next[key]; return next })
+      }
+      if (scopeAddition) {
+        // Finish each upload before allowing a retry; no background upload may outlive a failed save.
+        for (const entry of Object.entries(checklistEvidence)) await uploadEvidence(entry)
+      } else {
+        await mapWithConcurrency(Object.entries(checklistEvidence), 2, uploadEvidence)
+      }
       onCreated(saved)
     } catch (err) {
+      if (scopeAddition) await loadSavedEvidence()
       setError(err)
     } finally {
       setBusy(false)
@@ -334,6 +356,7 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
   // Header "Close" and footer "Cancel" both call this instead of onClose
   // directly now -- see the confirmDiscard state comment above.
   function requestClose() {
+    if (busy) return
     setConfirmDiscard(true)
   }
 
@@ -372,7 +395,7 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
 
   return (
     <Modal
-      title={editing ? `Edit Draft — ${editing.application_name}` : 'Raise QA Request'}
+      title={scopeAddition ? `Add testing types — ${editing?.request_id}` : editing ? `Edit Draft — ${editing.application_name}` : 'Raise QA Request'}
       onClose={requestClose}
       wide
       variant="dialog"
@@ -390,12 +413,16 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
           page too. This wrapper lets the QA Request form get bigger fonts and
           a card-style layout without touching anyone else. */}
       <div className="qa-wizard">
+        {scopeAddition && <div className="scope-context" role="note">
+          <strong>{editing?.application_name} · {editing?.cr_number || editing?.epic_number}</strong>
+          <p>Additional requests will share {editing?.request_id}. Existing requests and approvals are preserved. Save the details and evidence, then raise the added requests from the parent.</p>
+        </div>}
         {/* Only show the gateway lifecycle preview once there's real progress to
             show (i.e. editing something already submitted) -- for a brand-new
             Draft it always sits at step 1 regardless of how far along the form
             wizard below is, so showing both together for a new request was
             confusing (two "stepper" bars stacked on top of each other). */}
-        {editing && <GatewayPreview activeIndex={gatewayStageIndex(editing.status)} />}
+        {editing && !scopeAddition && <GatewayPreview activeIndex={gatewayStageIndex(editing.status)} />}
 
         {/* Wizard step indicator -- split into pages rather than one long
             scrolling form; a dedicated page is added per selected request type
@@ -416,6 +443,7 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
               key={s.key}
               type="button"
               className={`wizard-step-btn ${i === stepIndex ? 'active' : i < stepIndex ? 'done' : ''}`}
+              disabled={busy}
               onClick={() => setStepIndex(i)}
             >
               <span className="step-num">{i < stepIndex ? <IconCheckCircle width={11} height={11} strokeWidth={3} /> : i + 1}</span>
@@ -425,9 +453,15 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
         </div>
 
         <form onSubmit={submit}>
+          <fieldset disabled={busy} className="qa-wizard-inputs">
           {step.key === 'details' && <DetailsStep form={form} set={set} departmentOptions={departmentOptions} departmentLocked={delegatedEditing} />}
           {step.key === 'functional' && <FunctionalStep form={form} set={set} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
-          {step.key === 'type' && <TypeStep form={form} set={set} requestTypes={requestTypes} />}
+          {step.key === 'type' && <>
+            <TypeStep form={form} set={set} requestTypes={availableTypes} />
+            {scopeAddition && <label className="form-field"><span>Reason for additional testing *</span>
+              <textarea required maxLength={10000} rows={3} value={scopeReason} onChange={(event) => setScopeReason(event.target.value)} />
+            </label>}
+          </>}
           {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
           {step.key === 'dast' && <DastStep form={form} set={set} existingDast={existingDast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
           {step.key === 'performance' && <PerformanceStep form={form} set={set} existingPerformance={existingPerformance} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
@@ -435,6 +469,7 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
             <DocumentsStep form={form} set={set} editing={editing} files={files} setFiles={setFiles} />
           )}
 
+          </fieldset>
           {/* Sticky footer -- stays visible at the bottom of the modal while
               scrolling a long step's content (e.g. DAST's target list plus
               its checklist), so Back/Next/Save/Cancel and any validation
@@ -443,24 +478,24 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
             <ErrorText error={error} />
             <div style={{ display: 'flex', gap: 10 }}>
               {!isFirstStep && (
-                <button type="button" className="btn" onClick={() => setStepIndex((i) => i - 1)}>&larr; Back</button>
+                <button type="button" className="btn" disabled={busy} onClick={() => setStepIndex((i) => i - 1)}>&larr; Back</button>
               )}
               {!isLastStep && (
-                <button type="button" className="btn btn-primary" onClick={goNext}>Next &rarr;</button>
+                <button type="button" className="btn btn-primary" disabled={busy} onClick={goNext}>Next &rarr;</button>
               )}
               {isLastStep && (
                 <button type="submit" className="btn btn-primary" disabled={busy}>
-                  {busy ? 'Saving...' : (editing ? 'Save Changes' : 'Save Draft')}
+                  {busy ? 'Saving...' : (scopeAddition ? 'Save additions and evidence' : editing ? 'Save Changes' : 'Save Draft')}
                 </button>
               )}
-              <button type="button" className="btn" onClick={requestClose}>Cancel</button>
+              <button type="button" className="btn" disabled={busy} onClick={requestClose}>Cancel</button>
             </div>
           </div>
         </form>
       </div>
       {confirmDiscard && (
         <ConfirmModal
-          title={editing ? 'Discard these changes?' : 'Discard this QA Request?'}
+          title={scopeAddition ? `Add testing types — ${editing?.request_id}` : editing ? 'Discard these changes?' : 'Discard this QA Request?'}
           message={
             <div style={{ fontSize: 13.5 }}>
               {editing

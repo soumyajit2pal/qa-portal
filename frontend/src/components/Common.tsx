@@ -761,7 +761,8 @@ interface ApprovalDecisionButtonsProps {
   comments: string;
   busy: boolean;
   onApprove: (signedComments: string) => void;
-  onReturn: (comments: string) => void;
+  onReturn: (comments: string, requiredTestingTypes: string[]) => void;
+  additionalTestingOptions?: string[];
   onReject: (comments: string) => void;
   approveLabel?: string;
   returnLabel?: string;
@@ -798,6 +799,7 @@ export function ApprovalDecisionButtons({
   onApprove,
   onReturn,
   onReject,
+  additionalTestingOptions = [],
   approveLabel = "Approve",
   returnLabel = "Return to Requester",
   rejectLabel = "Reject",
@@ -819,6 +821,22 @@ export function ApprovalDecisionButtons({
   // there's nothing underneath for its popover to collide with.
   const [pendingDecision, setPendingDecision] = useState<"approve" | "return" | "reject" | null>(null);
   const [actionNote, setActionNote] = useState(comments);
+  const [requiredTestingTypes, setRequiredTestingTypes] = useState<string[]>([]);
+
+  const [activeTestingTypes, setActiveTestingTypes] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    if (!additionalTestingOptions.length) return;
+    let mounted = true;
+    api.get<{ request_type: string; is_active: boolean }[]>('/api/request-type-config')
+      .then((rows) => { if (mounted) setActiveTestingTypes(new Set(rows.filter((row) => row.is_active).map((row) => row.request_type))); })
+      .catch(() => { if (mounted) setActiveTestingTypes(new Set()); });
+    return () => { mounted = false; };
+  }, [additionalTestingOptions.join(',')]);
+  const availableTestingOptions = additionalTestingOptions.filter((type) => activeTestingTypes?.has(type));
+  const invalidTestingSelection = requiredTestingTypes.some((type) => !availableTestingOptions.includes(type));
+  const decisionBlocked = busy
+    || (pendingDecision === "approve" && (!signature || signBlocked || !extraReady))
+    || (pendingDecision === "return" && invalidTestingSelection);
 
   function handleApproveClick() {
     setActionNote(comments);
@@ -826,14 +844,16 @@ export function ApprovalDecisionButtons({
   }
 
   function openDecision(decision: "return" | "reject") {
+    setRequiredTestingTypes([]);
     setActionNote(comments);
     setPendingDecision(decision);
   }
 
   function confirmDecision() {
+    if (decisionBlocked) return;
     if ((pendingDecision === "return" || pendingDecision === "reject") && !actionNote.trim()) return;
     if (pendingDecision === "approve") onApprove(withSignature(actionNote, signature));
-    if (pendingDecision === "return") onReturn(actionNote.trim());
+    if (pendingDecision === "return") onReturn(actionNote.trim(), requiredTestingTypes);
     if (pendingDecision === "reject") onReject(actionNote.trim());
     setPendingDecision(null);
   }
@@ -881,12 +901,22 @@ export function ApprovalDecisionButtons({
           onClose={() => setPendingDecision(null)}
           variant="dialog"
           preventBackdropClose
+          closeDisabled={busy}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div className={`workflow-confirm-banner ${pendingDecision}`}>
               <span>{pendingDecision === "approve" ? "✓" : pendingDecision === "return" ? "↩" : "×"}</span>
               <div><strong>{pendingDecision === "approve" ? approveLabel : pendingDecision === "return" ? returnLabel : rejectLabel}</strong><small>{pendingDecision === "approve" ? "The request will proceed to its next workflow stage." : pendingDecision === "return" ? "The requester can correct the details and submit again." : "This approval path will be stopped."}</small></div>
             </div>
+            {pendingDecision === "reject" && (
+              <p className="workflow-reject-guidance" role="note">
+                <strong>
+                  {additionalTestingOptions.length > 0
+                    ? "If the requester needs to edit details or add another testing type, choose Return to Requester. Reject closes the current approval path."
+                    : "If the requester needs to edit details, choose Return to Requester. Reject closes the current approval path."}
+                </strong>
+              </p>
+            )}
             {pendingDecision === "approve" && extraControl && <div>
               {extraControlLabel && (
                 <label
@@ -908,6 +938,17 @@ export function ApprovalDecisionButtons({
                 Select someone above before confirming {approveLabel.toLowerCase()}.
               </div>
             )}
+            {pendingDecision === "return" && availableTestingOptions.length > 0 && <fieldset className="scope-options">
+              <legend>Additional testing required (optional)</legend>
+              <p className="muted small">Selected types must be raised under the same QA request before resubmission.</p>
+              {availableTestingOptions.map((type) => <label key={type}>
+                <input type="checkbox" disabled={busy} checked={requiredTestingTypes.includes(type)} onChange={(event) =>
+                  setRequiredTestingTypes((current) => event.target.checked ? [...current, type] : current.filter((value) => value !== type))} /> {type}
+              </label>)}
+            </fieldset>}
+            {pendingDecision === "return" && invalidTestingSelection && <p role="alert" className="workflow-blocked-message">
+              Testing choices have changed. Cancel and reopen Return to Requester to review the available types.
+            </p>}
             <label className="workflow-note-field">
               <span>Remarks <em>{pendingDecision === "approve" ? "Optional" : "Required"}</em></span>
               <textarea
@@ -915,6 +956,7 @@ export function ApprovalDecisionButtons({
                 onChange={(event) => setActionNote(event.target.value)}
                 rows={4}
                 required={pendingDecision !== "approve"}
+                disabled={busy}
                 placeholder={pendingDecision === "approve" ? "Add context for this decision, or continue without remarks…" : `Explain why this request is being ${pendingDecision === "return" ? "returned" : "rejected"}…`}
               />
               <small>{pendingDecision === "approve" ? "If entered, the remarks will be saved in workflow history." : "Remarks are required and will be saved in workflow history."}</small>
@@ -924,13 +966,14 @@ export function ApprovalDecisionButtons({
                 type="button"
                 className="btn btn-sm"
                 onClick={() => setPendingDecision(null)}
+                disabled={busy}
               >
                 Cancel
               </button>
               <button
                 type="button"
                 className={`btn btn-sm ${pendingDecision === "reject" ? "btn-danger" : pendingDecision === "approve" ? "btn-success" : "btn-primary"}`}
-                disabled={(pendingDecision === "approve" && !extraReady) || (pendingDecision !== "approve" && !actionNote.trim())}
+                disabled={decisionBlocked || (pendingDecision !== "approve" && !actionNote.trim())}
                 onClick={confirmDecision}
               >
                 Confirm {pendingDecision === "approve" ? approveLabel : pendingDecision === "return" ? returnLabel : rejectLabel}

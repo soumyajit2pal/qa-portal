@@ -105,7 +105,7 @@ app = FastAPI(
     title="QualityOps API",
     description="Backend for the Bank of Maharashtra QualityOps Enterprise "
                 "Quality Operations Platform.",
-    version="1.0.3",
+    version="1.0.4",
     docs_url=None if settings.app_env in {"uat", "prod", "production"} else "/docs",
     redoc_url=None if settings.app_env in {"uat", "prod", "production"} else "/redoc",
     openapi_url=None if settings.app_env in {"uat", "prod", "production"} else "/openapi.json",

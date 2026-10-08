@@ -1,3 +1,4 @@
+import TestingScopeNotice, { additionalTestingOptions } from '../../components/TestingScopeNotice'
 import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
@@ -505,6 +506,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
         <button type="button" className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>Activity</button>
       </div>
 
+      <TestingScopeNotice missing={req.missing_testing_types} parentId={req.qa_request_id} />
       {tab === 'overview' && (
         <>
           <DetailSection title="Status">
@@ -609,7 +611,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
               onChanged={async (updated) => { onChanged(updated); await loadExtras() }}
             />
             {canSubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('submit')}>Submit for SM Approval</button>}
-            {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy || pendingMandatoryEvidence.length > 0} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
+            {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy || pendingMandatoryEvidence.length > 0 || !!req.missing_testing_types?.length} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
             {canResubmit && pendingMandatoryEvidence.length > 0 && (
               <p className="muted small" style={{ color: 'var(--danger, #c0392b)', width: '100%' }}>
                 {pendingMandatoryEvidence.length} mandatory Pre-Testing Readiness checklist item(s) have no attached evidence — see Edit Details.
@@ -617,6 +619,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
             )}
             {canSMDecide && (
               <ApprovalDecisionButtons
+                  additionalTestingOptions={additionalTestingOptions(req.request_types, req.qa_request_id)}
                 userName={user?.full_name}
                 comments={comments}
                 busy={busy}
@@ -629,12 +632,13 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
                     : undefined
                 }
                 onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                onReturn={(actionNote, requiredTestingTypes) => act('sm-decision', { decision: 'Returned', comments: actionNote, required_testing_types: requiredTestingTypes })}
                 onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
             {canDeptHeadDecide && (
               <ApprovalDecisionButtons
+                  additionalTestingOptions={additionalTestingOptions(req.request_types, req.qa_request_id)}
                 userName={user?.full_name}
                 comments={comments}
                 busy={busy}
@@ -650,7 +654,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
                 extraControl={<RoleGroupLink role="QA_LEAD" label="QA Lead" />}
                 extraReady
                 onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed })}
-                onReturn={(actionNote) => act('department-head-decision', { decision: 'Returned', comments: actionNote })}
+                onReturn={(actionNote, requiredTestingTypes) => act('department-head-decision', { decision: 'Returned', comments: actionNote, required_testing_types: requiredTestingTypes })}
                 onReject={(actionNote) => act('department-head-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
