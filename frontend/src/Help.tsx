@@ -665,7 +665,8 @@ export default function Help() {
                 <table className="help-role-table">
                   <thead><tr><th>Work state</th><th>Points</th><th>Examples</th></tr></thead>
                   <tbody>
-                    <tr><td><strong>Fully active</strong></td><td>1.00</td><td>Functional test design/execution, Performance setup/script/load execution, Security scanning.</td></tr>
+                    <tr><td><strong>Execution in Progress</strong></td><td>2.50</td><td>Functional execution.</td></tr>
+                    <tr><td><strong>Other active work</strong></td><td>1.00</td><td>Functional test design, Performance setup/script/load execution, Security scanning.</td></tr>
                     <tr><td><strong>Configuration, validation, baseline, or retest</strong></td><td>0.75</td><td>Performance baseline/retest; Security configuration, validation, or rescan; Functional retesting.</td></tr>
                     <tr><td><strong>Queued or remediation</strong></td><td>0.50</td><td>Tester assigned, defect raised, or Security remediation.</td></tr>
                     <tr><td><strong>Analysis</strong></td><td>0.25</td><td>Performance result analysis.</td></tr>
@@ -675,10 +676,10 @@ export default function Help() {
                 </table>
               </div>
               <div className="help-rule-grid">
-                <article><strong>Example 1: single tester</strong><p>Four active 1-point assignments = 4 points. 4 ÷ 8 × 100 = 50% occupancy.</p></article>
-                <article><strong>Example 2: mixed stages</strong><p>Execution 1.00 + retest 0.75 + analysis 0.25 + remediation 0.50 = 2.50 points, or 31% after rounding.</p></article>
-                <article><strong>Example 3: shared request</strong><p>A 1-point Functional request shared by two testers contributes 0.50 point to each tester.</p></article>
-                <article><strong>Example 4: overload</strong><p>Nine fully active assignments = 9 points. 9 ÷ 8 × 100 = 113%, displayed as Overloaded.</p></article>
+                <article><strong>Example 1: single tester</strong><p>One Functional request in Execution in Progress = 2.50 points. 2.50 ÷ 8 × 100 = 31% occupancy after rounding.</p></article>
+                <article><strong>Example 2: mixed stages</strong><p>Functional execution 2.50 + retest 0.75 + analysis 0.25 + remediation 0.50 = 4.00 points, or 50% occupancy.</p></article>
+                <article><strong>Example 3: shared request</strong><p>A Functional request in Execution in Progress shared by two testers contributes 1.25 points to each tester, or 16% occupancy after rounding.</p></article>
+                <article><strong>Example 4: overload</strong><p>Four Functional requests in Execution in Progress = 10 points. 10 ÷ 8 × 100 = 125%, displayed as Overloaded.</p></article>
               </div>
               <p><a className="btn btn-sm" href="/docs/qa-tester-occupancy-guide.pdf" target="_blank" rel="noreferrer">Open detailed occupancy calculation guide</a></p>
               <h3 className="help-subheading">Approval Workflow Log search</h3>

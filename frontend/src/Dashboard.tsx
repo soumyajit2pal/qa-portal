@@ -1779,7 +1779,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
       </div>
       <div className="tester-capacity-note">
         <div><strong>How occupancy is calculated</strong>
-        <span>{workload.capacity_points} points equal 100%. Active execution/scanning = 1 point; configuration/retest/baseline = 0.75; queued or remediation work = 0.5; result analysis = 0.25; waiting for fix = 0; and near-complete work = 0.05–0.15. Shared Functional or Performance requests are divided between assigned testers.</span></div>
+        <span>{workload.capacity_points} points equal 100%. Functional Execution in Progress = 2.5 points; test design, Performance setup/script/load execution, and Security scanning = 1 point; configuration/retest/baseline = 0.75; queued or remediation work = 0.5; result analysis = 0.25; waiting for fix = 0; and near-complete work = 0.05–0.15. Shared Functional or Performance requests are divided between assigned testers.</span></div>
         <a className="btn btn-sm" href="/docs/qa-tester-occupancy-guide.pdf" target="_blank" rel="noreferrer">View calculation guide</a>
       </div>
       <Card>

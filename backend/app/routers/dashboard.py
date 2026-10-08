@@ -868,15 +868,15 @@ TESTER_WORKLOAD_STATUSES = [
     QAStatus.QA_SIGNED_OFF, QAStatus.REQUESTER_VERIFICATION,
 ]
 
-# One tester carrying three fully-active concurrent assignments is considered
-# 100% occupied. Lighter lifecycle stages consume a fraction of a slot. This
+# Eight weighted assignment points equal 100% occupancy. Each workflow stage
+# contributes its configured weight, divided across shared testers. This
 # makes the dashboard an explainable capacity aid for QA Leads instead of a
 # relative "busiest person = 100%" chart whose meaning changes every day.
 TESTER_CAPACITY_POINTS = 8.0
 FUNCTIONAL_TESTER_LOAD = {
     QAStatus.TESTER_ASSIGNED: 0.50,
     QAStatus.TEST_DESIGN: 1.00,
-    QAStatus.EXECUTION_IN_PROGRESS: 1.00,
+    QAStatus.EXECUTION_IN_PROGRESS: 2.50,
     QAStatus.DEFECT_RAISED: 0.50,
     QAStatus.WAITING_FOR_FIX: 0.00,
     QAStatus.RETESTING: 0.75,
