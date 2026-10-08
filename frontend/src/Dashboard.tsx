@@ -1520,11 +1520,14 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
     // entered; do not accidentally issue an unbounded all-time query when
     // only one of the two mandatory dates is present.
     if (range.preset === 'custom' && (!range.from || !range.to)) return
+    let current = true
     setWorkload(null); setError(null)
     setContributionDetail(null)
-    api.get<TesterWorkloadOut>(`/api/dashboard/qa-tester-workload${rangeQuery(range)}`)
-      .then(setWorkload).catch(setError)
-  }, [range])
+    api.get<TesterWorkloadOut>(`/api/dashboard/qa-tester-workload${occupancyTrendQuery}`)
+      .then(result => { if (current) setWorkload(result) })
+      .catch(err => { if (current) setError(err) })
+    return () => { current = false }
+  }, [range, occupancyTrendQuery])
 
   if (range.preset === 'custom' && (!range.from || !range.to)) {
     return <p className="muted">Select both Dashboard custom dates to load QA tester reporting data.</p>

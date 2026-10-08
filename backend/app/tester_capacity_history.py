@@ -1,9 +1,10 @@
 """Recorded occupancy, integrating request-load intervals over IST calendar days."""
 import datetime
 from collections import defaultdict
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import String, case, cast, func, insert, literal, or_, select
+from sqlalchemy import String, case, cast, func, insert, literal, literal_column, or_, select
 
 from . import models
 from .tester_capacity import (
@@ -27,18 +28,29 @@ def wall_time(value):
     return models.as_aware(value).astimezone(ZoneInfo('Asia/Kolkata')).replace(tzinfo=None)
 
 
-def seed_tracking(connection, *, observed_at=None, check_existing=True):
+def reported_percent(value):
+    # Interval arithmetic can turn an exact 31.25% into 31.250000000000004%.
+    # Remove sub-display noise before rounding so averages and peaks agree.
+    return round(round(value, 8), 1)
+
+
+def seed_tracking(connection, *, observed_at=None, check_existing=True, database_clock=False):
     """Migration baseline: today's state is recorded only from this instant."""
     table = models.TesterCapacityEvent.__table__
     if check_existing and connection.execute(
         select(table.c.id).where(table.c.tracking_key == TRACKING_KEY),
     ).scalar() is not None:
         return
-    observed_at = wall_time(observed_at or models.now())
+    # A DBA may execute an offline migration script days after generation.
+    # Its baseline must start when executed, rather than at generation time.
+    observed_at = (literal_column("CAST(SYSTIMESTAMP AT TIME ZONE 'Asia/Kolkata' AS TIMESTAMP)")
+                   if database_clock else literal(wall_time(observed_at or models.now())))
     connection.execute(insert(table).inline().values(
         tracking_key=TRACKING_KEY, entity_type='TRACKING_STARTED', entity_id=0,
         load_points=0, capacity_points=TESTER_CAPACITY_POINTS, observed_at=observed_at,
     ))
+    baseline_at = (select(table.c.observed_at).where(table.c.tracking_key == TRACKING_KEY).scalar_subquery()
+                   if database_clock else observed_at)
     for model, entity_type, assignment_field, loads in sources():
         source = model.__table__
         connection.execute(insert(table).from_select(
@@ -47,7 +59,7 @@ def seed_tracking(connection, *, observed_at=None, check_existing=True):
             select(literal(entity_type), source.c.id, source.c.qa_request_id,
                    source.c.status, cast(source.c[assignment_field], String(1000)),
                    case(loads, value=source.c.status, else_=0.0),
-                   literal(TESTER_CAPACITY_POINTS), literal(observed_at)),
+                   literal(TESTER_CAPACITY_POINTS), baseline_at),
         ))
 
 
@@ -122,16 +134,16 @@ def daily_trend(events, testers, start, end, tracking_started_at, observed_until
             weighted, seconds, peak = totals[tester.id].get(day, [0, 0, 0])
             points.append({
                 'date': day.isoformat(),
-                'average_occupancy': round(weighted / seconds, 1) if seconds else None,
-                'peak_occupancy': round(peak, 1) if seconds else None,
+                'average_occupancy': reported_percent(weighted / seconds) if seconds else None,
+                'peak_occupancy': reported_percent(peak) if seconds else None,
                 'recorded_hours': round(seconds / 3600, 2),
             })
         recorded = list(totals[tester.id].values())
         seconds = sum(item[1] for item in recorded)
         result.append({
             'tester_id': tester.id, 'tester_name': tester.full_name, 'points': points,
-            'average_occupancy': round(sum(item[0] for item in recorded) / seconds, 1) if seconds else None,
-            'peak_occupancy': round(max((item[2] for item in recorded), default=0), 1) if seconds else None,
+            'average_occupancy': reported_percent(sum(item[0] for item in recorded) / seconds) if seconds else None,
+            'peak_occupancy': reported_percent(max((item[2] for item in recorded), default=0)) if seconds else None,
             'high_occupancy_days': sum(1 for item in points if item['average_occupancy'] is not None and item['average_occupancy'] >= 80),
         })
     return result
@@ -157,6 +169,20 @@ def trend(db, testers, visible_requests, start, end, *, observed_until=None):
             event.observed_at <= min(end, observed_until),
             or_(event.observed_at >= start, event.id.in_(last_ids)),
         ).all()
+    # Today's roster must not erase recorded work from a tester who has since
+    # left the workspace, changed roles, or been deactivated. Resolve names
+    # only from assignees on the already-authorized observations.
+    testers = list(testers)
+    current_ids = {tester.id for tester in testers}
+    recorded_ids = {user_id for observation in events
+                    for user_id in _assigned_user_ids(observation.assignee_ids)}
+    missing_ids = sorted(recorded_ids - current_ids)
+    for offset in range(0, len(missing_ids), 900):
+        batch = missing_ids[offset:offset + 900]
+        names = dict(db.query(models.User.id, models.User.full_name).filter(models.User.id.in_(batch)).all())
+        testers.extend(SimpleNamespace(id=user_id, full_name=names.get(user_id) or f'User #{user_id}')
+                       for user_id in batch)
+    testers.sort(key=lambda tester: (tester.full_name.casefold(), tester.id))
     return {
         'tracking_started_at': models.as_aware(tracking_started_at).isoformat() if tracking_started_at else None,
         'observed_until': models.as_aware(observed_until).isoformat(),

@@ -1276,6 +1276,9 @@ def qa_tester_occupancy_trend(
     from ..tester_capacity_history import trend, wall_time
     end_default = wall_time(models.now())
     start, end = _date_bounds(date_from, date_to)
+    if date_to and len(date_to) == 10:
+        # ISO dates denote a whole IST calendar day, not just midnight.
+        end += datetime.timedelta(days=1) - datetime.timedelta(microseconds=1)
     end = end or end_default
     start = start or end - datetime.timedelta(days=30)
     if start > end:

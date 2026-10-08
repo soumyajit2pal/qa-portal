@@ -597,10 +597,14 @@ These figures estimate assigned workload; they are not timesheet hours.
 Run `alembic upgrade head` (migration `b9e5d7f3a102`) before starting the updated
 backend workers, then deploy the frontend. The migration creates an append-only
 request-load event table and records the existing request state at migration time.
+Offline Oracle scripts obtain the baseline timestamp when executed, so generating
+deployment SQL earlier does not backdate the start of reliable tracking.
 Subsequent Functional, Performance, SAST, and DAST state/assignment changes are
 recorded in the source transaction, including closures, reassignments, and deletes.
 Historical loads and capacity weights are retained with each observation. Current
 request visibility scopes every history query; reading a trend performs no writes.
+Previously assigned testers remain in the historical report after deactivation,
+role changes, or leaving the workspace, using only assignments on visible requests.
 
 The migration does not backdate today's state: dates before reliable tracking
 began are unavailable. Partial days use only recorded time, and future dates are

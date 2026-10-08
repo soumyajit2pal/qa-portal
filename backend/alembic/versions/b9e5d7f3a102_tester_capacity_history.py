@@ -33,7 +33,7 @@ def upgrade():
         if not any(index['name'].lower() == name for index in indexes):
             op.create_index(name, 'qap_tester_capacity_events', columns)
     from app.tester_capacity_history import seed_tracking
-    seed_tracking(op.get_bind(), check_existing=not offline)
+    seed_tracking(op.get_bind(), check_existing=not offline, database_clock=offline)
 
 
 def downgrade():
