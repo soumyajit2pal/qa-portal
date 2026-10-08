@@ -1056,8 +1056,8 @@ class FunctionalListOut(ORMModel):
     """PAG-005 lightweight list schema -- exactly the fields
     modules/functional/Functional.tsx's list table renders/filters on, plus
     application_master_status (drives the "Pending With: Application Owner"
-    override) and department (server-side scoping/filter only, not directly
-    rendered as its own column). See FunctionalOut below for the full
+    override) and department (Department Scope column and server-side
+    scoping/filter). See FunctionalOut below for the full
     detail-view shape fetched on open (PAG-006)."""
     id: int
     request_id: str
@@ -2099,6 +2099,7 @@ class CommentCreate(BaseModel):
 
 # ---------------- Defect Management ----------------
 class DefectCreate(BaseModel):
+    cc_user_ids: List[int] = Field(default_factory=list, max_length=200)
     application_name: Optional[str] = Field(default=None, max_length=150)
     department: Optional[str] = Field(default=None, max_length=150)
     title: str
@@ -2148,6 +2149,7 @@ class DefectExecutionLinkOut(ORMModel):
 
 
 class DefectUpdate(BaseModel):
+    cc_user_ids: Optional[List[int]] = Field(default=None, max_length=200)
     title: Optional[str] = None
     description: Optional[str] = None
     module_feature: Optional[str] = None
@@ -2170,6 +2172,10 @@ class DefectUpdate(BaseModel):
     _limit_rich_text = field_validator(
         "description", "steps_to_reproduce", "expected_result", "actual_result", "remarks"
     )(_limited_rich_text)
+
+
+class DefectCCUpdate(BaseModel):
+    cc_user_ids: List[int] = Field(max_length=200)
 
 
 class DefectTransition(BaseModel):
@@ -2217,6 +2223,8 @@ class DefectReassign(BaseModel):
 
 
 class DefectOut(ORMModel):
+    cc_user_ids: List[int] = []
+    cc_users: List[UserOption] = []
     workflow: Optional[dict] = None
     workflow_state: dict = {}
     workflow_revision: int = 0

@@ -3233,33 +3233,93 @@ tbody tr:hover { background: #f8f9fc; }
 .tester-pending-count { color: #a15c00; }
 .tester-pending-count.is-qa-lead { color: #b42318; }
 .tester-contribution-charts { margin: 0 0 12px; }
-.tester-occupancy-trend { margin-bottom: 12px; }
-.tester-trend-toolbar, .tester-trend-day { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-.tester-trend-toolbar h3 { margin: 0 0 4px; }
-.tester-trend-toolbar p, .tester-trend-note { color: var(--muted); font-size: 12px; line-height: 1.5; }
-.tester-trend-toolbar label, .tester-trend-day label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.tester-occupancy-trend select { padding: 7px 10px; max-width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
-.tester-trend-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
-.tester-trend-metrics > div { padding: 12px; border-radius: 8px; background: #f5f9fc; }
-.tester-trend-metrics small { display: block; color: var(--muted); }
-.tester-trend-metrics strong { display: block; margin-top: 6px; font-size: 20px; }
-.tester-trend-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; }
+.tester-occupancy-trend { --trend-blue: #2563eb; --trend-light: #d3eee4; --trend-balanced: #b4d0f8; --trend-high: #f6d69b; --trend-overloaded: #f0b3b8; }
+.tester-trend-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.tester-trend-toolbar h3 { margin: 0 0 5px; font-size: 18px; color: #25374b; }
+.tester-trend-toolbar p { margin: 0; color: var(--muted); font-size: 12px; }
+.tester-trend-toolbar label { display: flex; align-items: center; gap: 10px; color: #526579; font-size: 12px; }
+.tester-occupancy-trend select { min-height: 36px; padding: 7px 10px; max-width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); font: inherit; }
+.tester-trend-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 20px 0 16px; border: 1px solid #e3eaf1; border-radius: 10px; background: #f8fafc; overflow: hidden; }
+.tester-trend-metrics > div { min-width: 0; padding: 14px 18px; border-right: 1px solid #e3eaf1; }
+.tester-trend-metrics > div:last-child { border: 0; }
+.tester-trend-metrics small { display: block; color: #526579; font-size: 12px; }
+.tester-trend-metrics strong { display: block; margin: 6px 0 3px; color: #25374b; font-size: 26px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.tester-trend-metrics > div:first-child strong { color: var(--trend-blue); }
+.tester-trend-metrics em { color: #64748b; font-size: 13px; font-style: normal; font-weight: 500; }
+.tester-trend-metrics > div > span { color: #758396; font-size: 11px; }
+.tester-trend-coverage { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; padding: 10px 13px; border: 1px solid #eadcbf; border-radius: 8px; background: #fffaf1; }
+.tester-trend-coverage-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #b98320; }
+.tester-trend-coverage > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 12px; font-size: 11px; }
+.tester-trend-coverage strong { color: #795819; font-size: 12px; }
+.tester-trend-coverage > div > span { color: #857557; }
+.tester-trend-body { display: grid; grid-template-columns: minmax(0, 1fr) 255px; gap: 18px; align-items: stretch; }
+.tester-trend-plot { min-width: 0; padding: 14px 12px 8px; border: 1px solid #e3eaf1; border-radius: 10px; }
+.tester-trend-plot-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 0 4px; }
+.tester-trend-plot-head > strong { color: #34475c; font-size: 13px; }
+.tester-trend-legend { display: flex; flex-wrap: wrap; gap: 14px; color: #63758a; font-size: 11px; }
 .tester-trend-legend span { display: flex; align-items: center; gap: 5px; }
-.tester-trend-legend i { width: 16px; height: 3px; }
-.tester-trend-legend .average { background: #2563eb; }
-.tester-trend-legend .peak { background: #b77912; }
-.tester-occupancy-trend svg { display: block; width: 100%; margin: 10px 0; overflow: visible; }
-.tester-occupancy-trend svg text { font-size: 12px; fill: #617486; }
-.tester-trend-grid { stroke: #e4ebf1; stroke-width: 1; }
-.tester-trend-capacity { stroke: #718096; stroke-dasharray: 5 5; }
-.tester-trend-average, .tester-trend-peak { fill: none; stroke-width: 2.5; }
-.tester-trend-average { stroke: #2563eb; }
-.tester-trend-peak { stroke: #b77912; stroke-dasharray: 6 3; }
-.tester-trend-average-dot { fill: #2563eb; cursor: pointer; }
-.tester-trend-peak-dot { fill: #b77912; }
-.tester-trend-day { justify-content: flex-start; font-size: 12px; }
-.tester-trend-empty { padding: 30px 14px; background: #f5f9fc; border-radius: 8px; }
-@media (max-width: 600px) { .tester-trend-metrics { grid-template-columns: 1fr; } }
+.tester-trend-legend i { width: 18px; height: 3px; }
+.tester-trend-legend .average { background: var(--trend-blue); }
+.tester-trend-legend .peak { border-top: 2px dashed #b77912; }
+.tester-trend-plot svg { display: block; width: 100%; height: 250px; margin-top: 6px; overflow: visible; }
+.tester-trend-plot svg text { font-size: 11px; fill: #617486; }
+.tester-trend-plot svg line, .tester-trend-plot svg path { vector-effect: non-scaling-stroke; }
+.tester-trend-band-normal { fill: #f5faf8; }
+.tester-trend-band-balanced { fill: #f2f6fd; }
+.tester-trend-band-high { fill: #fff8e9; }
+.tester-trend-band-overloaded { fill: #fff1f2; }
+.tester-trend-band-unknown { fill: #edf1f5; }
+.tester-trend-grid { stroke: #e2e9ee; stroke-width: 1; }
+.tester-trend-capacity { stroke: #a98a51; stroke-width: 1; stroke-dasharray: 5 5; }
+.tester-trend-selection { stroke: #a6b9db; stroke-width: 1; stroke-dasharray: 3 4; }
+.tester-trend-average, .tester-trend-peak { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.tester-trend-average { stroke: var(--trend-blue); }
+.tester-trend-peak { stroke: #b77912; stroke-width: 1.5; stroke-dasharray: 5 4; }
+.tester-trend-average-dot { fill: var(--trend-blue); stroke: #fff; stroke-width: 1.5; cursor: pointer; }
+.tester-trend-peak-dot { fill: #b77912; cursor: pointer; }
+.tester-trend-plot-caption { margin: 5px 4px 2px; color: #718096; font-size: 10px; }
+.tester-trend-plot-caption span { margin: 0 5px; }
+.tester-trend-day { min-width: 0; padding: 16px; border: 1px solid #dce6f2; border-radius: 10px; background: #f5f8fd; }
+.tester-trend-day label { display: grid; gap: 7px; color: #63758a; font-size: 11px; }
+.tester-trend-day label select { width: 100%; font-size: 12px; }
+.tester-trend-day-value { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 20px 0 0; }
+.tester-trend-day-value > strong { color: #25374b; font-size: 36px; line-height: 1; font-variant-numeric: tabular-nums; }
+.tester-trend-day-value strong small { margin-left: 2px; font-size: 19px; color: #67798f; }
+.tester-trend-status { padding: 4px 8px; border-radius: 99px; font-size: 10px; font-weight: 700; }
+.tester-trend-status.light { background: #e0f3eb; color: #207553; }
+.tester-trend-status.balanced { background: #e0ecfd; color: #2d5d9c; }
+.tester-trend-status.high { background: #fff0d0; color: #8f6314; }
+.tester-trend-status.overloaded { background: #fbe4e6; color: #a33140; }
+.tester-trend-day-caption { display: block; margin-top: 6px; color: #718096; font-size: 11px; }
+.tester-trend-day-meter { height: 6px; margin: 13px 0 17px; border-radius: 99px; background: #e2e8f0; overflow: hidden; }
+.tester-trend-day-meter i { display: block; height: 100%; border-radius: inherit; }
+.tester-trend-day-meter .light { background: #2e9c77; }.tester-trend-day-meter .balanced { background: #3b82d6; }.tester-trend-day-meter .high { background: #d69e36; }.tester-trend-day-meter .overloaded { background: #c95868; }
+.tester-trend-day dl { display: grid; gap: 10px; margin: 0; font-size: 11px; }
+.tester-trend-day dl > div { display: flex; justify-content: space-between; gap: 8px; }
+.tester-trend-day dt { color: #718096; }.tester-trend-day dd { margin: 0; color: #34475c; font-weight: 600; text-align: right; }
+.tester-trend-partial { margin: 13px 0 0; color: #8b702f; font-size: 10px; line-height: 1.5; }
+.tester-trend-day-unknown { padding-top: 28px; color: #62758a; font-size: 12px; line-height: 1.6; }
+.tester-trend-empty { min-height: 238px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; text-align: center; }
+.tester-trend-empty-mark { display: grid; place-items: center; width: 42px; height: 42px; margin-bottom: 13px; border-radius: 12px; color: #7e92ad; background: #edf2f7; font-size: 25px; }
+.tester-trend-empty > strong { color: #3b4e65; font-size: 14px; }
+.tester-trend-empty > p { max-width: 400px; margin: 8px 0 14px; color: #748399; font-size: 12px; line-height: 1.6; }
+.tester-trend-empty > span { padding: 4px 9px; border-radius: 99px; background: #f1f5f9; color: #718096; font-size: 10px; }
+.tester-trend-calendar { margin-top: 18px; padding: 14px 0 0; border-top: 1px solid #e6edf3; }
+.tester-trend-calendar-head, .tester-trend-calendar-dates { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.tester-trend-calendar-head strong { color: #34475c; font-size: 12px; }.tester-trend-calendar-head span { color: #7b8a9c; font-size: 10px; }
+.tester-trend-days-scroll { overflow-x: auto; padding: 4px 2px; margin: 8px -2px 0; }
+.tester-trend-days { display: grid; gap: 4px; }
+.tester-trend-day-cell { height: 23px; min-width: 12px; padding: 0; border: 1px solid transparent; border-radius: 4px; cursor: pointer; }
+.tester-trend-day-cell.light, .tester-trend-band-legend .light { background: var(--trend-light); }.tester-trend-day-cell.balanced, .tester-trend-band-legend .balanced { background: var(--trend-balanced); }.tester-trend-day-cell.high, .tester-trend-band-legend .high { background: var(--trend-high); }.tester-trend-day-cell.overloaded, .tester-trend-band-legend .overloaded { background: var(--trend-overloaded); }
+.tester-trend-day-cell.unknown, .tester-trend-band-legend .unknown { background: repeating-linear-gradient(135deg, #e9edf2 0, #e9edf2 3px, #f5f7fa 3px, #f5f7fa 6px); border: 1px solid #e2e7ee; }
+.tester-trend-day-cell[aria-pressed="true"] { outline: 2px solid #375d95; outline-offset: 1px; }.tester-trend-day-cell:hover { border-color: #375d95; }
+.tester-trend-calendar-dates { margin-top: 4px; color: #7b8a9c; font-size: 10px; }
+.tester-trend-band-legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 7px 18px; margin-top: 10px; color: #6d7e91; font-size: 10px; }
+.tester-trend-band-legend > span { display: flex; align-items: center; gap: 5px; }.tester-trend-band-legend i { width: 10px; height: 10px; border-radius: 2px; }
+.tester-trend-method { margin-top: 15px; padding-top: 11px; border-top: 1px solid #e6edf3; color: #748399; font-size: 11px; line-height: 1.6; }
+.tester-trend-method summary { width: fit-content; color: #526579; cursor: pointer; font-weight: 600; }.tester-trend-method p { margin: 8px 0 0; }
+@media (max-width: 900px) { .tester-trend-body { grid-template-columns: minmax(0, 1fr) 220px; gap: 12px; }.tester-trend-metrics > div { padding: 12px; } }
+@media (max-width: 700px) { .tester-trend-body { grid-template-columns: 1fr; }.tester-trend-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }.tester-trend-metrics > div:nth-child(2) { border-right: 0; }.tester-trend-metrics > div:nth-child(-n+2) { border-bottom: 1px solid #e3eaf1; }.tester-trend-plot svg { height: 220px; }.tester-trend-day-value { margin-top: 14px; }.tester-trend-empty { min-height: 190px; }.tester-trend-toolbar label { width: 100%; justify-content: space-between; }.tester-trend-toolbar select { min-width: 160px; }.tester-trend-band-legend { justify-content: flex-start; } }
 .tester-contribution-charts .card { min-height: 220px; }
 .tester-activity-selector { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--text); font-size: 12px; font-weight: 600; }
 .tester-activity-selector select { max-width: 100%; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; font: inherit; }

@@ -587,6 +587,24 @@ and lease reads, so use application hit counters when judging response reuse. No
 credentials or task payloads are exposed. Baseline endpoint p95 latency and Oracle pool/SQL load
 alongside these metrics before increasing memory, pool limits or TTLs. Liveness does not issue INFO.
 
+### Defect CC followers
+
+Defects have an optional searchable CC multi-select covering active, selectable
+members of the defect's exact workspace across all departments and roles. CC can
+be set when creating or editing a New defect, and managed through **Manage CC**
+throughout the lifecycle by the reporter, responsible users, and authorized QA staff.
+CC changes are audited, retained on reopen, and included in the defect register export.
+
+CC members can read and comment on the followed defect within their workspace;
+they receive informational emails for creation, workflow changes, field edits,
+comments, and CC changes when SMTP is enabled. This does not confer assignment
+or approval authority. Membership and account activity are rechecked for
+notifications, and overlap with the working owner does not send a second email.
+
+Apply `alembic upgrade head` (migration `c1f7a9b4d203`) before starting the updated
+backend and deploying the frontend. The normalized CC table starts empty for
+existing defects; no manual record edits or reimports are needed.
+
 ### QA tester occupancy history
 
 The Capacity & Occupancy dashboard includes a per-tester trend for the selected

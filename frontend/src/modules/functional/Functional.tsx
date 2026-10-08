@@ -2284,6 +2284,12 @@ export default function Functional() {
               render: (r) => r.application_name || "—",
             },
             {
+              key: "department",
+              header: "Department Scope",
+              render: (r) => r.department || "—",
+              filterValue: (r) => r.department || "",
+            },
+            {
               key: "cr_number",
               header: "CR Number/EPIC Number",
               render: (r) => r.cr_number || r.epic_number || "—",

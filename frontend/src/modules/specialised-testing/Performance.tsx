@@ -914,6 +914,7 @@ export default function Performance() {
             render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
           },
           { key: 'application_name', header: 'Application' },
+          { key: 'department', header: 'Department Scope', render: (r) => r.department || '—', filterValue: (r) => r.department || '' },
           { key: 'change_description', header: 'Change Description', render: (r) => (
             <span className="truncate-cell" title={r.change_description || ''}>{r.change_description || '—'}</span>
           ), filterValue: (r) => r.change_description || '' },

@@ -10,7 +10,7 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import documents as doc_store
-from .. import models, schemas, pagination
+from .. import models, schemas, pagination, defect_cc
 from ..constants import (
     ENVIRONMENTS, Role, DEFECT_REASSIGNABLE_STATUSES,
 )
@@ -136,10 +136,16 @@ def _scoped_defects(db: Session, current_user: models.User):
         ))
     scope = dashboard_department_scope(current_user)
     if scope is not None:
+        cc_memberships = db.query(models.QAWorkspaceMember.workspace_id).filter(
+            models.QAWorkspaceMember.user_id == current_user.id,
+            models.QAWorkspaceMember.is_active == True,
+        )
         q = q.filter(or_(
             func.coalesce(models.Defect.department, models.QARequest.department).in_(scope),
             and_(models.Defect.assignee_id == current_user.id, models.Defect.assigned_team.in_(scope)),
             models.TestCycle.project_id.in_(project_ids or []),
+            and_(models.Defect.cc_entries.any(models.DefectCCUser.user_id == current_user.id),
+                 func.coalesce(models.Defect.qa_workspace_id, models.QARequest.qa_workspace_id).in_(cc_memberships)),
         ))
     return q
 
@@ -645,7 +651,7 @@ def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = 
 @router.get("/export-xlsx")
 def export_defects(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Export the governed defect register with workflow and traceability fields."""
-    defects = _scoped_defects(db, current_user).order_by(models.Defect.created_at.desc()).all()
+    defects = _scoped_defects(db, current_user).options(selectinload(models.Defect.cc_entries)).order_by(models.Defect.created_at.desc()).all()
     status_counts = Counter(item.status for item in defects)
     workbook = new_workbook()
     add_summary_sheet(
@@ -665,7 +671,7 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
         "Project", "Module", "Status", "Severity", "Priority", "Environment", "Assignee",
         "Reporter", "Created", "Target Release", "Expected Resolution", "Ageing (Days)",
         "Reopen Count", "External Defect ID", "Resolution Type", "Resolution Summary",
-        "Workflow Version", "Production Impact", "Affected Environments", "Verified Environments / Evidence Builds",
+        "Workflow Version", "Production Impact", "Affected Environments", "Verified Environments / Evidence Builds", "CC",
     ]
     today = models.now().date()
     rows = []
@@ -681,6 +687,7 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
             item.workflow_state.get("production_impact", "Not recorded"),
             ", ".join(sorted({e["environment"] for e in item.workflow_state.get("occurrences", [])})),
             ", ".join(f"{v['environment']}: {v['build']}" for v in item.verified_builds),
+            ", ".join(user.full_name for user in item.cc_users),
         ])
     add_table_sheet(
         workbook, "Defects", "Defect Register", headers, rows,
@@ -801,6 +808,7 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
         external_defect_id=payload.external_defect_id, remarks=payload.remarks, labels=payload.labels,
     )
     workspace = db.get(models.QAWorkspace, workspace_id)
+    defect_cc.replace(db, obj, payload.cc_user_ids, current_user)
     obj.workflow_json = json.dumps(policy(workspace.defect_workflow_json if workspace else None))
     obj.workflow_state_json = json.dumps({"production_impact": "Affected" if obj.environment == "Production" else "Unknown", "iteration": 0, "history": [], "occurrences": [{"environment": obj.environment, "build": obj.build_version, "remarks": "Original report"}]})
     db.add(obj); db.flush()
@@ -844,12 +852,14 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
 def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(get_current_user)):
     obj = _get_mutable(defect_id, db, current_user)
+    obj = db.query(models.Defect).filter_by(id=obj.id).populate_existing().with_for_update().one()
     manager = _is_manager(db, obj, current_user)
     if obj.status != "New":
         raise HTTPException(400, "Only a New defect can be edited. Use workflow actions for later changes")
     if not manager and obj.reporter_id != current_user.id:
         raise HTTPException(403, "Only the reporter, QA Lead group, or Administrator can edit a New defect")
     data = payload.model_dump(exclude_unset=True)
+    cc_ids = data.pop('cc_user_ids', None)
     if ("severity" in data or "priority" in data) and not manager:
         raise HTTPException(403, "Only an authorized lead can change severity or priority after submission")
     if data.get("severity") and data["severity"] not in SEVERITIES:
@@ -860,6 +870,8 @@ def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = D
         raise HTTPException(400, "Select a valid environment")
     if obj.workflow_json and "environment" in data and data["environment"] != obj.environment:
         raise HTTPException(400, "Reported environment is preserved; record another occurrence instead")
+    previous_cc = ', '.join(user.full_name for user in obj.cc_users) if cc_ids is not None else ''
+    cc_changed = defect_cc.replace(db, obj, cc_ids, current_user) if cc_ids is not None else False
     changes = []
     for field, value in data.items():
         old = getattr(obj, field)
@@ -868,6 +880,25 @@ def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = D
             changes.append(f"{field.replace('_', ' ').title()}: {old or '—'} → {value or '—'}")
     if changes:
         _audit(db, obj, current_user, "Updated", "\n".join(changes), step_name="Fields")
+    if cc_changed:
+        _audit(db, obj, current_user, 'CC Updated', f"CC: {previous_cc or 'None'} → {', '.join(user.full_name for user in obj.cc_users) or 'None'}", step_name='CC')
+    db.commit(); db.refresh(obj)
+    return obj
+
+
+@router.put('/{defect_id}/cc', response_model=schemas.DefectOut)
+def update_defect_cc(defect_id: int, payload: schemas.DefectCCUpdate,
+                     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = _get_mutable(defect_id, db, current_user)
+    # Serialize list replacements, including with workflow/reassignment saves.
+    obj = db.query(models.Defect).filter_by(id=obj.id).populate_existing().with_for_update().one()
+    if not _can_touch_defect(db, obj, current_user):
+        raise HTTPException(403, 'Only the reporter, responsible users, or QA team can manage CC')
+    previous = ', '.join(user.full_name for user in obj.cc_users)
+    if defect_cc.replace(db, obj, payload.cc_user_ids, current_user):
+        _audit(db, obj, current_user, 'CC Updated',
+               f"CC: {previous or 'None'} → {', '.join(user.full_name for user in obj.cc_users) or 'None'}",
+               step_name='CC')
     db.commit(); db.refresh(obj)
     return obj
 

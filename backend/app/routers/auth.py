@@ -665,13 +665,18 @@ def user_options(purpose: str = "lookup", workspace_id: Optional[int] = None,
                  exclude_id: Optional[int] = None, defect_id: Optional[int] = None,
                  db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Minimal workspace-scoped names and server-filtered assignment candidates."""
-    purposes = {"lookup", "select", "qa_lead", "tester", "security_analyst", "retest", "approver", "defect_reassign"}
+    purposes = {"lookup", "select", "qa_lead", "tester", "security_analyst", "retest", "approver", "defect_reassign", "defect_cc"}
     if purpose not in purposes:
         raise HTTPException(400, "Unknown user selection purpose")
     scope_ids = active_qa_workspace_scope_ids(current_user)
     if workspace_id is not None and workspace_id not in scope_ids:
         raise HTTPException(403, "Workspace is outside the active scope")
     selected_scope = (workspace_id,) if workspace_id is not None else scope_ids
+    if purpose == 'defect_cc':
+        from ..defect_cc import candidates
+        if workspace_id is None:
+            raise HTTPException(400, 'Select the defect workspace to choose CC users')
+        return candidates(db, workspace_id).all()
     q = db.query(models.User).filter(models.User.is_active == True)
     if selected_scope and purpose != "approver":
         member_ids = select(models.QAWorkspaceMember.user_id).where(

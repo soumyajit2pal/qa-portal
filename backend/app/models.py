@@ -4137,6 +4137,16 @@ class Defect(Base):
     # DefectTestCaseLink's own established "primary field + separate
     # many-to-many table for extra links" pattern exactly.
     execution_links = relationship("DefectExecutionLink", back_populates="defect", cascade="all,delete-orphan")
+    cc_entries = relationship("DefectCCUser", back_populates="defect", cascade="all,delete-orphan",
+                              order_by="DefectCCUser.user_id")
+
+    @property
+    def cc_user_ids(self):
+        return [entry.user_id for entry in self.cc_entries]
+
+    @property
+    def cc_users(self):
+        return [entry.user for entry in self.cc_entries if entry.user]
 
     @property
     def reporter_name(self):
@@ -4213,6 +4223,17 @@ class Defect(Base):
     @property
     def linked_test_case_keys(self):
         return [link.test_case.test_case_key for link in self.test_case_links if link.test_case]
+
+
+class DefectCCUser(Base):
+    """Defect followers; CC never confers assignment/approval authority."""
+    __tablename__ = 'qap_defect_cc_users'
+    defect_id = Column(Integer, ForeignKey('qap_defects.id', ondelete='CASCADE'), primary_key=True)
+    user_id = Column(Integer, ForeignKey('qap_users.id'), primary_key=True, index=True)
+    added_by_id = Column(Integer, ForeignKey('qap_users.id'), nullable=True)
+    added_at = Column(DateTime, nullable=False, default=now)
+    defect = relationship('Defect', back_populates='cc_entries')
+    user = relationship('User', foreign_keys=[user_id], lazy='joined')
 
 
 class DefectTestCaseLink(Base):

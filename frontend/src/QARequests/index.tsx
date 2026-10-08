@@ -333,7 +333,7 @@ export default function QARequests() {
             { key: "application_name", header: "Application" },
             {
               key: "department",
-              header: "Department scope",
+              header: "Department Scope",
               render: (r) => r.department || '—',
               filterValue: (r) => r.department || '',
             },

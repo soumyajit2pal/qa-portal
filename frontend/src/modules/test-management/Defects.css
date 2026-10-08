@@ -105,3 +105,8 @@
   .defect-review-tabs button { padding:10px; }
   .defect-module .defect-register-signals { flex-wrap:wrap; }
 }
+.defect-cc { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px; }
+.defect-cc-heading, .defect-cc-actions { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.defect-cc-heading { justify-content: space-between; }
+.defect-cc-heading h4 { margin: 0; }
+.defect-cc p { margin: 0 0 8px; overflow-wrap: anywhere; }

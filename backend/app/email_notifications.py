@@ -1258,8 +1258,17 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> int:
         getattr(target, "status", None) if target else "<target_not_found>",
     )
     route = _notification_route(db, action, target)
-    if not route:
-        return 0
+    queued_count = _queue_notification_route(db, action, target, route) if route else 0
+    if isinstance(target, models.Defect) and (_is_workflow_transition(action) or action.decision in {'CC Updated', 'Updated', 'Commented'}):
+        from .defect_cc import notification_ids
+        cc_route = NotificationRoute(notification_ids(db, target), 'CC', False,
+                                     'You are following this defect in CC. This update is for your information.')
+        queued_count += _queue_notification_route(db, action, target, cc_route)
+    return queued_count
+
+
+def _queue_notification_route(db, action, target, route):
+    """Queue the working owner first, then passive CC; outbox deduplicates both."""
     reference = _portal_reference(action, target)
     recipient_ids = route.recipient_ids - {action.actor_id}
     if not recipient_ids:

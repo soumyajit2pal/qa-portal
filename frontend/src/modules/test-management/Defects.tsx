@@ -3,6 +3,7 @@ import { defectEvidenceError, DEFECT_EVIDENCE_EXTENSIONS } from '../../defectEvi
 import { useUserOptions } from '../../hooks/useUserOptions'
 import DefectWorkflowDiagram from '../../components/DefectWorkflowDiagram'
 import LinkDefectRequest from '../../components/LinkDefectRequest'
+import DefectCC, { DefectCCField } from '../../components/DefectCC'
 import DefectWorkflowPanel, {
   availableDefectWorkflowActions,
   DEFECT_WORKFLOW_ACTION_DESCRIPTIONS,
@@ -244,6 +245,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
 }) {
   const { confirmDefectSubmission, confirmationModal } = useDefectSubmissionConfirmation()
   const { user } = useAuth()
+  const [ccIds, setCCIds] = useState<number[]>([])
   const [workflowWorkspaces, setWorkflowWorkspaces] = useState<QAWorkspaceOut[]>([])
   const [workflowLoading, setWorkflowLoading] = useState(true)
   const [workflowError, setWorkflowError] = useState(false)
@@ -390,6 +392,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
         steps_to_reproduce: steps, expected_result: expected, actual_result: actual,
         build_version: build || null,
         external_defect_id: externalId || null, labels: labels || null,
+        cc_user_ids: ccIds,
       })
       setCreatedDefect(created)
       await attachStagedEvidence(created)
@@ -413,6 +416,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
     || Number(localStorage.getItem('active_workspace_id') || localStorage.getItem('qa_active_workspace_id'))
     || user?.active_workspace_id || user?.preferred_workspace_id || user?.preferred_qa_workspace_id
   const workflowWorkspace = workflowWorkspaces.find(workspace => workspace.id === workflowWorkspaceId)
+  useEffect(() => { setCCIds([]) }, [workflowWorkspaceId])
 
   return <Modal title={standalone ? 'Open Defect' : 'Report Defect from Execution'} onClose={onClose} wide>
     <form onSubmit={submit} className="defect-form">
@@ -452,6 +456,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
         <Field label="Severity *"><select aria-label="Filter by severity" value={severity} onChange={(e) => setSeverity(e.target.value)}>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select></Field>
         <Field label="Priority *"><select aria-label="Filter by priority" value={priority} onChange={(e) => setPriority(e.target.value)}>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select></Field>
       </div>
+      <DefectCCField workspaceId={workflowWorkspaceId} value={ccIds} onChange={setCCIds} disabled={busy || !!createdDefect} />
       {selected && <Field label="Other affected Test Cases (optional)">
         <div className="defect-case-picker">
           <div className="defect-case-picker-head">
@@ -755,6 +760,7 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
   defect: DefectOut; manager: boolean; onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
   const { confirmDefectSubmission, confirmationModal } = useDefectSubmissionConfirmation()
+  const [ccIds, setCCIds] = useState<number[]>(defect.cc_user_ids || [])
   const [title, setTitle] = useState(defect.title)
   const [description, setDescription] = useState(defect.description)
   const [moduleFeature, setModuleFeature] = useState(defect.module_feature)
@@ -794,6 +800,7 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
       const saved = await api.patch<DefectOut>(`/api/defects/${defect.id}`, {
         title, description, module_feature: moduleFeature, environment,
         ...(manager ? { severity, priority } : {}),
+        cc_user_ids: ccIds,
         steps_to_reproduce: steps, expected_result: expected, actual_result: actual,
       })
       setSavedDefect(saved)
@@ -814,6 +821,7 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
         <Field label={`Priority ${manager ? '*' : ''}`}>{manager ? <select disabled={!!savedDefect} value={priority} onChange={(e) => setPriority(e.target.value)}>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select> : <input readOnly value={priority} />}</Field>
       </div>
       {!manager && <p className="muted small">Only the QA Lead group or an Administrator can change Severity or Priority.</p>}
+      <DefectCCField workspaceId={defect.qa_workspace_id} value={ccIds} onChange={setCCIds} selectedUsers={defect.cc_users} disabled={busy || !!savedDefect} />
       <div className="defect-form-section">
         <div className="defect-form-section-heading"><span>✓</span><div><strong>Reproduction evidence</strong><small>Paste or upload screenshots directly into any field below.</small></div></div>
         <Field label="Steps to Reproduce *"><JiraRichTextField value={steps} onChange={setSteps} onImagesChange={setStepsImages} disabled={!!savedDefect} ariaLabel="Steps to Reproduce" placeholder="Describe the exact steps needed to reproduce the defect…" /></Field>
@@ -1063,7 +1071,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
           <section><span className="defect-section-label">Reproduction evidence</span><h4>Steps to Reproduce</h4><AuthenticatedMarkdown value={defect.steps_to_reproduce} basePath={`/api/defects/${defect.id}/attachments`} /></section>
           <div className="defect-result-compare"><section className="actual"><h4>Actual Result</h4><AuthenticatedMarkdown value={defect.actual_result} basePath={`/api/defects/${defect.id}/attachments`} /></section><section className="expected"><h4>Expected Result</h4><AuthenticatedMarkdown value={defect.expected_result} basePath={`/api/defects/${defect.id}/attachments`} /></section></div>
         </div>
-        <aside className="defect-detail-aside"><section><span className="defect-section-label">Operating context</span><h4>Defect properties</h4><dl><dt>Application</dt><dd>{defect.application_name}</dd><dt>Module / Feature</dt><dd>{defect.module_feature}</dd><dt>Environment</dt><dd>{defect.environment}</dd><dt>Build</dt><dd>{defect.build_version || '—'}</dd><dt>Reporter</dt><dd>{defect.reporter_name}</dd><dt>{defect.workflow ? 'Resolver' : 'Assignee'}</dt><dd>{defect.assignee_name || 'Unassigned'}</dd></dl></section></aside>
+        <aside className="defect-detail-aside"><section><span className="defect-section-label">Operating context</span><h4>Defect properties</h4><dl><dt>Application</dt><dd>{defect.application_name}</dd><dt>Module / Feature</dt><dd>{defect.module_feature}</dd><dt>Environment</dt><dd>{defect.environment}</dd><dt>Build</dt><dd>{defect.build_version || '—'}</dd><dt>Reporter</dt><dd>{defect.reporter_name}</dd><dt>{defect.workflow ? 'Resolver' : 'Assignee'}</dt><dd>{defect.assignee_name || 'Unassigned'}</dd></dl></section><DefectCC defect={defect} canManage={!viewOnly && (canTouchDefect || hasRole(user, 'QA_ENGINEER'))} onChanged={onChanged} /></aside>
       </div>
       </div>
       <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-resolution`} aria-labelledby={`defect-${defect.id}-tab-resolution`} hidden={detailTab !== 'resolution'} tabIndex={0}>

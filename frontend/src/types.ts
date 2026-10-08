@@ -2153,6 +2153,8 @@ export interface DefectWorkflowPolicy {
   production_for_all: boolean
 }
 export interface DefectOut {
+  cc_user_ids?: number[]
+  cc_users?: UserOption[]
   workflow?: DefectWorkflowPolicy | null
   workflow_state?: { production_impact?: string; qa_owner_id?: number; qa_owner_reassigned_at?: string; business_owner_id?: number; release_owner_id?: number; deployed_build?: string; blocked?: { reason: string; review_date: string }; occurrences?: Record<string, any>[]; history?: Record<string, any>[] }
   workflow_revision?: number
