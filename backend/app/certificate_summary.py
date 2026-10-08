@@ -314,6 +314,9 @@ def capture(db, obj):
     result.update(captured_at=models.now().isoformat(), application_name=source.qa_request.application_name,
                   change_request_ids=obj.change_request_ids or ' / '.join(filter(None, [source.qa_request.cr_number, source.qa_request.epic_number])),
                   change_description=source.qa_request.change_description or '',
+                  change_type=source.qa_request.change_type,
+                  business_defect_number=source.qa_request.business_defect_number if source.qa_request.change_type == 'Bug Fix' else None,
+                  previous_request_id=source.qa_request.bug_fix_source_request_id if source.qa_request.change_type in {'Bug Fix', 'Enhancement'} else None,
                   testing_request_id=obj.testing_request_id, qa_request_id=source.qa_request_id,
                   environment=obj.environment_tested, build=obj.build_number,
                   execution_ids=[item.id for item in executions], defect_ids=[item.id for item in defects],
@@ -348,6 +351,9 @@ def validate(obj, db=None):
         for field in ('assigned_testers', 'execution_population_basis', 'execution', 'defects', 'severity', 'execution_ids', 'defect_ids', 'defect_scope_cycle_ids', 'observations', 'security', 'execution_results', 'cycle_results', 'defect_results', 'change_request_ids', 'change_description', 'conditional_observations'):
             if live.get(field) != snapshot.get(field):
                 raise HTTPException(409, 'Linked evidence changed since capture. Refresh the certificate and obtain full reapproval.')
+        for field in ('change_type', 'business_defect_number', 'previous_request_id'):
+            if field in snapshot and live.get(field) != snapshot[field]:
+                raise HTTPException(409, 'Linked change details changed since capture. Refresh the certificate and obtain full reapproval.')
         previous_fields = snapshot.get('certificate_fields') or {}
         current_fields = live.get('certificate_fields') or {}
         if any(previous_fields.get(key, '') != current_fields.get(key, '')
@@ -434,6 +440,33 @@ def validate_conditional_clearance_requirements(evidence):
         raise HTTPException(400, 'Conditional Clearance requires documented ' + ', '.join(missing) + ' before submission or approval')
 
 
+def change_metadata_fields(obj):
+    """Print change identity once, preferring the reviewed certificate snapshot.
+
+    Older snapshots did not capture change classification or references.
+    Label their linked-request fallback explicitly without altering evidence.
+    """
+    snapshot = obj.certificate_summary or {}
+    source = obj.source_functional_request
+    parent = source.qa_request if source else None
+    change_type = snapshot.get('change_type', getattr(parent, 'change_type', None))
+    fields = [
+        ('CR Number/EPIC Number', snapshot.get('change_request_ids', obj.change_request_ids) or 'Not recorded'),
+        ('Change Description', snapshot.get('change_description', obj.change_description) or 'Not recorded'),
+        ('Change Type', change_type or 'Not recorded'),
+    ]
+    reference_fields = ['change_type']
+    if change_type == 'Bug Fix':
+        fields.append(('Defect Number (Raised By Business)', snapshot.get('business_defect_number', getattr(parent, 'business_defect_number', None)) or 'Not recorded'))
+        reference_fields.append('business_defect_number')
+    if change_type in {'Bug Fix', 'Enhancement'}:
+        fields.append(('Previous Completed Request ID', snapshot.get('previous_request_id', getattr(parent, 'bug_fix_source_request_id', None)) or 'Not recorded'))
+        reference_fields.append('previous_request_id')
+    if snapshot and any(field not in snapshot for field in reference_fields):
+        fields.append(('Change Reference Source', 'Change type and references not captured in this older revision are shown from the linked QA request.'))
+    return fields
+
+
 def markdown_tables(snapshot):
     def table(headers, rows):
         def cell(value): return str(value).replace('|', '\\|').replace('\n', ' ')
@@ -443,8 +476,7 @@ def markdown_tables(snapshot):
     execution_title = ('Section B – QA Unique Test Case Execution Summary' if unique_population
                        else 'Section B – QA Test Case Execution Summary (Legacy Slot-Based)')
     population_header = 'Unique test cases' if unique_population else 'Execution slots'
-    identity = table(['CR/EPIC Number', 'Change Description'], [[snapshot.get('change_request_ids', 'Not captured — refresh and reapproval required') or 'Not recorded', snapshot.get('change_description', 'Not captured — refresh and reapproval required') or 'Not recorded']]) + '\n\n'
     return [
-        (execution_title, identity + table([population_header, *EXECUTION_STATUSES, 'Pass %'], [[e['total'], *[e['counts'].get(s, 0) for s in EXECUTION_STATUSES], e['pass_pct'] if e['pass_pct'] is not None else 'NA']])),
-        ('Section C – QA Defect Status Summary', identity + table(['Status', 'Count'], [(s, snapshot['defects']['counts'].get(s, 0)) for s in DEFECT_BUCKETS if snapshot['defects']['counts'].get(s, 0) > 0] + [('Total', snapshot['defects']['total'])])),
+        (execution_title, table([population_header, *EXECUTION_STATUSES, 'Pass %'], [[e['total'], *[e['counts'].get(s, 0) for s in EXECUTION_STATUSES], e['pass_pct'] if e['pass_pct'] is not None else 'NA']])),
+        ('Section C – QA Defect Status Summary', table(['Status', 'Count'], [(s, snapshot['defects']['counts'].get(s, 0)) for s in DEFECT_BUCKETS if snapshot['defects']['counts'].get(s, 0) > 0] + [('Total', snapshot['defects']['total'])])),
         ('Defect Severity-wise Breakdown', table(['Severity', 'Open', 'Closed', 'Total'], [[r['severity'], r['open'], r['closed'], r['total']] for r in snapshot['severity']]))]

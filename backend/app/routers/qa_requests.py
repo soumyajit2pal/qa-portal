@@ -181,13 +181,13 @@ def _business_defect_number(value: Optional[str], change_type: Optional[str]) ->
 
 def _validated_bug_fix_source(db: Session, source_request_id: Optional[str], change_type: Optional[str],
                               application_name: Optional[str], department: Optional[str]) -> Optional[str]:
-    """Normalize and validate the optional Bug Fix traceability reference.
+    """Validate the optional Bug Fix or Enhancement traceability reference.
 
     Only a raised gateway for the same application/department whose linked
-    Functional Testing workflow reached CLOSED is eligible. Changing away
-    from Bug Fix clears any stale reference automatically.
+    Functional Testing workflow completed is eligible. New changes clear
+    any stale reference automatically. Retain the existing API/storage name.
     """
-    if change_type != "Bug Fix":
+    if change_type not in {"Bug Fix", "Enhancement"}:
         return None
     source = (source_request_id or "").strip().upper()
     if not source:
@@ -613,7 +613,7 @@ def bug_fix_source_options(application_name: str = Query(..., min_length=1),
                            limit: int = Query(100, ge=1, le=200),
                            db: Session = Depends(get_db),
                            current_user: models.User = Depends(get_current_user)):
-    """Recent completed Functional requests eligible as a Bug Fix source.
+    """Completed Functional requests eligible for Bug Fix or Enhancement.
 
     This compact endpoint exists specifically for the shared searchable
     selector; it does not load documents, checklists, findings, or other
@@ -1949,7 +1949,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
             ("Application Owner", obj.application_owner),
             ("CR Number/EPIC Number", obj.cr_number),
             ("Change Type", obj.change_type),
-            ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type == "Bug Fix" else None),
+            ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type in {"Bug Fix", "Enhancement"} else None),
             ("Defect Number (Raised By Business)", obj.business_defect_number if obj.change_type == "Bug Fix" else None),
             ("Change Description", obj.change_description),
             ("Vendor / SI Partner", obj.vendor_si_partner),

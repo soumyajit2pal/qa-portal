@@ -1108,7 +1108,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
             ("Approving QA Team", obj.approving_qa_team or "Not configured"),
             ("Testing Request ID", obj.certificate_testing_request_id),
             ("Assigned Tester(s)", certificate_summary.assigned_testers_label(obj.certificate_summary)),
-            ("CR Number/EPIC Number", obj.change_request_ids),
+            *certificate_summary.change_metadata_fields(obj),
             ("Vendor / SI Partner", obj.vendor_si_partner),
             ("Technology Stack", obj.technology_stack),
         ]),

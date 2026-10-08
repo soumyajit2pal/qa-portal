@@ -587,6 +587,26 @@ and lease reads, so use application hit counters when judging response reuse. No
 credentials or task payloads are exposed. Baseline endpoint p95 latency and Oracle pool/SQL load
 alongside these metrics before increasing memory, pool limits or TTLs. Liveness does not issue INFO.
 
+### QA tester occupancy history
+
+The Capacity & Occupancy dashboard includes a per-tester trend for the selected
+reporting period: time-weighted daily average, daily peak, and days averaging at
+least 80%. It uses the same eight-point capacity model as the current table.
+These figures estimate assigned workload; they are not timesheet hours.
+
+Run `alembic upgrade head` (migration `b9e5d7f3a102`) before starting the updated
+backend workers, then deploy the frontend. The migration creates an append-only
+request-load event table and records the existing request state at migration time.
+Subsequent Functional, Performance, SAST, and DAST state/assignment changes are
+recorded in the source transaction, including closures, reassignments, and deletes.
+Historical loads and capacity weights are retained with each observation. Current
+request visibility scopes every history query; reading a trend performs no writes.
+
+The migration does not backdate today's state: dates before reliable tracking
+began are unavailable. Partial days use only recorded time, and future dates are
+unavailable. Existing free-text workflow logs cannot reliably reconstruct the
+prior weighted occupancy. The live table continues to show current assignments.
+
 ### Production Oracle pool capacity
 
 The Oracle pool is **per backend worker**, not per deployment. Before production rollout, set the

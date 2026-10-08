@@ -76,13 +76,13 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
     if (!isApproved) setShowOther(true);
   }, [approvedNames, form.application_name]);
 
-  // A Bug Fix may optionally point back to the completed Functional Testing
+  // A Bug Fix or Enhancement may point back to the completed Functional Testing
   // request where the original implementation was verified. The endpoint
   // already narrows candidates to this application and department, so the
   // shared searchable picker stays compact even when the portal has a large
   // request history.
   useEffect(() => {
-    if (form.change_type !== "Bug Fix" || !form.application_name || !form.department) {
+    if (!["Bug Fix", "Enhancement"].includes(form.change_type) || !form.application_name || !form.department) {
       setBugFixSources([]);
       return;
     }
@@ -214,8 +214,10 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
               onChange={(value) => {
                 set("change_type", value);
                 if (value !== "Bug Fix") {
-                  set("bug_fix_source_request_id", "");
                   set("business_defect_number", "");
+                }
+                if (!["Bug Fix", "Enhancement"].includes(value)) {
+                  set("bug_fix_source_request_id", "");
                 }
               }}
             />
@@ -230,7 +232,7 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
               />
             </Field>
           )}
-          {form.change_type === "Bug Fix" && (
+          {["Bug Fix", "Enhancement"].includes(form.change_type) && (
             <Field label="Previous Completed Request ID (optional)">
               <SearchableSelect
                 value={form.bug_fix_source_request_id}
@@ -245,7 +247,7 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
                 ]}
               />
               <p className="muted small" style={{ margin: "4px 0 0" }}>
-                Use this to trace the bug fix back to the earlier request whose Functional Testing was completed.
+                Link this {form.change_type.toLowerCase()} to the earlier request whose Functional Testing was completed.
               </p>
             </Field>
           )}

@@ -853,7 +853,7 @@ class QARequest(Base):
     cr_number = Column(String(64))
     epic_number = Column(String(150))
     change_type = Column(String(32))              # New / Enhancement / Bug Fix -- see constants.CHANGE_TYPES
-    # Optional traceability for a Bug Fix back to the earlier gateway whose
+    # Optional traceability for a Bug Fix or Enhancement to the earlier gateway whose
     # Functional Testing workflow reached CLOSED. The business request ID is
     # stable and unique, so it is stored directly and protected by a
     # self-referencing FK; routers/qa_requests.py additionally verifies that
@@ -2372,6 +2372,29 @@ class EmailNotification(Base):
     created_at = Column(DateTime, default=now, nullable=False)
 
     approval_action = relationship("ApprovalAction", back_populates="email_notifications")
+
+
+class TesterCapacityEvent(Base):
+    """Transactional request-load observations; past occupancy is never inferred.
+
+    Numeric request IDs are retained as audit identity, without constraining
+    request deletion. Reads always re-check the live parent request scope.
+    """
+    __tablename__ = 'qap_tester_capacity_events'
+    id = pk_column()
+    tracking_key = Column(String(32), unique=True, nullable=True)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(Integer, nullable=False)
+    qa_request_id = Column(Integer, nullable=True)
+    status = Column(String(40), nullable=True)
+    assignee_ids = Column(String(1000), nullable=True)
+    load_points = Column(Float, nullable=False)
+    capacity_points = Column(Float, nullable=False)
+    observed_at = Column(DateTime, nullable=False)
+    __table_args__ = (
+        Index('ix_qap_capacity_scope_time', 'qa_request_id', 'observed_at'),
+        Index('ix_qap_capacity_entity_time', 'entity_type', 'entity_id', 'observed_at', 'id'),
+    )
 
 
 class AssignmentHistory(Base):
@@ -4379,3 +4402,31 @@ Index("ix_scan_result_execution", SecurityScanResult.execution_key)
 #     lives on the row already, but there's no separate "assignment updated"
 #     timestamp distinct from the row's own created_at) to usefully compose
 #     with -- revisit if/when that module gains one.
+
+
+# Occupancy observations are committed/rolled back with their source request.
+# Mapper events cover state changes made by linked certificates and defects as
+# well as the four request routers, without adding read-side writes.
+def _capture_tester_capacity_insert(mapper, connection, target):
+    from .tester_capacity_history import capture_request
+    capture_request(connection, target)
+
+
+def _capture_tester_capacity_update(mapper, connection, target):
+    from sqlalchemy import inspect
+    assignment_field = 'security_analyst_id' if isinstance(target, (SASTRequest, DASTRequest)) else 'assigned_tester_ids'
+    state = inspect(target)
+    if any(state.attrs[key].history.has_changes() for key in ('status', assignment_field, 'qa_request_id')):
+        from .tester_capacity_history import capture_request
+        capture_request(connection, target)
+
+
+def _capture_tester_capacity_delete(mapper, connection, target):
+    from .tester_capacity_history import capture_request
+    capture_request(connection, target, deleted=True)
+
+
+for _capacity_model in (FunctionalRequest, PerformanceRequest, SASTRequest, DASTRequest):
+    event.listen(_capacity_model, 'after_insert', _capture_tester_capacity_insert)
+    event.listen(_capacity_model, 'after_update', _capture_tester_capacity_update)
+    event.listen(_capacity_model, 'before_delete', _capture_tester_capacity_delete)

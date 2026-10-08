@@ -872,78 +872,13 @@ TESTER_WORKLOAD_STATUSES = [
 # contributes its configured weight, divided across shared testers. This
 # makes the dashboard an explainable capacity aid for QA Leads instead of a
 # relative "busiest person = 100%" chart whose meaning changes every day.
-TESTER_CAPACITY_POINTS = 8.0
-FUNCTIONAL_TESTER_LOAD = {
-    QAStatus.TESTER_ASSIGNED: 0.50,
-    QAStatus.TEST_DESIGN: 1.00,
-    QAStatus.EXECUTION_IN_PROGRESS: 2.50,
-    QAStatus.DEFECT_RAISED: 0.50,
-    QAStatus.WAITING_FOR_FIX: 0.00,
-    QAStatus.RETESTING: 0.75,
-    QAStatus.QA_COMPLETED: 0.15,
-    QAStatus.QA_CHANGE_REVIEW: 0.15,
-    QAStatus.QA_SIGNOFF_PENDING: 0.10,
-    QAStatus.QA_SIGNED_OFF: 0.10,
-    QAStatus.REQUESTER_VERIFICATION: 0.05,
-}
-PERFORMANCE_TESTER_LOAD = {
-    "ENVIRONMENT_SETUP": 1.00,
-    "SCRIPT_DEVELOPMENT": 1.00,
-    "BASELINE": 0.75,
-    "LOAD_TEST_EXECUTION": 1.00,
-    "RESULT_ANALYSIS": 0.25,
-    "DEFECT_FIX_RETEST": 0.75,
-    "REPORT": 0.15,
-    "SIGNOFF_PENDING": 0.10,
-}
-PERFORMANCE_TESTER_WORKLOAD_STATUSES = list(PERFORMANCE_TESTER_LOAD)
-SECURITY_ANALYST_LOAD = {
-    "CONFIGURATION": 0.75,
-    "SCANNING": 1.00,
-    "FINDING_VALIDATION": 0.75,
-    "REMEDIATION": 0.50,
-    "ASSIGNED_TO_REQUESTER": 0.10,
-    "WAITING_FOR_FIX": 0.00,
-    "ASSIGNED_TO_LEAD": 0.10,
-    "RESCAN": 0.75,
-    "SECURITY_COMPLETE": 0.15,
-    "REPORT_READY": 0.10,
-}
-SECURITY_ANALYST_WORKLOAD_STATUSES = list(SECURITY_ANALYST_LOAD)
-
-_QUEUED_TESTER_STATUSES = {QAStatus.TESTER_ASSIGNED}
-_WAITING_TESTER_STATUSES = {
-    QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, "ASSIGNED_TO_REQUESTER",
-}
-_NEAR_COMPLETE_TESTER_STATUSES = {
-    QAStatus.QA_COMPLETED, QAStatus.QA_CHANGE_REVIEW,
-    QAStatus.QA_SIGNOFF_PENDING, QAStatus.QA_SIGNED_OFF,
-    QAStatus.REQUESTER_VERIFICATION, "REPORT", "SIGNOFF_PENDING", "SECURITY_COMPLETE", "REPORT_READY",
-}
-
-
-def _assigned_user_ids(value: str | None) -> list[int]:
-    ids = []
-    for raw_id in (value or "").split(","):
-        try:
-            ids.append(int(raw_id.strip()))
-        except (TypeError, ValueError):
-            continue
-    return list(dict.fromkeys(ids))
-
-
-def _occupancy_band(percent: int) -> str:
-    if percent == 0:
-        return "Available"
-    if percent < 50:
-        return "Light"
-    if percent < 80:
-        return "Balanced"
-    if percent < 100:
-        return "High"
-    if percent == 100:
-        return "Full"
-    return "Overloaded"
+from ..tester_capacity import (
+    TESTER_CAPACITY_POINTS, FUNCTIONAL_TESTER_LOAD, PERFORMANCE_TESTER_LOAD,
+    PERFORMANCE_TESTER_WORKLOAD_STATUSES, SECURITY_ANALYST_LOAD,
+    SECURITY_ANALYST_WORKLOAD_STATUSES, _QUEUED_TESTER_STATUSES,
+    _WAITING_TESTER_STATUSES, _NEAR_COMPLETE_TESTER_STATUSES,
+    _assigned_user_ids, _occupancy_band,
+)
 
 
 _QA_DASHBOARD_ROLES = {
@@ -1158,6 +1093,8 @@ def _add_contribution_metrics(db: Session, rows: dict[int, dict],
         row["projects_worked"] = len(project_sets[tester_id])
         row["project_names"] = [project_names.get(project_id, f"Project #{project_id}")
                                 for project_id in sorted(project_sets[tester_id])]
+        # Retained for older clients during rollout. This mixes activity units;
+        # it is neither a unique testcase count nor a tester performance score.
         row["total_contributions"] = sum(row[field] for field, *_rest in count_specs)
 
     return {
@@ -1328,6 +1265,25 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
         "overloaded_testers": sum(1 for row in result_rows if row["occupancy_percent"] > 100),
         "contribution_summary": contribution_summary,
     }
+
+
+@router.get('/qa-tester-occupancy-trend')
+def qa_tester_occupancy_trend(
+    date_from: str | None = Query(None), date_to: str | None = Query(None),
+    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
+):
+    _require_qa_dashboard_access(current_user)
+    from ..tester_capacity_history import trend, wall_time
+    end_default = wall_time(models.now())
+    start, end = _date_bounds(date_from, date_to)
+    end = end or end_default
+    start = start or end - datetime.timedelta(days=30)
+    if start > end:
+        raise HTTPException(400, 'date_from must be earlier than or equal to date_to.')
+    if (end.date() - start.date()).days > 365:
+        raise HTTPException(400, 'Choose an occupancy reporting period of at most 366 days.')
+    visible_requests = _scope_qa_requests(db.query(models.QARequest.id), db, current_user)
+    return trend(db, _workspace_qa_testers(db, current_user), visible_requests, start, end)
 
 
 @router.get("/qa-tester-contribution/{tester_id}")
@@ -1554,14 +1510,14 @@ def export_qa_tester_contribution(
             ("QA Lead approval pending", visible_summary["qa_lead_approval_pending"]),
             ("Approved test cases", visible_summary["testcases_approved"]),
             ("Defects raised", visible_summary["defects_raised"]),
-            ("Retests performed", visible_summary["retests_performed"]),
+            ("Defects retested (latest recorded retest)", visible_summary["retests_performed"]),
             ("Execution attempts", visible_summary["executions_completed"]),
             ("Projects covered", visible_summary["projects_covered"]),
         ],
     )
     add_table_sheet(
         workbook, "Tester Contribution", "QA Tester Contribution & Coverage",
-        ["QA Tester", "Department", "Test Cases Created", "Draft Test Cases", "Recommendation Pending", "QA Lead Approval Pending", "Approved Test Cases", "Defects Raised", "Retests Performed",
+        ["QA Tester", "Department", "Test Cases Created", "Draft Test Cases", "Recommendation Pending", "QA Lead Approval Pending", "Approved Test Cases", "Defects Raised", "Defects Retested (Latest Recorded Retest)",
          "Execution Attempts", "Projects Worked On", "Project Names", "Current Assignments", "Last Activity"],
         [[
             row["tester_name"], row["department"], row["testcases_created"],

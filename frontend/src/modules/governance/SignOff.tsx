@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { resolveRequestId } from '../../requestNavigation'
-import { formatDateTimeIST } from '../../time'
+import { formatDateIST, formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
 import {
@@ -33,6 +33,13 @@ function ClearanceFact({ label, children }: { label: string; children: React.Rea
   return <div className="clearance-fact"><dt>{label}</dt><dd>{children}</dd></div>
 }
 
+function validityLabel(from?: string | null, to?: string | null): string {
+  if (from && to) return `${formatDateIST(from)} to ${formatDateIST(to)}`
+  if (from) return `From ${formatDateIST(from)}`
+  if (to) return `Until ${formatDateIST(to)}`
+  return 'Not provided'
+}
+
 interface RecordedElectronicSignature {
   signer: string
   appliedAt: string
@@ -59,12 +66,7 @@ const EMPTY = {
   change_request_ids: '', application_name: '', application_owner: '', department: '',
   technology_stack: '', risk_tier: 'Tier 3 (Medium)', release_version: '', build_number: '',
   environment_tested: 'UAT', target_promotion_environment: 'Production',
-  // Optional on the backend (schemas.SignOffCreate/SignOffUpdate) -- always
-  // existed as columns and were already shown on the certificate detail view
-  // ("Validity: — to —"), but no form anywhere actually let anyone set them,
-  // so every certificate showed blank. Kept as empty strings here (not null)
-  // since a <input type="date"> needs a string value; converted to null on
-  // submit if left blank -- see submit() below.
+  // Optional dates use empty strings for date inputs and null on submission.
   validity_from: '', validity_to: '',
   exit_criteria_notes: '', open_defect_summary: '', residual_risk_notes: '',
   known_limitations: '',
@@ -651,7 +653,6 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
 function CertificateEvidence({ item }: { item: SignOffOut }) {
   const summary = item.certificate_summary
   if (!summary) return <section className="clearance-evidence"><div className="clearance-section-heading"><div><span>Captured results</span><h3>Test evidence</h3></div></div><p className="clearance-empty-note">This earlier certificate has no frozen summary. Capturing current results requires a refresh and full reapproval.</p></section>
-  const changeIdentity = <div className="clearance-evidence-identity"><span><small>CR / EPIC</small><strong>{summary.change_request_ids === undefined ? 'Not captured — refresh required' : summary.change_request_ids || 'Not recorded'}</strong></span><span><small>Change description</small><strong>{summary.change_description === undefined ? 'Not captured — refresh required' : summary.change_description || 'Not recorded'}</strong></span></div>
   const defectStatuses = ['Fix Pending', 'Not a Defect Review Pending', 'Retest Pending', 'Reopened / Retest Failed', 'Business Acceptance Pending', 'Release Pending', 'Production Verification Pending', 'Blocked', 'Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised']
   const activeDefectStatuses = defectStatuses.filter(status => (summary.defects.counts[status] || 0) > 0)
   const openSeverity = summary.severity.reduce((total, row) => total + row.open, 0)
@@ -674,7 +675,6 @@ function CertificateEvidence({ item }: { item: SignOffOut }) {
     </div>
     {!uniquePopulation && <div className="clearance-evidence-warning" role="status">This frozen revision uses the earlier execution-slot counting method. Refresh editable evidence to recalculate unique test cases; issued and historical revisions remain unchanged for audit integrity.</div>}
     {summary.open_critical_high > 0 && <div className="clearance-evidence-warning" role="status">Full Clearance is blocked while {summary.open_critical_high} Critical or High defect(s) remain open.</div>}
-    {changeIdentity}
     <div className="clearance-evidence-panels">
       <details open><summary><span><b>{executionSummaryTitle}</b><small>{uniquePopulation ? 'Latest result per unique test case in the linked test scope' : 'Historical execution-slot results retained exactly as captured'}</small></span><strong>{summary.execution.total} {uniquePopulation ? (summary.execution.total === 1 ? 'unique case' : 'unique cases') : (summary.execution.total === 1 ? 'slot' : 'slots')}</strong></summary>
         <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>{populationLabel}</th>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <th key={status}>{status}</th>)}<th>Pass %</th></tr></thead><tbody><tr><td>{summary.execution.total}</td>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <td key={status}>{summary.execution.counts[status] || 0}</td>)}<td>{summary.execution.pass_pct == null ? 'NA' : `${summary.execution.pass_pct}%`}</td></tr></tbody></table></div>
@@ -915,7 +915,7 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
       <ErrorText error={error} />
       {takeoverNotice && <div className="alert alert-success" role="status">{takeoverNotice}</div>}
       <section className="clearance-hero clearance-overview" aria-label="Certificate overview">
-        <div className="clearance-hero-main"><span className="clearance-eyebrow">QA clearance · {item.certificate_type}</span><h2>{item.application_name}</h2><p>{item.change_description || 'Change description not recorded'}</p><div className="clearance-hero-chips"><span>Revision <b>{item.revision_number || 1}</b></span><span>CR / EPIC <b>{item.change_request_ids || '—'}</b></span><span>Request <b>{item.certificate_testing_request_id || item.testing_request_id || '—'}</b></span><span>Build <b>{item.build_number || '—'}</b></span><span>Testing <b>{item.certificate_testing_type || item.testing_type}</b></span><span>Promotion <b>{item.environment_tested || '—'} → {item.target_promotion_environment || '—'}</b></span></div></div>
+        <div className="clearance-hero-main"><span className="clearance-eyebrow">QA clearance · {item.certificate_type}</span><h2>{item.application_name}</h2><p>{item.change_description || 'Change description not recorded'}</p><div className="clearance-hero-chips"><span>Revision <b>{item.revision_number || 1}</b></span><span>CR / EPIC <b>{item.change_request_ids || '—'}</b></span><span>Request <b>{item.certificate_testing_request_id || item.testing_request_id || '—'}</b></span><span>Build <b>{item.build_number || '—'}</b></span><span>Testing <b>{item.certificate_testing_type || item.testing_type}</b></span><span>Promotion <b>{item.environment_tested || '—'} → {item.target_promotion_environment || '—'}</b></span><span>Validity <b>{validityLabel(item.validity_from, item.validity_to)}</b></span></div></div>
         <div className="clearance-hero-status"><small>Current status</small><WorkflowStatusBadge record={item} workflow="signoff" status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /><span>{SIGNOFF_PENDING_WITH[status] && SIGNOFF_PENDING_WITH[status] !== '—' ? `Pending with ${SIGNOFF_PENDING_WITH[status]}` : item.certificate_date ? `Dated ${item.certificate_date}` : 'See Approvals & activity'}</span></div>
       </section>
       <nav className="clearance-stage-track" aria-label="Approval progress">{stageNames.map((name, index) => <div key={name} aria-current={index === stageIndex ? 'step' : undefined} className={`clearance-stage ${index < stageIndex ? 'is-done' : index === stageIndex ? (isRejected ? 'is-rejected' : 'is-current') : ''}`}><span>{index === stageIndex && isRejected ? '×' : index < stageIndex || ['ISSUED', 'ISSUED_UNDER_REVIEW', 'SUPERSEDED'].includes(status) ? '✓' : index + 1}</span><b>{name}</b></div>)}</nav>
@@ -974,7 +974,7 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
       <details open className="clearance-detail-fields"><summary><span><b>Certificate details</b><small>Scope, ownership, environment, and validity</small></span><span>View details</span></summary><div className="clearance-fact-grid">
         <ClearanceFact label="Application owner">{item.application_owner || '—'}</ClearanceFact><ClearanceFact label="Request department">{item.request_department || '—'}</ClearanceFact><ClearanceFact label="Approving QA team">{item.approving_qa_team || 'Not configured'}</ClearanceFact>
         <ClearanceFact label="Requested by (QA team)">{userName(users, item.requester_id) || '—'}</ClearanceFact><ClearanceFact label="Approved by (QA Lead)">{userName(users, item.reviewed_by_id) || '—'}</ClearanceFact><ClearanceFact label="Approved by (Executive)">{userName(users, item.approved_by_id) || '—'}</ClearanceFact>
-        <ClearanceFact label="Revision">{item.revision_number || 1}</ClearanceFact><ClearanceFact label="Testing type">{item.certificate_testing_type || item.testing_type}</ClearanceFact><ClearanceFact label="Certificate date">{item.certificate_date || '—'}</ClearanceFact><ClearanceFact label="Vendor / SI partner">{item.vendor_si_partner || '—'}</ClearanceFact><ClearanceFact label="Technology stack">{item.technology_stack || '—'}</ClearanceFact><ClearanceFact label="Release / build">{item.release_version || '—'} / {item.build_number || '—'}</ClearanceFact><ClearanceFact label="Environment tested">{item.environment_tested || '—'}</ClearanceFact><ClearanceFact label="Target promotion">{item.target_promotion_environment || '—'}</ClearanceFact><ClearanceFact label="Risk tier">{item.risk_tier || '—'}</ClearanceFact><ClearanceFact label="Validity">{item.validity_from || '—'} to {item.validity_to || '—'}</ClearanceFact>
+        <ClearanceFact label="Revision">{item.revision_number || 1}</ClearanceFact><ClearanceFact label="Testing type">{item.certificate_testing_type || item.testing_type}</ClearanceFact><ClearanceFact label="Certificate date">{item.certificate_date || '—'}</ClearanceFact><ClearanceFact label="Vendor / SI partner">{item.vendor_si_partner || '—'}</ClearanceFact><ClearanceFact label="Technology stack">{item.technology_stack || '—'}</ClearanceFact><ClearanceFact label="Release / build">{item.release_version || '—'} / {item.build_number || '—'}</ClearanceFact><ClearanceFact label="Environment tested">{item.environment_tested || '—'}</ClearanceFact><ClearanceFact label="Target promotion">{item.target_promotion_environment || '—'}</ClearanceFact><ClearanceFact label="Risk tier">{item.risk_tier || '—'}</ClearanceFact><ClearanceFact label="Validity">{validityLabel(item.validity_from, item.validity_to)}</ClearanceFact>
       </div></details>
       </div>
       <div className="clearance-tab-panel" role="tabpanel" id="clearance-panel-remarks" aria-labelledby="clearance-tab-remarks" hidden={detailTab !== 'remarks'} tabIndex={0}>

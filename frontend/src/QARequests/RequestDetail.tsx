@@ -643,7 +643,7 @@ export function RequestDetail({
                 {req.business_defect_number || "—"}
               </DetailField>
             )}
-            {req.change_type === "Bug Fix" && (
+            {["Bug Fix", "Enhancement"].includes(req.change_type || '') && (
               <DetailField label="Previous Completed Request ID">
                 {req.bug_fix_source_request_id || "—"}
               </DetailField>

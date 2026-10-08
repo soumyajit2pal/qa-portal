@@ -10,6 +10,9 @@ import { Card, MetricCard, BarChart, Table, Badge, ErrorText, Modal, TableColumn
 import SearchableSelect from './components/SearchableSelect'
 import ClearableSearchInput from './components/ClearableSearchInput'
 import ActiveProjectsBrowser from './components/ActiveProjectsBrowser'
+import TesterActivityChart from './components/TesterActivityChart'
+import TesterOccupancyTrend from './components/TesterOccupancyTrend'
+import { hasRecordedTesterActivity, TesterActivityRow } from './testerActivity'
 import DefectsBrowser from './components/DefectsBrowser'
 import {
   IconGrid, IconWarning, IconApprove, IconWorkflow, IconCheckCircle,
@@ -1388,9 +1391,7 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
   )
 }
 
-interface TesterWorkloadRow {
-  tester_id: number
-  tester_name: string
+interface TesterWorkloadRow extends TesterActivityRow {
   department: string
   role_label: string
   status_counts: Record<string, number>
@@ -1405,19 +1406,14 @@ interface TesterWorkloadRow {
   waiting_count: number
   near_complete_count: number
   assignments: TesterAssignment[]
-  testcases_created: number
   testcases_draft: number
   recommendation_pending: number
   qa_lead_approval_pending: number
   testcases_approved: number
-  defects_raised: number
-  retests_performed: number
-  executions_completed: number
   projects_worked: number
   project_names: string[]
   current_execution_assignments: number
   last_activity?: string | null
-  total_contributions: number
 }
 
 interface TesterAssignment {
@@ -1517,6 +1513,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
   const [departmentFilter, setDepartmentFilter] = useState('')
   const [projectFilter, setProjectFilter] = useState('')
   const [exportingContribution, setExportingContribution] = useState(false)
+  const occupancyTrendQuery = useMemo(() => rangeQuery(range), [range])
 
   useEffect(() => {
     // Keep the previous dashboard visible while a custom period is being
@@ -1609,7 +1606,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
     { key: 'qa_lead_approval_pending', header: 'QA Lead Approval Pending', render: (row) => <strong className={row.qa_lead_approval_pending ? 'tester-pending-count is-qa-lead' : 'muted'}>{row.qa_lead_approval_pending}</strong> },
     { key: 'testcases_approved', header: 'Approved Test Cases', render: (row) => <strong className={row.testcases_approved ? 'tester-approved-count' : 'muted'}>{row.testcases_approved}</strong> },
     { key: 'defects_raised', header: 'Defects Raised', render: (row) => <button className="tester-metric-link danger" disabled={!row.defects_raised} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Defects') }}>{row.defects_raised}</button> },
-    { key: 'retests_performed', header: 'Retests', render: (row) => <button className="tester-metric-link warning" disabled={!row.retests_performed} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Retests') }}>{row.retests_performed}</button> },
+    { key: 'retests_performed', header: 'Defects Retested', render: (row) => <button className="tester-metric-link warning" disabled={!row.retests_performed} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Retests') }}>{row.retests_performed}</button> },
     { key: 'executions_completed', header: 'Execution Attempts', render: (row) => <button className="tester-metric-link" disabled={!row.executions_completed} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Executions') }}>{row.executions_completed}</button> },
     { key: 'projects_worked', header: 'Projects Worked On', render: (row) => <button className="tester-metric-link success" disabled={!row.projects_worked} title={row.project_names.join('\n')} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Projects') }}>{row.projects_worked}</button>, filterValue: (row) => row.project_names.join(' ') },
     { key: 'current_execution_assignments', header: 'Current Assignments', render: (row) => <button className="tester-metric-link" disabled={!row.current_execution_assignments} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Current Assignments') }}>{row.current_execution_assignments}</button> },
@@ -1624,7 +1621,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
     && (!projectFilter || row.project_names.includes(projectFilter))
   ))
   const filteredSummary: TesterContributionSummary = {
-    active_contributors: filteredRows.filter((row) => row.total_contributions > 0).length,
+    active_contributors: filteredRows.filter(hasRecordedTesterActivity).length,
     testcases_created: filteredRows.reduce((sum, row) => sum + row.testcases_created, 0),
     testcases_draft: filteredRows.reduce((sum, row) => sum + row.testcases_draft, 0),
     recommendation_pending: filteredRows.reduce((sum, row) => sum + row.recommendation_pending, 0),
@@ -1635,10 +1632,6 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
     executions_completed: filteredRows.reduce((sum, row) => sum + row.executions_completed, 0),
     projects_covered: new Set(filteredRows.flatMap((row) => row.project_names)).size,
   }
-  const testerContributionChart = Object.fromEntries(
-    [...filteredRows].sort((a, b) => b.total_contributions - a.total_contributions).slice(0, 10)
-      .map((row) => [row.tester_name, row.total_contributions]),
-  )
   const projectCoverageChart = filteredRows.reduce<Record<string, number>>((result, row) => {
     row.project_names.forEach((project) => { result[project] = (result[project] || 0) + 1 })
     return result
@@ -1655,7 +1648,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
       qa_lead_approval_pending: row.qa_lead_approval_pending,
       approved_test_cases: row.testcases_approved,
       defects_raised: row.defects_raised,
-      retests_performed: row.retests_performed, execution_attempts: row.executions_completed,
+      defects_retested: row.retests_performed, execution_attempts: row.executions_completed,
       projects_worked_on: row.projects_worked, project_names: row.project_names.join('; '),
       current_assignments: row.current_execution_assignments,
       last_activity: row.last_activity ? formatDateTimeIST(row.last_activity) : '',
@@ -1668,7 +1661,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
       { key: 'qa_lead_approval_pending', header: 'QA Lead Approval Pending' },
       { key: 'approved_test_cases', header: 'Approved Test Cases' },
       { key: 'defects_raised', header: 'Defects Raised' },
-      { key: 'retests_performed', header: 'Retests Performed' }, { key: 'execution_attempts', header: 'Execution Attempts' },
+      { key: 'defects_retested', header: 'Defects Retested' }, { key: 'execution_attempts', header: 'Execution Attempts' },
       { key: 'projects_worked_on', header: 'Projects Worked On' }, { key: 'project_names', header: 'Project Names' },
       { key: 'current_assignments', header: 'Current Assignments' }, { key: 'last_activity', header: 'Last Activity' },
       { key: 'reporting_period', header: 'Reporting Period' },
@@ -1730,15 +1723,15 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
         <div><small>QA Lead approval pending</small><strong className={filteredSummary.qa_lead_approval_pending ? 'danger' : ''}>{filteredSummary.qa_lead_approval_pending}</strong><span>Recommended and awaiting final approval</span></div>
         <div><small>Approved test cases</small><strong className={filteredSummary.testcases_approved ? 'approved' : ''}>{filteredSummary.testcases_approved}</strong><span>Completed final QA approval</span></div>
         <div><small>Defects raised</small><strong>{filteredSummary.defects_raised}</strong><span>Governed defects reported</span></div>
-        <div><small>Retests performed</small><strong>{filteredSummary.retests_performed}</strong><span>Governed defect retest decisions</span></div>
+        <div><small>Defects retested</small><strong>{filteredSummary.retests_performed}</strong><span>Distinct defects with a latest recorded retest in this period</span></div>
         <div><small>Execution attempts</small><strong>{filteredSummary.executions_completed}</strong><span>Retained testcase run attempts</span></div>
         <div><small>Projects covered</small><strong>{filteredSummary.projects_covered}</strong><span>Distinct projects with real QA activity</span></div>
       </div>
       <div className="grid grid-2 tester-contribution-charts">
-        <Card title="Contribution by tester"><BarChart data={testerContributionChart} /></Card>
+        <Card title="Activity by tester"><TesterActivityChart rows={filteredRows} /></Card>
         <Card title="Project coverage by QA testers"><BarChart data={projectCoverageChart} /></Card>
       </div>
-      <div className="tester-metric-definition" role="note"><strong>How these figures are counted</strong><span>A testcase is counted once from its original author record; versions do not increase the count. Draft, pending, and approved figures show the current workflow stage of testcases created in the selected period. Defects use the reporter. Retests use the recorded retest tester and retest date. Projects require actual authoring, execution, defect, or retest activity. Click any number for record-level evidence.</span></div>
+      <div className="tester-metric-definition" role="note"><strong>How these figures are counted</strong><span>A testcase is counted once from its original author record; versions do not increase the count. Draft, pending, and approved figures show the current workflow stage of testcases created in the selected period. Defects use the reporter. Defects retested uses each defect's latest recorded retest tester and date. Execution attempts include repeat runs. These activity types are counted separately. Projects require actual authoring, execution, defect, or retest activity. Use the linked defect, retest, and execution counts for record-level evidence.</span></div>
       <Card>
         <Table rowKey="tester_id" columns={contributionColumns} rows={filteredRows} onRowClick={(row) => openContribution(row)} />
       </Card>
@@ -1771,6 +1764,8 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
       </Card>}
       </>}
       {view === 'capacity' && <>
+      <Card><TesterOccupancyTrend query={occupancyTrendQuery} periodLabel={periodLabel} selectedTesterId={selectedCapacityTesterId} onSelectTester={setSelectedCapacityTesterId} /></Card>
+      <div className="dashboard-section-head"><div><strong>Current capacity &amp; occupancy</strong><span>Live assignments now. The trend above uses the selected reporting period.</span></div></div>
       <div className="tester-workload-summary">
         <div><small>Average team occupancy</small><strong>{workload.average_occupancy}%</strong><span>Across {workload.rows.length} active QA team members</span></div>
         <div><small>Available team members</small><strong>{workload.available_testers}</strong><span>Below 50% occupied</span></div>
