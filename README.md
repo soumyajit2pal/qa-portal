@@ -201,6 +201,36 @@ current, clear results for every repository in scope. A pending suppression appr
 blocks fix submission for the request because existing suppressions are linked to requests,
 not individual repositories.
 
+## Reconsidering rejected application names
+
+On a Draft QA request with a rejected application name, select **Resubmit application
+name for approval** and provide a reason describing the discussion outcome and BCP
+policy compliance. The request returns to Submitted for a fresh Application Owner
+decision within its workspace, regardless of department. The submitter cannot decide
+their own proposal, including when they also hold Administrator and Application Owner
+roles. Required readiness checks and evidence still apply.
+
+The existing request ID, staged details, documents, and prior decisions are retained.
+Approval creates linked requests only for submitted gateways; older Draft, Cancelled,
+or previously rejected linked requests are not automatically restarted. Saving a draft
+or entering the same rejected name on another request does not reopen the rejection.
+Every reconsideration reason and subsequent decision remains in Activity.
+Admin manual entry and workbook seeding leave reconsideration rounds pending; the
+fresh decision must be made through the Application Owner action on the QA request.
+
+Users who also hold Administrator and Requester roles can reconsider a global name
+previously proposed in another department through their own eligible Draft request.
+Other department and workspace restrictions remain enforced. When email is enabled,
+resubmission notifies eligible Application Owners and rejection notifies the requester
+to choose an existing name or request reconsideration. Cancelling an older draft sharing
+the name does not send an approval task for that cancelled request.
+
+Before starting the updated backend, apply migration `f4a1c9d8e730` through the existing
+deployment's `alembic upgrade head` procedure, then deploy backend and frontend together.
+The migration adds a nullable application-name reference, foreign key, and index to the
+approval history. Existing history is not rewritten, and interrupted upgrades can be
+retried. Rollback retains the history references.
+
 ## DAST target workflow
 
 DAST follows the same independent workflow for each application URL. The
@@ -284,6 +314,16 @@ in the deployment secret store **before issuing protected signatures**. Keep it 
 back it up, and use the same value in every backend worker. If omitted, the seal key is
 derived from `SECRET_KEY`. Changing the effective key makes earlier signatures/PDFs
 unverifiable, so retain the original key when rotating unrelated authentication secrets.
+
+## Application name approval
+
+New application names proposed through **Other (new application)** in a QA Request
+are decided by any user with the **Application Owner** role and operational access
+to that request's workspace, regardless of department. The pending list, approval
+count, approver directory, and notification routing use this same scope. Drafts
+and cancelled requests remain private, and a proposer cannot approve their own
+name. Approval creates the linked requests for their usual SM workflow. Deploy
+the backend and rebuilt frontend together; no database migration is required.
 
 ## Global search suggestions
 

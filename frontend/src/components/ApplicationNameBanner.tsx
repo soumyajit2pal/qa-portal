@@ -1,13 +1,16 @@
 import React, { useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
-import { hasWorkflowRole as hasRole } from '../constants'
+import { hasWorkflowRole as hasRole, isViewOnly } from '../constants'
 import { ErrorText } from './Common'
 
 interface Props {
   applicationMasterId?: number | null
   applicationMasterStatus?: string | null
   applicationName?: string | null
+  requestedById?: number | null
+  canReviewApplicationName?: boolean
+  reconsiderationReason?: string | null
   department?: string | null
   onDecided: (decision: 'Approved' | 'Rejected') => void
   onRefresh: () => void
@@ -42,10 +45,9 @@ interface Props {
 // that up immediately. (PENDING_SM/isSmTier below is legacy-only, for any
 // row that predates this change -- see decide_application_name's own
 // docstring; no new name can ever reach it.) Only rendered for whichever
-// role owns the CURRENT tier (or Admin); require_same_department is
-// enforced server-side regardless, so someone from a different department
-// gets a 403 here rather than silently succeeding.
-export function ApplicationNameBanner({ applicationMasterId, applicationMasterStatus, applicationName, onDecided, onRefresh }: Props) {
+// role owns the CURRENT tier. Application Owners use operational workspace
+// access across departments; the legacy SM tier retains department scope.
+export function ApplicationNameBanner({ applicationMasterId, applicationMasterStatus, applicationName, requestedById, canReviewApplicationName, reconsiderationReason, onDecided, onRefresh }: Props) {
   const { user } = useAuth()
   const [busy, setBusy] = useState<'Approved' | 'Rejected' | null>(null)
   // Reported directly: a reviewer could click Approve/Reject more than once
@@ -70,8 +72,11 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
 
   const isAppOwnerTier = applicationMasterStatus === 'PENDING_APP_OWNER'
   const isSmTier = applicationMasterStatus === 'PENDING_SM'
-  const canDecideHere = (isAppOwnerTier && hasRole(user, 'APPLICATION_OWNER'))
-    || (isSmTier && hasRole(user, 'SM'))
+  // The server resolves inherited child-workspace access. A direct-membership
+  // check here would incorrectly hide decisions from eligible Parent Admins.
+  const canDecideHere = user?.id !== requestedById
+    && ((isAppOwnerTier && hasRole(user, 'APPLICATION_OWNER') && canReviewApplicationName === true)
+    || (isSmTier && !isViewOnly(user) && hasRole(user, 'SM')))
 
   if (!applicationMasterId || (!canDecideHere && !decided)) return null
 
@@ -142,10 +147,14 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
       display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
     }}>
       <span>
-        <strong>New Application Name "{applicationName || '—'}" Pending "{tierLabel}"" Approval:</strong>  -- needs your decision{isAppOwnerTier
+        <strong>Application name "{applicationName || '—'}" awaiting {tierLabel} approval:</strong> needs your decision{isAppOwnerTier
           ? ' before it becomes a selectable option for everyone else and the linked request can move on to SM for readiness verification.'
           : ' before it becomes a selectable option for everyone else.'}
       </span>
+      {reconsiderationReason && <p style={{ width: '100%', margin: 0, whiteSpace: 'pre-wrap' }}>
+        <strong>Reason for reconsideration:</strong> {reconsiderationReason}
+        <br /><span className="small">Previous decisions remain in Activity.</span>
+      </p>}
       <input
         type="text"
         placeholder="Remarks (required for rejection)"

@@ -1,6 +1,6 @@
 import React, { useId } from 'react'
 import type { RepeatableGroupField, RepeatableGroupRow } from './Common'
-import { Field } from './Common'
+import { Field, WarningNotice } from './Common'
 
 export const SAST_COMPONENT_FIELDS: RepeatableGroupField[] = [
   { key: 'repository_url', label: 'Repository URL', placeholder: 'https://source-control/project/repository.git' },
@@ -85,7 +85,7 @@ export default function SastRepositoryDetails({
                   />
                   {field.key === 'repository_url' && (
                     repository.repository_url?.trim() && !isGitRepositoryUrl(repository.repository_url)
-                      ? <small id={`${fieldHelpId}-${index}`} className="security-repository-url-warning" role="status">Warning: this does not match the usual Git clone URL format ending in .git. Confirm the repository reference; you can still continue and submit.</small>
+                      ? <WarningNotice id={`${fieldHelpId}-${index}`} className="security-repository-url-warning" role="status" compact>This does not match the usual Git clone URL format ending in .git. Confirm the repository reference; you can still continue and submit.</WarningNotice>
                       : <small id={`${fieldHelpId}-${index}`} className="muted">A Git clone URL ending in .git is recommended.</small>
                   )}
                 </label>

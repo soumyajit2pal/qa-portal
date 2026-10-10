@@ -16,7 +16,7 @@ import {
   SUPPRESSION_STATUS_LABELS,
   PERFORMANCE_STATUS_LABELS,
 } from "../constants";
-import { IconFolder, IconFilter, IconEdit } from "./Icons";
+import { IconFolder, IconFilter, IconEdit, IconWarning } from "./Icons";
 import MultiSelect from "./MultiSelect";
 import { api, HttpError } from "../api";
 import { useAuth } from "../context/AuthContext";
@@ -400,6 +400,28 @@ export function BarChart({
   );
 }
 
+export function WarningNotice({ title = "Warning", children, className = "", compact = false, active = true, role = "status", id, style }: {
+  title?: ReactNode;
+  children?: ReactNode;
+  className?: string;
+  compact?: boolean;
+  active?: boolean;
+  role?: "alert" | "status" | "note";
+  id?: string;
+  style?: React.CSSProperties;
+}) {
+  if (!active) return <div className={className} role={role} id={id} style={style}>{children}</div>;
+  return (
+    <div className={`warning-notice${compact ? " warning-notice-compact" : ""} ${className}`} role={role} id={id} style={style}>
+      <span className="warning-notice-icon" aria-hidden="true"><IconWarning /></span>
+      <div className="warning-notice-body">
+        <strong className="warning-notice-title">{title}</strong>
+        <div className="warning-notice-content">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 interface ModalProps {
   title: ReactNode;
   onClose: () => void;
@@ -431,6 +453,7 @@ interface ModalProps {
   // Prevent an explicit header close while a non-interruptible operation is
   // running. The disabled control makes the lock visible and accessible.
   closeDisabled?: boolean;
+  tone?: "warning" | "danger";
 }
 
 export function Modal({
@@ -443,6 +466,7 @@ export function Modal({
   variant = "drawer",
   preventBackdropClose,
   closeDisabled,
+  tone,
 }: ModalProps) {
   const [shake, setShake] = useState(false);
   const titleId = useId();
@@ -523,6 +547,13 @@ export function Modal({
     setTimeout(() => setShake(false), 320);
   }
 
+  const heading = tone ? (
+    <div className="modal-tone-heading">
+      <span className="modal-tone-icon" aria-hidden="true"><IconWarning /></span>
+      <div><span className="modal-tone-label">{tone === "warning" ? "Warning" : "Destructive action"}</span><h3 id={titleId}>{title}</h3></div>
+    </div>
+  ) : <h3 id={titleId}>{title}</h3>;
+
   // Mount outside cards/tables: transformed or clipped ancestors otherwise
   // constrain fixed overlays to the card instead of the viewport.
   if (variant === "dialog") {
@@ -537,13 +568,13 @@ export function Modal({
           aria-modal="true"
           aria-labelledby={titleId}
           tabIndex={-1}
-          className={`dialog ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${fitContent ? "dialog-fit-content" : ""} ${
+          className={`dialog ${tone ? `modal-tone-${tone}` : ""} ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${fitContent ? "dialog-fit-content" : ""} ${
             shake ? "modal-shake" : ""
           }`}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="drawer-header">
-            <h3 id={titleId}>{title}</h3>
+            {heading}
             <button
               type="button"
               className="modal-close-btn"
@@ -572,13 +603,13 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className={`drawer ${wide ? "drawer-wide" : ""} ${expanded ? "drawer-expanded" : ""} ${
+        className={`drawer ${tone ? `modal-tone-${tone}` : ""} ${wide ? "drawer-wide" : ""} ${expanded ? "drawer-expanded" : ""} ${
           shake ? "modal-shake" : ""
         }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="drawer-header">
-          <h3 id={titleId}>{title}</h3>
+          {heading}
           <div className="drawer-header-actions">
             <button
               type="button"
@@ -2300,9 +2331,9 @@ export function ChecklistEvidenceDeleteModal({
   onCancel: () => void;
 }) {
   return (
-    <Modal title="Delete checklist evidence?" onClose={onCancel} variant="dialog" preventBackdropClose>
+    <Modal title="Delete checklist evidence?" onClose={onCancel} variant="dialog" compact tone="danger" preventBackdropClose>
       <p>Delete <strong>{fileName}</strong>{itemLabel ? ` ${itemLabel}` : ""}? This cannot be undone.</p>
-      <div className="form-actions">
+      <div className="modal-actions">
         <button type="button" className="btn btn-danger" disabled={busy} onClick={onConfirm}>
           {busy ? "Deleting…" : "Delete"}
         </button>

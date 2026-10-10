@@ -1,6 +1,6 @@
 import React, { ReactNode, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { PageHeader } from './components/Common'
+import { PageHeader, WarningNotice } from './components/Common'
 import {
   IconApprove,
   IconArrowRight,
@@ -97,7 +97,7 @@ const ROLE_ROWS = [
   ['Requester', 'Raise QA requests; add request details and evidence; correct returned requests; confirm completion.', 'Own requests and returned actions.'],
   ['Developer', 'Same portal authority as Requester: raise and own QA requests, correct returned work, and confirm completion.', 'Own requests and returned actions.'],
   ['Business Analyst', 'Raise QA requests and provide business or requirement context.', 'Request initiation.'],
-  ['Application Owner', 'Approve or reject a newly proposed application name for the same department.', 'Same-department application-name decisions.'],
+  ['Application Owner', 'Approve or reject a newly proposed application name in the workspace, regardless of department.', 'Workspace application-name decisions.'],
   ['SM', 'Review the requester’s submission before Department Head review.', 'Same department; cannot approve their own request.'],
   ['Chief Manager / AGM – Department', 'Approve or return a request and assign a QA Lead.', 'Business department approval role. Local administration is assigned separately.'],
   ['QA Engineer (QA)', 'Author test cases, execute assigned work, record results, link defects, and raise QA Clearance.', 'QA role within an assigned workspace.'],
@@ -164,9 +164,10 @@ function Workflow({ label, steps }: { label: string; steps: string[] }) {
 }
 
 function Callout({ tone = 'info', title, children }: { tone?: 'info' | 'warning' | 'success'; title: string; children: ReactNode }) {
+  if (tone === 'warning') return <WarningNotice title={title}>{children}</WarningNotice>
   return (
     <div className={`help-callout ${tone}`}>
-      {tone === 'warning' ? <IconWarning aria-hidden="true" /> : <IconCheckCircle aria-hidden="true" />}
+      <IconCheckCircle aria-hidden="true" />
       <div><strong>{title}</strong><p>{children}</p></div>
     </div>
   )
@@ -313,7 +314,7 @@ export default function Help() {
                 <p>The user does not switch roles. The portal evaluates all active roles whenever a page or action is opened.</p>
               </div>
               <SopSteps items={[
-                { title: 'Application-name decision', text: 'When a request proposes a new application name, the user can act as Application Owner for the same department.' },
+                { title: 'Application-name decision', text: 'When a request proposes a new application name, any Application Owner in its workspace can decide, regardless of department.' },
                 { title: 'Request-stage decision', text: 'After the application name is approved and the linked request reaches SM Approval Pending, the same account can perform the SM responsibility for an eligible same-department request.' },
                 { title: 'Controls still apply', text: 'The account cannot bypass the current stage, department scope, assignment requirement, or self-approval restriction merely because it has both roles.' },
                 { title: 'Audit remains explicit', text: 'Every decision records the person, timestamp, action, comments, and the complete role set held by that account.' },
@@ -385,6 +386,7 @@ export default function Help() {
                 { title: 'Select required testing', text: 'Choose Functional, Sanity, Regression, UAT Support, Performance, SAST, and/or DAST. The form displays the correct detail and self-declaration section for each selection.' },
                 { title: 'Complete readiness self-declaration', text: 'Confirm each applicable criterion and attach evidence for every mandatory item during request creation. A request cannot be raised while mandatory evidence is missing.' },
                 { title: 'Save Draft or Submit', text: 'Draft keeps the gateway editable. Submit validates mandatory data and raises linked request records when any required application-name approval is complete.' },
+                { title: 'Reconsider a rejected application name', text: 'Open the rejected Draft and choose Resubmit application name for approval. Explain the discussion outcome and how the same name meets the BCP policy. Any eligible Application Owner in the workspace can review it, regardless of department; the submitter cannot approve their own proposal. The same request ID, saved details, documents, and previous decisions are retained. Linked requests are generated only after approval. Saving a draft or entering the name on another request does not reopen a rejection.' },
                 { title: 'Delegate for input when needed', text: 'Whenever a request is with the requester for drafting or corrections, the requester can assign any active user—even from another department—to edit it and upload documents. The requester remains the owner and workflow progression stays locked until the assignee returns it or the requester recalls it.' },
                 { title: 'Track linked records', text: 'Open the gateway details to see each generated TQA-FUNC, TQA-SAST, TQA-DAST, or TQA-PERF ID and its independent status.' },
                 { title: 'Correct returned requests', text: 'Read the approver’s reason, edit details, attach requested evidence, comment with the correction, and resubmit.' },

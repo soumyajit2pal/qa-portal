@@ -606,7 +606,7 @@ def _next_approver_roles(target) -> set[str]:
             return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
     if isinstance(target, models.TestProject) and target.pending_is_active is not None:
         return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
-    if isinstance(target, models.QARequest):
+    if isinstance(target, models.QARequest) and status not in {"DRAFT", "CANCELLED"}:
         application = getattr(target, "application_master", None)
         application_status = str(getattr(application, "status", "") or "").upper()
         if application_status == "PENDING_APP_OWNER":
@@ -993,8 +993,9 @@ def _notification_route(db, action, target):
     department = _department(target)
     workflow_departments = _workflow_departments(target)
     roles = _next_approver_roles(target)
+    application_name_review = roles == {Role.APPLICATION_OWNER}
     department_scoped = bool(roles & {Role.SM, Role.DEPARTMENT_HEAD_CM,
-                                     Role.DEPARTMENT_HEAD_AGM, Role.APPLICATION_OWNER})
+                                     Role.DEPARTMENT_HEAD_AGM})
     recipients = set()
     for uid in route.recipient_ids:
         user = db.get(models.User, uid)
@@ -1003,6 +1004,10 @@ def _notification_route(db, action, target):
         if workspace and workspace not in selectable_workspace_ids(db, user):
             continue
         if route.action_required:
+            if application_name_review:
+                from .application_approval import can_review_application_in_workspace
+                if not can_review_application_in_workspace(db, user, workspace):
+                    continue
             # Organisation-wide read-only profiles may inspect workflow data,
             # but cannot perform its next action even when the same account
             # also holds the nominal approver role.
@@ -1047,12 +1052,15 @@ def _notification_route(db, action, target):
                     (item for item in workflow_departments if user.has_department(item)),
                     workflow_departments[0],
                 )
-            if not admin_department_allowed(user, action_department):
+            if not application_name_review and not admin_department_allowed(user, action_department):
                 continue
             if department_scoped and (
                 not workflow_departments
                 or not any(user.has_department(item) for item in workflow_departments)
             ):
+                continue
+            application = getattr(target, 'application_master', None)
+            if application_name_review and application and uid == application.requested_by_id:
                 continue
             if department_scoped and uid in _requester_user_ids(target):
                 continue
@@ -1083,6 +1091,16 @@ def _unfiltered_notification_route(db: SASession, action: models.ApprovalAction,
             reference, getattr(target, "status", None), action.decision or "",
         )
         return None
+
+    if (isinstance(target, models.QARequest) and target.status == "DRAFT"
+            and target.application_master_status == "REJECTED"
+            and action.step_name in {"Application Name (Application Owner)", "Application Name (SM)"}
+            and action.decision == "Rejected"):
+        return NotificationRoute(
+            _requester_user_ids(target), "Requester", True,
+            "The application name was rejected and this QA request is back in Draft. "
+            "Choose an available application or explicitly resubmit the name with a reason for reconsideration.",
+        )
 
     if isinstance(target, models.Defect):
         route = _defect_notification_route(db, target)
@@ -1127,7 +1145,7 @@ def _unfiltered_notification_route(db: SASession, action: models.ApprovalAction,
         from .workflow_authority import admin_department_allowed
         recipients = {recipient_id for recipient_id in recipients
                       if (recipient := db.get(models.User, recipient_id)) is not None
-                      and (not workflow_departments or any(
+                      and (roles == {Role.APPLICATION_OWNER} or not workflow_departments or any(
                           admin_department_allowed(recipient, item) for item in workflow_departments
                       ))}
         logger.info(

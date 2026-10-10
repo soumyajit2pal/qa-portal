@@ -734,7 +734,7 @@ class ApplicationMaster(Base):
     minimise case-sensitivity duplicates).
 
     Single-tier approval (2026-08 v2): a brand-new name starts at
-    PENDING_APP_OWNER -- an Application Owner from the same department must
+    PENDING_APP_OWNER -- an Application Owner with operational workspace access must
     approve it (see routers/applications.py::decide_app_owner_name) -- and
     that decision is immediately terminal either way: Approved goes straight
     to APPROVED (a pickable option for everyone else going forward, and no
@@ -756,9 +756,10 @@ class ApplicationMaster(Base):
     migration notes converts any such row straight to APPROVED, so this
     should not normally be reachable at all) -- no NEW name can ever reach
     PENDING_SM again. Approving/rejecting the name is independent of
-    approving the request itself in the sense that raising/saving a request
-    is never blocked on it (_resolve_application_name never blocks the
-    caller) -- but the request's own SM/Department Head Approval decisions
+    approving the request itself. Drafts can be saved under a rejected
+    name, but ordinary submission requires an approved/pending name or
+    explicit reconsideration with a
+    reason. The request's own SM/Department Head Approval decisions
     ARE blocked from reaching "Approved" while this is anything other than
     APPROVED (see application_name_block_message in constants.py and its 6
     call sites across functional.py/sast_dast.py/performance.py)."""
@@ -768,17 +769,15 @@ class ApplicationMaster(Base):
     # PENDING_APP_OWNER / PENDING_SM / APPROVED / REJECTED -- see the class
     # docstring above and constants.APPLICATION_MASTER_STATUSES.
     status = Column(String(20), default="PENDING_APP_OWNER", index=True)
-    # The department context the name was proposed under -- who gets to
-    # decide at EITHER tier (see require_same_department in
-    # routers/applications.py), same scoping rule as every other SM/
-    # Department Head approval checkpoint in the app -- an Application Owner
-    # from this same department decides first, then an SM from it.
+    # The department context the name was proposed under, retained for
+    # reporting. Application Owner decisions use workspace access across
+    # departments; only the legacy SM tier remains department-scoped.
     department = Column(String(150))
     requested_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # The QA Request that first introduced this name -- purely for
+    # The QA Request that introduced the current review round -- used for
     # traceability/display (e.g. "requested via TQA-REQ-..."), nullable since
-    # a REJECTED name that gets proposed again later re-links to whichever
-    # QA Request triggered that.
+    # a REJECTED name can explicitly re-enter review on a QA Request.
+    # Previous proposals and decisions remain in the append-only activity log.
     # Intentional cycle: ApplicationMaster traces the introducing QARequest,
     # while QARequest points back to its resolved ApplicationMaster. Tell
     # SQLAlchemy/Alembic to add this side after both tables exist so metadata
@@ -1038,6 +1037,24 @@ class QARequest(Base):
     @property
     def application_master_status(self):
         return self.application_master.status if self.application_master else None
+
+    @property
+    def application_master_requested_by_id(self):
+        return self.application_master.requested_by_id if self.application_master else None
+
+    @property
+    def application_name_rejection_reason(self):
+        application = self.application_master
+        if application and application.status == "REJECTED":
+            return application.app_owner_comments or application.comments
+        return None
+
+    @property
+    def application_name_reconsideration_reason(self):
+        application = self.application_master
+        if application and application.status == "PENDING_APP_OWNER" and application.qa_request:
+            return application.qa_request._draft_details().get("application_name_reconsideration_reason")
+        return None
 
 class QARequestDelegation(Base):
     """Temporary, request-specific editing access granted by the requester.
@@ -1334,6 +1351,10 @@ class FunctionalRequest(Base):
         return self.qa_request.application_master_status if self.qa_request else None
 
     @property
+    def application_master_requested_by_id(self):
+        return self.qa_request.application_master_requested_by_id if self.qa_request else None
+
+    @property
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
 
@@ -1515,6 +1536,10 @@ class SASTRequest(Base):
     @property
     def application_master_status(self):
         return self.qa_request.application_master_status if self.qa_request else None
+
+    @property
+    def application_master_requested_by_id(self):
+        return self.qa_request.application_master_requested_by_id if self.qa_request else None
 
     @property
     def application_master_id(self):
@@ -1769,6 +1794,10 @@ class DASTRequest(Base):
         return self.qa_request.application_master_status if self.qa_request else None
 
     @property
+    def application_master_requested_by_id(self):
+        return self.qa_request.application_master_requested_by_id if self.qa_request else None
+
+    @property
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
 
@@ -2016,6 +2045,10 @@ class PerformanceRequest(Base):
     @property
     def application_master_status(self):
         return self.qa_request.application_master_status if self.qa_request else None
+
+    @property
+    def application_master_requested_by_id(self):
+        return self.qa_request.application_master_requested_by_id if self.qa_request else None
 
     @property
     def application_master_id(self):
@@ -2280,7 +2313,10 @@ class ApprovalAction(Base):
     (QA_REQUEST, TEST_CASE, SAST_DAST, SUPPRESSION, SIGNOFF ...).
     """
     __tablename__ = "qap_approval_actions"
-    __table_args__ = (UniqueConstraint("signature_id", name="uq_qap_approval_sig_id"),)
+    __table_args__ = (
+        UniqueConstraint("signature_id", name="uq_qap_approval_sig_id"),
+        Index("ix_qap_appract_application", "application_master_id"),
+    )
     id = pk_column()
     # entity_type no longer index=True on its own -- superseded by the
     # composite ix_qap_appract_entity_created below (same leading column,
@@ -2288,6 +2324,11 @@ class ApprovalAction(Base):
     # kept -- see that block's comment for why.
     entity_type = Column(String(32))
     entity_id = Column(Integer, index=True)
+    # Stable application-name identity for its review rounds. Gateway
+    # pointers can change names, so entity_id alone cannot identify a round.
+    application_master_id = Column(Integer, ForeignKey(
+        "qap_application_master.id", name="fk_qap_appract_application",
+    ), nullable=True)
     step_name = Column(String(64))
     actor_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     # Widened from 32 -> 150: with multi-role users this stores a CSV

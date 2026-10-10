@@ -8,25 +8,7 @@ import { api } from "../../api";
 import { createLatestRequestGate } from "../../latestRequest";
 import { formatDateTimeIST, istToday } from "../../time";
 import { useAuth } from "../../context/AuthContext";
-import {
-  Card,
-  Table,
-  Badge,
-  Modal,
-  Field,
-  ErrorText,
-  PageHeader,
-  ApprovalDecisionButtons,
-  DetailSection,
-  DetailField,
-  RequestDocuments,
-  ChecklistEvidence,
-  useChecklistDocuments,
-  ReadinessPassError,
-  EmptyState,
-  WorkflowDecisionPanel,
-  applicationNameAwareStatusLabel,
-} from "../../components/Common";
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, ReadinessPassError, EmptyState, WorkflowDecisionPanel, applicationNameAwareStatusLabel, WarningNotice } from "../../components/Common";
 import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
 import UserAssignSelect from "../../components/UserAssignSelect";
 import ConfirmModal from "../../components/ConfirmModal";
@@ -1413,17 +1395,8 @@ export function FunctionalDetail({
 
           {(canSMDecide || canDepartmentHeadDecide) &&
             pendingSelfDeclare.length > 0 && (
-              <div
-                style={{
-                  marginTop: 8,
-                  marginBottom: 8,
-                  background: "#fffaeb",
-                  border: "1px solid #fde68a",
-                  borderRadius: 10,
-                  padding: "10px 14px",
-                  color: "#92400e",
-                  fontSize: 13,
-                }}
+              <WarningNotice
+                style={{ marginTop: 8, marginBottom: 8 }}
               >
                 <strong>Cannot Sign/Approve yet</strong> — the following
                 mandatory Readiness checklist item(s) must be self-declared
@@ -1433,7 +1406,7 @@ export function FunctionalDetail({
                     <li key={item}>{item}</li>
                   ))}
                 </ul>
-              </div>
+              </WarningNotice>
             )}
 
           <div className="section-title">Workflow Actions</div>
@@ -1450,23 +1423,14 @@ export function FunctionalDetail({
             </div>
           )}
           {completeQAMissingCycle && (
-            <div className="execution-cycle-required-warning" role="alert">
+            <WarningNotice className="execution-cycle-required-warning" role="alert">
               <strong>Mark QA Complete is locked</strong>
               <span>This request has no linked Test Cycle. Relink it from Test Lifecycle before continuing.</span>
-            </div>
+            </WarningNotice>
           )}
           {completeQABlockedByCycle && (
-            <div
-              style={{
-                marginTop: 8,
-                marginBottom: 8,
-                background: "#fffaeb",
-                border: "1px solid #fde68a",
-                borderRadius: 10,
-                padding: "10px 14px",
-                color: "#92400e",
-                fontSize: 13,
-              }}
+            <WarningNotice
+              style={{ marginTop: 8, marginBottom: 8 }}
             >
               <strong>Mark QA Complete is locked</strong> — every linked Test
               Cycle must reach Completed first. Still open:{" "}
@@ -1475,7 +1439,7 @@ export function FunctionalDetail({
                 .join(", ")}
               . Raise and retest defects from Test Execution / the Defects
               module against the linked cycle.
-            </div>
+            </WarningNotice>
           )}
           <div className="actions-panel">
             <div
@@ -1892,14 +1856,14 @@ export function FunctionalDetail({
                     </p>
                   )}
                   {eligibleRetestSourceCycles.length === 0 && (
-                    <div className="execution-cycle-required-warning" role="alert">
+                    <WarningNotice className="execution-cycle-required-warning" role="alert">
                       <strong>Re-test is unavailable</strong>
                       <span>{!req.signoff_certificate_environment
                         ? "The held certificate does not have a tested environment, so a safe re-execution baseline cannot be selected."
                         : completedCycleLineageLeaves.length
                           ? `No latest completed linked Test Cycle matches the held certificate environment ${req.signoff_certificate_environment}. Latest cycle environment(s): ${completedCycleLineageLeaves.map((cycle) => `${cycle.cycle_key} (${cycle.environment || "not recorded"})`).join(", ")}.`
                           : "No eligible completed linked Test Cycle exists to use as the re-execution baseline."}</span>
-                    </div>
+                    </WarningNotice>
                   )}
                   <WorkflowDecisionPanel
                     busy={!!busyAction}

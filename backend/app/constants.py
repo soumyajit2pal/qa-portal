@@ -752,7 +752,7 @@ SUPPRESSION_TERMINAL_STATUSES = ["Done", "Rejected"]
 
 # ---- Application Name Master (see models.ApplicationMaster) ----
 # A brand-new name introduced via the QA Request wizard's "Other" option
-# starts PENDING_APP_OWNER; an Application Owner from the same department
+# starts PENDING_APP_OWNER; an Application Owner in the request's workspace
 # either APPROVEs it (making it a selectable option in the dropdown for
 # everyone going forward, and sending its request's own linked child
 # requests straight to their assigned SM's normal readiness-verification

@@ -21,8 +21,10 @@
 .signature-result-heading svg { flex-shrink: 0; }
 .signature-verification-result.success { border-top: 3px solid #218357; }
 .signature-verification-result.success .signature-result-heading { color: #167348; }
-.signature-verification-result.warning { border-top: 3px solid #b77916; }
-.signature-verification-result.warning .signature-result-heading { color: #92600c; }
+.signature-verification-result.warning { border-color: var(--warning-border); border-top: 5px solid #d98b0b; background: var(--warning-surface); }
+.signature-verification-result.warning .signature-result-heading { color: var(--warning-heading); }
+.signature-verification-result.warning .signature-result-heading > svg { box-sizing: content-box; padding: 10px; border: 1px solid #edbd57; border-radius: 11px; background: #ffebba; }
+.signature-verification-result.warning .signature-result-heading p { color: var(--warning-ink); }
 .signature-verification-result.danger { border-top: 3px solid #c14343; }
 .signature-verification-result.danger .signature-result-heading { color: #a52d2d; }
 .signature-result-heading h3 { margin: 0; }

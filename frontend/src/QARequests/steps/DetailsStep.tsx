@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../api";
 import { istToday } from "../../time";
-import { Field } from "../../components/Common";
+import { Field, Modal } from "../../components/Common";
 import SearchableSelect from "../../components/SearchableSelect";
 import { CHANGE_TYPES, DEPLOYMENT_ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
 import { ApplicationMasterOut } from "../../types";
@@ -44,16 +44,14 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
     : departmentOptions;
   const [crError, setCrError] = useState("");
   // Approved names only -- a brand-new name typed via "Other" doesn't show up
-  // here until an Application Owner, then an SM, both from the requester's
-  // department, approve it in turn (see backend
-  // routers/applications.py::list_application_names and the "New
-  // Application Name Pending ... Approval" banner on each linked module's
-  // own detail view). Always includes "Other" itself as a standing option
+  // here until an Application Owner in the workspace approves it on the
+  // master QA Request. Always includes "Other" as a standing option
   // regardless of what's been approved so far.
   const [approvedNames, setApprovedNames] = useState<ApplicationMasterOut[]>(
     []
   );
   const [showOther, setShowOther] = useState(false);
+  const [showNewApplicationWarning, setShowNewApplicationWarning] = useState(false);
   const [bugFixSources, setBugFixSources] = useState<BugFixSourceOption[]>([]);
 
   useEffect(() => {
@@ -105,6 +103,50 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
 
   return (
     <>
+      {showNewApplicationWarning && (
+        <Modal
+          title="New application name warning"
+          onClose={() => setShowNewApplicationWarning(false)}
+          variant="dialog"
+          tone="warning"
+          compact
+          preventBackdropClose
+        >
+          <p>
+            A new application name must comply with the <strong>BCP policy</strong>.
+            If it does not meet the policy requirements, the Application Owner will reject the name.
+          </p>
+          <p>
+            To make the approval process easier, please select an available application whenever possible.
+          </p>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="btn btn-warning"
+              onClick={() => {
+                setShowNewApplicationWarning(false);
+                if (showOther) {
+                  setShowOther(false);
+                  set("application_name", "");
+                }
+              }}
+            >
+              Choose available application
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setShowNewApplicationWarning(false);
+                if (!showOther) set("application_name", "");
+                setShowOther(true);
+              }}
+            >
+              Continue with new name
+            </button>
+          </div>
+        </Modal>
+      )}
       <div className="form-section">
         <div className="form-section-title">
           Application &amp; Change Details
@@ -119,8 +161,7 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
               placeholder="Select Application Name"
               onChange={(v) => {
                 if (v === OTHER) {
-                  setShowOther(true);
-                  set("application_name", "");
+                  setShowNewApplicationWarning(true);
                 } else {
                   setShowOther(false);
                   set("application_name", v);
@@ -143,8 +184,7 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
                   style={{ marginTop: 6 }}
                 />
                 <p className="muted small" style={{ margin: "4px 0 0" }}>
-                New names are automatically capitalized and remain “Pending Approval” until approved by 
-                your department’s Application Owner and SM. Your request can proceed during approval.
+                New names are automatically capitalized. After submission, any Application Owner in this workspace can approve the name, regardless of department. Linked requests are created after approval.
                 </p>
               </>
             )}

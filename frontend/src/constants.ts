@@ -251,9 +251,9 @@ export function canReassign(user: RoleBearer | null | undefined, currentAssignee
 }
 
 // Mirrors backend/app/constants.py's APPLICATION_MASTER_STATUS_LABELS
-// exactly -- a brand-new Application Name goes through two approval tiers
-// (PENDING_APP_OWNER, then PENDING_SM) before becoming APPROVED; either
-// tier can REJECT it, which is terminal. See ApplicationNameBanner.tsx.
+// exactly -- a new name needs one Application Owner decision within its
+// workspace, regardless of department. PENDING_SM is retained for legacy
+// records. See ApplicationNameBanner.tsx.
 export const APPLICATION_MASTER_STATUS_LABELS: Record<string, string> = {
   // Reported directly, with this exact wording: "the request status shall be
   // displayed as 'Application Owner Approval Pending.'"

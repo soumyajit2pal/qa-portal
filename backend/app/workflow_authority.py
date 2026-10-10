@@ -39,6 +39,25 @@ def workflow_context(user, *, enabled=True):
         _workflow_actors.reset(token)
 
 
+@contextmanager
+def application_name_reconsideration_context(db, application_id):
+    """Allow a validated new round to reuse a global name across departments.
+
+    Only the named master may change its old proposal department. The QA
+    request, current department and every other write retain normal checks.
+    """
+    key = 'workspace_application_name_reconsideration'
+    previous = db.info.get(key)
+    db.info[key] = application_id
+    try:
+        yield
+    finally:
+        if previous is None:
+            db.info.pop(key, None)
+        else:
+            db.info[key] = previous
+
+
 def workflow_endpoint(fn):
     """Also applies to direct service calls used by tests and diagnostics."""
     @wraps(fn)
@@ -62,6 +81,8 @@ def require_admin_department(user, department):
 
 def configure_request(db, user, request, *, workflow=False, read_operation=False):
     _workflow_actors.set((user,) if workflow else ())
+    db.info.pop('workspace_application_name_decision', None)
+    db.info.pop('workspace_application_name_reconsideration', None)
     # Trusted dependencies may classify an inspection POST as a read. Keep
     # the same read authority context without registering a mutation actor.
     if not workflow or read_operation or request.method.upper() in {'GET', 'HEAD', 'OPTIONS'}:
@@ -69,6 +90,15 @@ def configure_request(db, user, request, *, workflow=False, read_operation=False
     if is_system_admin(user) and not set(user.roles) & WORKFLOW_ROLES:
         raise HTTPException(403, 'Administrator access does not grant workflow authority. An explicit workflow role is required.')
     db.info['workflow_actor'] = user
+    parts = request.url.path.strip('/').split('/')
+    if (len(parts) == 4 and parts[:2] == ['api', 'application-names']
+            and parts[2].isdigit() and parts[3] == 'app-owner-decision'
+            and 'APPLICATION_OWNER' in user.roles):
+        # This endpoint checks operational workspace access itself. Its
+        # approval also creates children and audit entries in the request's
+        # department, which may differ from the approver's department.
+        db.info['workspace_application_name_decision'] = int(parts[2])
+        return
     if is_system_admin(user):
         require_request_department(db, user, request)
 
@@ -154,8 +184,11 @@ def record_department(db, obj, user=None):
 
 @event.listens_for(Session, 'before_flush')
 def enforce_admin_workflow_department(db, flush_context, instances):
+    from .models import ApplicationMaster
     user = db.info.get('workflow_actor')
     if user is None or not is_system_admin(user):
+        return
+    if db.info.get('workspace_application_name_decision'):
         return
     with db.no_autoflush:
         for obj in set(db.new) | set(db.dirty) | set(db.deleted):
@@ -165,8 +198,19 @@ def enforce_admin_workflow_department(db, flush_context, instances):
             if not applicable:
                 continue
             require_admin_department(user, department)
+            if (db.info.get('workspace_application_name_reconsideration') is not None
+                    and isinstance(obj, ApplicationMaster)
+                    and obj.id == db.info.get('workspace_application_name_reconsideration')):
+                continue
             # Changing ownership must not make an out-of-department record writable.
             state = inspect(obj)
             if 'department' in state.attrs:
-                for previous in state.attrs.department.history.deleted:
+                history = state.attrs.department.history
+                previous_departments = history.deleted
+                if history.has_changes() and state.persistent and not previous_departments:
+                    # An expired department assigned without first reading
+                    # it has no deleted value in ORM history. Check the
+                    # persisted department before allowing ownership changes.
+                    previous_departments = [db.query(type(obj).department).filter(type(obj).id == obj.id).scalar()]
+                for previous in previous_departments:
                     require_admin_department(user, previous)

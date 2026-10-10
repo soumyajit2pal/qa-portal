@@ -9,7 +9,10 @@ export function approvalStage(status?: string | null, applicationMasterStatus?: 
     roles = ['CHIEF_MANAGER_QA', 'AGM_QA']; group = 'Executive approval'
   } else if (status === 'SM_APPROVAL_PENDING') {
     const appOwner = applicationMasterStatus === 'PENDING_APP_OWNER'
-    roles = [appOwner ? 'APPLICATION_OWNER' : 'SM']; group = appOwner ? 'Application Owner approval' : 'SM approval'; departmentScoped = true
+    roles = [appOwner ? 'APPLICATION_OWNER' : 'SM']; group = appOwner ? 'Application Owner approval' : 'SM approval'; departmentScoped = !appOwner
+  } else if (status === 'PENDING_APP_OWNER'
+      || (status === 'SUBMITTED' && applicationMasterStatus === 'PENDING_APP_OWNER')) {
+    roles = ['APPLICATION_OWNER']; group = 'Application Owner approval'
   } else if (status === 'DEPARTMENT_HEAD_APPROVAL_PENDING') {
     roles = ['DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM']; group = 'Department Head approval'; departmentScoped = true
   } else if (status === 'QA Lead Approval Pending') {
@@ -27,6 +30,9 @@ export interface ApprovalDirectoryContext {
   qa_workspace_id?: number | null
   origin_workspace_id?: number | null
   requester_id?: number | null
+  // A reused pending name retains its original proposer even when this
+  // gateway has a different requester. Maker-checker follows that proposer.
+  application_master_requested_by_id?: number | null
   // Suppression requests expose their requester using created_by_id rather
   // than requester_id. Supporting both keeps the shared approver directory
   // from accidentally listing the maker as an eligible checker.
@@ -79,7 +85,9 @@ export function approvalDirectoryRequest({
   const workspaceId = context.qa_workspace_id ?? context.origin_workspace_id ?? fallbackWorkspaceId
   if (workspaceId) query.set('workspace_id', String(workspaceId))
   if (context.department) query.set('department', context.department)
-  const requesterId = context.requester_id ?? context.created_by_id
-  if (stage.departmentScoped && requesterId) query.set('exclude_id', String(requesterId))
+  const requesterId = roles.includes('APPLICATION_OWNER') && context.application_master_requested_by_id !== undefined
+    ? context.application_master_requested_by_id
+    : context.requester_id ?? context.created_by_id
+  if ((stage.departmentScoped || roles.includes('APPLICATION_OWNER')) && requesterId) query.set('exclude_id', String(requesterId))
   return { ...stage, roles, path: `/api/auth/user-options?${query}` }
 }

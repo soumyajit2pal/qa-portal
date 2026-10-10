@@ -5,7 +5,7 @@ import { useInternalNavigate } from '../../hooks/useRequestNavigation'
 import { api, mapWithConcurrency, waitForJob } from '../../api'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
+import { Table, Modal, Field, ErrorText, PageHeader, Badge, WarningNotice } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import ProjectSelect from '../../components/ProjectSelect'
 import { ENVIRONMENTS, defectBlocksExecution, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, QA_STATUS_LABELS, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
@@ -1767,7 +1767,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   return (
     <Modal title={`Record Result -- ${tc?.test_case_key || `Test Case #${execution.test_case_id}`}`} onClose={onClose} wide>
       {execution.pinned_version_id && (
-        <div className={`info-banner ${execution.is_pinned_stale ? 'warning' : ''}`}>
+        <WarningNotice className={`info-banner ${execution.is_pinned_stale ? 'warning' : ''}`} active={execution.is_pinned_stale}>
           This slot is pinned to <strong>v{execution.pinned_version_label}</strong>
           {execution.is_pinned_stale && !execution.run_count ? (
             <> -- a newer Approved version now exists. <VersionUpgradeAction execution={execution} onUpgraded={onSaved} /></>
@@ -1776,7 +1776,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
           ) : (
             <> -- the exact version selected when this testcase was added to the cycle, regardless of later edits.</>
           )}
-        </div>
+        </WarningNotice>
       )}
       {tc && (
         <div className="tm-execution-case-summary">
@@ -1856,11 +1856,11 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
       {!execution.assigned_to_id && <div className="info-banner">A workspace QA Engineer or QA Lead must assign this testcase before an execution attempt can be recorded.</div>}
       {execution.assigned_to_id && readOnly && <div className="info-banner">Only the assigned runner can record the next attempt. Any QA Engineer or QA Lead in this workspace can reassign the testcase when needed.</div>}
       {activeLinkedDefects.length > 0 && (
-        <div className="info-banner warning">
+        <WarningNotice className="info-banner warning">
           <strong>Verification required:</strong> Linked defect verification does not cover this execution
           {' '}({activeLinkedDefects.map((d) => `${d.defect_key} · ${d.status}`).join(', ')}). The execution
           status cannot be changed until verification requirements are met. Check the environment in Edit Cycle. Build numbers remain visible as audit evidence, but do not need to match the cycle build.
-        </div>
+        </WarningNotice>
       )}
       {activeLinkedDefects.length === 0 && hasPriorFailedOrBlocked && (
         <div className="info-banner">

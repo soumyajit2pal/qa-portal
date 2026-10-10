@@ -8,7 +8,7 @@ import { api } from '../../api'
 import { createLatestRequestGate } from '../../latestRequest'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel, EmptyState } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel, EmptyState, WarningNotice } from '../../components/Common'
 import SastRepositoryDetails, { SAST_COMPONENT_FIELDS, SastRepositoryRow } from '../../components/SastRepositoryDetails'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -742,13 +742,13 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
               Submit/Raise for the same reason (see
               QARequests/RequestDetail.tsx's own pendingMandatory). */}
           {(canSMDecide || canDeptHeadDecide) && pendingSelfDeclare.length > 0 && (
-            <div style={{ marginTop: 8, marginBottom: 8, background: '#fffaeb', border: '1px solid #fde68a', borderRadius: 10, padding: '10px 14px', color: '#92400e', fontSize: 13 }}>
+            <WarningNotice style={{ marginTop: 8, marginBottom: 8 }}>
               <strong>Cannot Sign/Approve yet</strong> — the following mandatory Security Readiness checklist item(s)
               must be self-declared ready first (Edit Details):
               <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
                 {pendingSelfDeclare.map((c) => <li key={c.item}>{c.item}</li>)}
               </ul>
-            </div>
+            </WarningNotice>
           )}
 
           <div className="section-title">Workflow Actions</div>

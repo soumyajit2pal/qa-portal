@@ -20,8 +20,7 @@
 .clearance-stage.is-done > span { background: #d5f0e1; }
 .clearance-stage.is-current { color: #164d76; background: #eef7ff; border-color: #97bfdc; }
 .clearance-stage.is-current > span { color: white; background: #235a84; }
-.clearance-tester-warning, .clearance-tester-line { display: flex; gap: 8px 16px; flex-wrap: wrap; padding: 12px 16px; border-radius: 11px; font-size: .87rem; }
-.clearance-tester-warning { color: #815718; border: 1px solid #ecd29a; background: #fffaf0; }
+.clearance-tester-line { display: flex; gap: 8px 16px; flex-wrap: wrap; padding: 12px 16px; border-radius: 11px; font-size: .87rem; }
 .clearance-tester-line { background: #f1f8fa; border: 1px solid #d2e7ec; }
 .clearance-tester-line > span { color: #607887; }
 .clearance-section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 17px; }
@@ -39,7 +38,6 @@
 .clearance-evidence-metrics strong { color: #163e5b; font-size: 1.8rem; line-height: 1.2; overflow-wrap: anywhere; }
 .clearance-evidence-metrics article.needs-review strong { color: #aa4f34; }
 .clearance-evidence-metrics article span { color: #627887; font-size: .75rem; }
-.clearance-evidence-warning { padding: 11px 14px; margin-bottom: 15px; border: 1px solid #e9c9b7; border-radius: 10px; background: #fff8f4; color: #914429; }
 .clearance-evidence-identity { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(0, 2fr); gap: 10px; margin-bottom: 17px; }
 .clearance-evidence-identity > span { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 13px 15px; border: 1px solid #deebef; border-radius: 10px; }
 .clearance-evidence-identity small { color: #6b8190; }
@@ -100,7 +98,7 @@
 .clearance-stage.is-current > span { background:#227888; }
 .clearance-stage.is-rejected { color:#a3323c; background:#fff2f3; box-shadow:inset 0 -2px #c94a57; }
 .clearance-stage.is-rejected > span { background:#f7dce0; color:#a3323c; }
-.clearance-tester-line,.clearance-tester-warning { padding:8px 11px; border-radius:7px; font-size:11px; gap:5px 10px; }
+.clearance-tester-line { padding:8px 11px; border-radius:7px; font-size:11px; gap:5px 10px; }
 .clearance-tester-line { background:#fff; border-color:#e1e9ed; }
 .clearance-action-panel { padding:13px 15px; border-radius:9px; border:1px solid #d4e2e7; background:#fff; display:flex; align-items:center; justify-content:space-between; gap:12px 20px; flex-wrap:wrap; }
 .clearance-action-panel .clearance-section-heading { margin:0; flex:1 1 260px; }

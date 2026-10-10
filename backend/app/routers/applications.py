@@ -16,6 +16,7 @@ from ..deps import (
     department_unit_visibility_condition, active_qa_workspace_scope_ids,
 )
 from ..constants import Role, GatewayStatus
+from ..application_approval import application_owner_workspace_ids, application_review_gateway_condition, pending_application_owner_condition
 # _finalize_child_requests is the same child-creation step submit_request
 # uses for the immediate (no approval needed) case -- reused here for the
 # deferred case, once a brand-new Application Name clears this tier. No
@@ -36,6 +37,13 @@ _APPROVED_NAMES_CACHE_TTL = 300
 
 def _invalidate_approved_names_cache() -> None:
     cache.invalidate(cache.APPLICATIONS_FAMILY, cache.DASHBOARD_FAMILY)
+
+
+def _is_reconsidered_name(db: Session, application_id: int) -> bool:
+    return db.query(models.ApprovalAction.id).filter_by(
+        application_master_id=application_id, step_name="Application Name Reconsideration",
+        decision="Resubmitted",
+    ).first() is not None
 
 
 def _log_application_name_decision(db: Session, obj: "models.ApplicationMaster", tier_label: str,
@@ -61,6 +69,7 @@ def _log_application_name_decision(db: Session, obj: "models.ApplicationMaster",
     for gw in db.query(models.QARequest).filter(models.QARequest.application_master_id == obj.id).all():
         db.add(models.ApprovalAction(
             entity_type="QA_REQUEST", entity_id=gw.id, step_name=step_name,
+            application_master_id=obj.id,
             actor_id=current_user.id, actor_role=current_user.roles_csv,
             decision=decision, comments=comments,
         ))
@@ -82,6 +91,7 @@ def _log_application_name_decision(db: Session, obj: "models.ApplicationMaster",
             for child in children:
                 db.add(models.ApprovalAction(
                     entity_type=entity_type, entity_id=child.id, step_name=step_name,
+                    application_master_id=obj.id,
                     actor_id=current_user.id, actor_role=current_user.roles_csv,
                     decision=decision, comments=comments,
                 ))
@@ -150,6 +160,7 @@ def _approve_pending_application_name(db: Session, obj: "models.ApplicationMaste
 
 def _decision_gateway_or_404(
     db: Session, obj: "models.ApplicationMaster", current_user: models.User,
+    *, application_owner: bool = False,
 ) -> "models.QARequest":
     """Resolve the same active, workspace-visible gateway used by the queue.
 
@@ -165,14 +176,20 @@ def _decision_gateway_or_404(
         models.QARequest.status.notin_([GatewayStatus.DRAFT, GatewayStatus.CANCELLED]),
     )
     workspace_ids = current_workspace_scope_ids()
+    if application_owner:
+        workspace_ids = application_owner_workspace_ids(db, current_user)
+        query = query.filter(application_review_gateway_condition())
+        if not workspace_ids:
+            raise HTTPException(403, "Application Owner role and operational workspace access are required")
     if workspace_ids:
         query = query.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
     gateway = query.order_by(models.QARequest.created_at.desc()).first()
     if gateway is None:
         raise HTTPException(404, "Application name not found in the active workspace")
-    require_department_visibility(
-        current_user, obj.department, entity_workspace_id=gateway.qa_workspace_id,
-    )
+    if not application_owner:
+        require_department_visibility(
+            current_user, obj.department, entity_workspace_id=gateway.qa_workspace_id,
+        )
     return gateway
 
 
@@ -220,7 +237,7 @@ def create_approved_application_name(
 
     existing = (db.query(models.ApplicationMaster)
                 .filter(models.ApplicationMaster.name == name)
-                .first())
+                .populate_existing().with_for_update().one_or_none())
     if existing:
         if existing.status == "APPROVED":
             raise HTTPException(409, f"Application name '{name}' already exists")
@@ -229,6 +246,8 @@ def create_approved_application_name(
                 409,
                 f"Application name '{name}' was previously rejected and cannot be reinstated here",
             )
+        if _is_reconsidered_name(db, existing.id):
+            raise HTTPException(409, "This name requires a fresh Application Owner decision on the QA request; Admin entry cannot approve reconsideration")
 
         comment = f"Approved via Admin manual entry by {current_user.full_name}"
         existing.department = active_department.name
@@ -369,26 +388,9 @@ def rename_application_master(
 
 @router.get("/pending-app-owner", response_model=List[schemas.ApplicationMasterOut])
 def list_pending_app_owner_names(db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.APPLICATION_OWNER, Role.ADMIN))):
-    """Application Owner/Admin section listing every name still awaiting the
-    FIRST tier of the two-tier approval chain -- mirrors
-    list_pending_application_names below exactly, one tier earlier. An
-    Application Owner's day-to-day path to this is normally the inline
-    banner on their own module's detail view for the specific request that
-    introduced the name (see application_master_status on FunctionalOut/
-    SASTOut/DASTOut/PerformanceOut), not this list. ADMIN sees every
-    department's pending names; an Application Owner only sees their own
-    department's."""
-    q = db.query(models.ApplicationMaster).outerjoin(
-        models.QARequest, models.ApplicationMaster.qa_request_id == models.QARequest.id,
-    ).filter(models.ApplicationMaster.status == "PENDING_APP_OWNER")
-    if not current_user.has_role(Role.ADMIN, Role.VIEW_ONLY):
-        q = q.filter(department_unit_visibility_condition(
-            db, current_user, models.QARequest.department, models.QARequest.department_unit_id,
-        ))
-    workspace_ids = active_qa_workspace_scope_ids(current_user)
-    if workspace_ids:
-        q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
+                                  current_user: models.User = Depends(require_workflow_roles(Role.APPLICATION_OWNER))):
+    """Submitted names reviewable by Application Owners in the active workspace."""
+    q = db.query(models.ApplicationMaster).filter(pending_application_owner_condition(db, current_user))
     return q.order_by(models.ApplicationMaster.created_at).all()
 
 
@@ -423,7 +425,7 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
     """Single-tier Application Name approval (2026-08 v2). Reported directly:
     "only application owner approval required, no SM involvement. if
     application owner approved then automatically come to SM for readiness
-    verification and all" -- an Application Owner from the same department
+    verification and all" -- an Application Owner with access to the workspace
     is now the ONLY decision this name ever needs; Approve is immediately
     terminal (moves straight to APPROVED, not PENDING_SM), and Reject is
     terminal too, same as before. This replaces the short-lived 2026-08
@@ -436,8 +438,7 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
     the SM-tier decided_by_id/decided_at/comments fields (not just this
     tier's own app_owner_* fields) -- same reasoning Reject already used
     ("the decision that made this terminal"), now true for both outcomes,
-    not just Reject. Same same-department scoping as every other approval
-    checkpoint in the app.
+    not just Reject. Department does not restrict this name decision.
 
     2026-08: a brand-new name introduced on a QA Request gateway defers that
     gateway's own child-request creation until it clears THIS tier (see
@@ -453,17 +454,19 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
     gateway all the way back to Draft instead -- since it never got as far as
     creating a single child, there's nothing for _auto_reject_linked_requests
     to do for it, and "awaiting approval forever with nothing to show for it"
-    isn't a real state; the requester can simply edit and resubmit under a
-    different name."""
-    obj = db.get(models.ApplicationMaster, app_id)
+    isn't a real state; the requester can choose another name or explicitly
+    resubmit the same name with a reason for reconsideration."""
+    # Several workspace owners can review the same proposal. Serialize their
+    # decisions and replace any pending snapshot already held by this session,
+    # so a late rejection cannot undo another owner's completed approval.
+    obj = (db.query(models.ApplicationMaster)
+           .filter(models.ApplicationMaster.id == app_id)
+           .populate_existing().with_for_update().one_or_none())
     if not obj:
         raise HTTPException(404, "Application name not found")
-    decision_gateway = _decision_gateway_or_404(db, obj, current_user)
-    require_same_department(current_user, obj.department)
-    require_department_unit_action_scope(
-        db, current_user, obj.department,
-        decision_gateway.department_unit_id,
-    )
+    _decision_gateway_or_404(db, obj, current_user, application_owner=True)
+    if obj.requested_by_id == current_user.id:
+        raise HTTPException(403, "You submitted this application name and cannot approve or reject it yourself")
     require_not_requester(current_user, obj.requested_by_id)
     if obj.status != "PENDING_APP_OWNER":
         raise HTTPException(
@@ -514,7 +517,8 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
                     decision="Reverted to Draft",
                     comments=(
                         f"Application Name '{obj.name}' was rejected by Application Owner before any "
-                        "linked request was generated -- edit and resubmit under a different name."
+                        "linked request was generated -- choose another name or explicitly resubmit "
+                        "this name with a reason for reconsideration."
                     ),
                 ))
             else:
@@ -650,11 +654,11 @@ async def bulk_seed_application_names(file: UploadFile = File(...), db: Session 
     same file after some of its names were separately proposed elsewhere
     clears those out too instead of erroring or duplicating. An existing
     APPROVED row is left untouched and counted as a duplicate. An existing
-    REJECTED row is also left untouched (counted separately) rather than
+    REJECTED row or a pending reconsideration is also left untouched (counted separately) rather than
     silently overridden -- a real Reject decision may have already
     force-rejected other linked requests (see _auto_reject_linked_requests),
-    so reinstating one is left to the normal decision endpoints, not a bulk
-    upload.
+    so reconsideration requires a reason on a Draft QA request and a fresh
+    Application Owner decision rather than a bulk upload.
 
     Expects a header row with an "Application Name" column (case/whitespace
     tolerant, same convention as test_repository.py's own xlsx import) and an
@@ -688,7 +692,16 @@ async def bulk_seed_application_names(file: UploadFile = File(...), db: Session 
     seen_in_file: set = set()
     seed_comment = f"Seeded via Admin bulk Excel upload by {current_user.full_name}"
 
-    for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+    # Acquire existing name locks in ID order, matching gateway edits and
+    # concurrent imports. This also refreshes a stale pending/rejected row.
+    existing_ids = dict(db.query(models.ApplicationMaster.name, models.ApplicationMaster.id).all())
+    name_column = next(index for index, field in col_fields.items() if field == "name")
+    rows = list(enumerate(ws.iter_rows(min_row=2, values_only=True), start=2))
+    def lock_order(item):
+        row_number, row = item
+        name = str(row[name_column] or "").strip().upper() if row and name_column < len(row) else ""
+        return existing_ids.get(name, float("inf")), row_number
+    for row_number, row in sorted(rows, key=lock_order):
         if row is None or all(c is None for c in row):
             continue
         parsed: dict = {}
@@ -709,7 +722,10 @@ async def bulk_seed_application_names(file: UploadFile = File(...), db: Session 
             continue
         seen_in_file.add(name_upper)
 
-        existing = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.name == name_upper).first()
+        existing = (db.query(models.ApplicationMaster).filter(models.ApplicationMaster.name == name_upper)
+                    .populate_existing().with_for_update().one_or_none())
+        if existing and name_upper not in existing_ids:
+            raise HTTPException(409, "The application registry changed during import. Retry the workbook to review the latest names.")
         if existing:
             if existing.status == "APPROVED":
                 skipped_duplicate += 1
@@ -717,8 +733,12 @@ async def bulk_seed_application_names(file: UploadFile = File(...), db: Session 
                 skipped_rejected += 1
                 errors.append(
                     f"Row {row_number}: '{name}' was previously rejected and was left untouched -- "
-                    "use the normal Application Name decision screen to reinstate it if that's intended."
+                    "explicitly resubmit the name with a reason on a Draft QA request if reconsideration is intended."
                 )
+            elif _is_reconsidered_name(db, existing.id):
+                skipped_rejected += 1
+                errors.append(f"Row {row_number}: '{name}' is under reconsideration and requires a fresh "
+                              "Application Owner decision on the QA request -- left untouched.")
             else:
                 _approve_pending_application_name(db, existing, current_user, seed_comment)
                 _log_application_name_decision(db, existing, "Application Owner", "Approved", current_user, seed_comment)

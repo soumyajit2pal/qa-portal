@@ -167,7 +167,7 @@ export function LoginNoticeCoordinator({ includePendingApprovals = true }: { inc
   if (!justLoggedIn || !ready) return null
   if (notice && current?.phase && !alreadyAcknowledged) {
     return (
-      <InfoModal title="Planned downtime" onClose={acknowledge}>
+      <InfoModal title="Planned downtime" tone="warning" onClose={acknowledge}>
         <div className="maintenance-window-login-notice">
           <span className="maintenance-window-login-icon" aria-hidden="true"><IconWarning width={22} height={22} /></span>
           <div>

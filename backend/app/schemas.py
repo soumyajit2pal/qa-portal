@@ -859,6 +859,9 @@ class QARequestDelegationOut(ORMModel):
 
 
 class QARequestOut(ORMModel):
+    can_review_application_name: bool = False
+    application_name_rejection_reason: Optional[str] = None
+    application_name_reconsideration_reason: Optional[str] = None
     """The QA Request is a pure intake/gateway record -- `status` here is just
     Draft/Submitted/Raised/Cancelled (see constants.GatewayStatus). The real
     workflow state lives on whichever linked child request(s) below were
@@ -905,6 +908,7 @@ class QARequestOut(ORMModel):
     # the UI point an SM's Approve/Reject action at the right master row.
     application_master_id: Optional[int] = None
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     qa_workspace_id: Optional[int] = None
     qa_workspace_name: Optional[str] = None
     workspace_routing_status: str = "PENDING"
@@ -979,6 +983,7 @@ class QARequestListOut(ORMModel):
     created_at: datetime.datetime
     updated_at: datetime.datetime
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     active_delegation: Optional[QARequestDelegationOut] = None
     linked_functional_requests: List[LinkedRequestRef] = []
     linked_sast_requests: List[LinkedRequestRef] = []
@@ -1063,6 +1068,7 @@ class FunctionalListOut(ORMModel):
     request_id: str
     status: str
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     requester_id: Optional[int] = None
     qa_lead_id: Optional[int] = None
     assigned_tester_ids: Optional[str] = None
@@ -1137,6 +1143,7 @@ class FunctionalOut(ORMModel):
     # on) a pending new Application Name right from this request's own view.
     application_master_id: Optional[int] = None
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     # NOT delegated -- real, independently-editable columns on
     # FunctionalRequest itself (see models.FunctionalRequest for why).
     priority: Optional[str] = None
@@ -1591,6 +1598,7 @@ class SASTListOut(ORMModel):
     request_id: str
     status: str
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     requester_id: Optional[int] = None
     security_lead_id: Optional[int] = None
     priority: Optional[str] = None
@@ -1654,6 +1662,7 @@ class SASTOut(ORMModel):
     # pending new Application Name right from this request's own view.
     application_master_id: Optional[int] = None
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     # Delegated from the QA Request gateway -- shown on the SAST detail view
     # so the security team can see where the code is deployed/being promoted
     # to before starting a scan.
@@ -1711,6 +1720,7 @@ class DASTListOut(ORMModel):
     request_id: str
     status: str
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     requester_id: Optional[int] = None
     security_lead_id: Optional[int] = None
     priority: Optional[str] = None
@@ -1764,6 +1774,7 @@ class DASTOut(ORMModel):
     # pending new Application Name right from this request's own view.
     application_master_id: Optional[int] = None
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     # Delegated from the QA Request gateway -- Target Release Date is only
     # ever collected once, at QA Request creation time (see
     # models.DASTRequest.target_release_date).
@@ -1870,6 +1881,7 @@ class PerformanceListOut(ORMModel):
     request_id: str
     status: str
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     requester_id: Optional[int] = None
     engineer_id: Optional[int] = None
     priority: Optional[str] = None
@@ -1933,6 +1945,7 @@ class PerformanceOut(ORMModel):
     # pending new Application Name right from this request's own view.
     application_master_id: Optional[int] = None
     application_master_status: Optional[str] = None
+    application_master_requested_by_id: Optional[int] = None
     checklist_items: List[PerformanceChecklistItemOut] = []
 
 
@@ -2816,6 +2829,18 @@ class ApplicationMasterDecision(BaseModel):
     def require_reject_remarks(self):
         self.comments = _require_return_reject_comments(self.decision, self.comments)
         return self
+
+
+class ApplicationNameResubmission(BaseModel):
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("reason")
+    @classmethod
+    def require_reason(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("Explain why the rejected application name should be reconsidered")
+        return value
 
 
 class ApplicationMasterDepartmentUpdate(BaseModel):
@@ -4240,6 +4265,8 @@ class PendingApprovalItem(ISTResponseModel):
     category: str          # e.g. "Application Name -- Application Owner Approval"
     entity_type: str        # e.g. "APPLICATION_MASTER", "FUNCTIONAL_REQUEST", "SAST", ...
     entity_id: int
+    qa_workspace_id: Optional[int] = None
+    requester_id: Optional[int] = None
     display_id: Optional[str] = None    # business id, e.g. "TQA-FUNC-0007" -- None where the entity has no business id of its own (ApplicationMaster)
     # Reported directly: "Parent Section should be Project Name, the Folder
     # wise testcase segregation" -- for a QA-Request-backed category

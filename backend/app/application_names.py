@@ -21,8 +21,8 @@ else in this app" (see routers/applications.py's own import of
 _finalize_child_requests from qa_requests.py for that one exception) -- a
 plain, non-router helper module is the correct home for logic every module
 router legitimately needs, same pattern as documents.py."""
+import json
 from typing import Optional
-from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from . import models
@@ -35,32 +35,19 @@ def resolve_application_name(db: Session, name: Optional[str], department: Optio
     e.g. "sbi" vs "SBI") and resolves it against models.ApplicationMaster:
       - an existing APPROVED, still-PENDING_APP_OWNER, or still-PENDING_SM
         row for that exact name is just reused as-is;
-      - a REJECTED row belonging to a DIFFERENT QA Request (or no QA Request
-        at all) is flipped back to PENDING_APP_OWNER and re-attributed to
-        this requester/department/request, treating this as a fresh proposal
-        that re-enters approval from the start (whatever earlier issue got
-        it rejected may not apply to this unrelated request, so it gets
-        another look);
-      - a REJECTED row still attributed to THIS SAME qa_request_id is
-        rejected outright (raises 400) instead -- see the caller's own
-        qa_request_id, which for the gateway is its own id, and for a
-        Functional/SAST/DAST/Performance child request editing its OWN
-        application_name is that child's linked qa_request_id (the gateway
-        it was raised from), not the child's own id -- comparing against the
-        gateway's id either way is what tells apart "this same
-        request/gateway is trying to sneak its own rejected name back in"
-        from "a different, unrelated request wants to try this same name",
-        which is still allowed exactly as before;
+      - a REJECTED row is reused without changing its decision. The gateway
+        can be saved as a draft, but submission requires the explicit
+        application-name reconsideration action and a reason. This applies
+        equally to the original request and a different request;
       - otherwise a brand-new PENDING_APP_OWNER row is created.
     Returns (uppercased_name, application_master_id). Otherwise never blocks
-    the caller -- see the class docstring on models.ApplicationMaster for why
-    Draft save and Submit/Raise both proceed regardless of the name's current
-    approval status (approving/rejecting a name is handled independently by
-    an Application Owner, see routers/applications.py). Deliberately does
+    the caller: drafts can reference a name at any approval status. Submission
+    separately enforces reconsideration for rejected names and Application
+    Owner review for pending names. Deliberately does
     NOT block simply because a name "already exists or is pending" -- reusing
     an already-known application across more than one request is the whole
-    point of this shared registry, not a bug; only the two REJECTED cases
-    above are ever blocked/reset.
+    point of this shared registry, not a bug. Resolving or saving a name
+    never reopens a completed rejection.
 
     Note: if a requester changes their mind mid-Draft and swaps one brand-new
     (still-pending) name for a different brand-new name, the first name's
@@ -75,23 +62,6 @@ def resolve_application_name(db: Session, name: Optional[str], department: Optio
     name_upper = (name or "").strip().upper()
     existing = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.name == name_upper).first()
     if existing:
-        if existing.status == "REJECTED":
-            if qa_request_id is not None and existing.qa_request_id == qa_request_id:
-                raise HTTPException(
-                    400,
-                    "This application name was previously rejected by the Application Owner. "
-                    "Please enter a corrected application name before resubmitting the request.",
-                )
-            existing.status = "PENDING_APP_OWNER"
-            existing.requested_by_id = requester_id
-            existing.department = department
-            existing.qa_request_id = qa_request_id
-            existing.app_owner_decided_by_id = None
-            existing.app_owner_decided_at = None
-            existing.app_owner_comments = None
-            existing.decided_by_id = None
-            existing.decided_at = None
-            existing.comments = None
         return name_upper, existing.id
     new_entry = models.ApplicationMaster(
         name=name_upper, status="PENDING_APP_OWNER", department=department,
@@ -100,6 +70,66 @@ def resolve_application_name(db: Session, name: Optional[str], department: Optio
     db.add(new_entry)
     db.flush()  # need new_entry.id to link it below
     return name_upper, new_entry.id
+
+
+def reopen_rejected_application_name(db: Session, application, gateway, user, reason: str) -> None:
+    """Start a new review round under the caller's application/gateway locks.
+
+    Existing decision log rows stay immutable. A legacy rejection or a
+    rejection originating on another gateway is also retained on this
+    gateway before the master's current-round fields are reset.
+    """
+    rejected_at = application.app_owner_decided_at or application.decided_at
+    rejected_by = application.app_owner_decided_by_id or application.decided_by_id
+    comments = application.app_owner_comments or application.comments
+    prior = db.query(models.ApprovalAction).filter(
+        models.ApprovalAction.entity_type == "QA_REQUEST",
+        models.ApprovalAction.entity_id == gateway.id,
+        models.ApprovalAction.step_name.in_([
+            "Application Name (Application Owner)", "Application Name (SM)",
+            "Previous Application Name Rejection",
+        ]),
+        models.ApprovalAction.actor_id == rejected_by,
+        models.ApprovalAction.decision.in_(["Rejected", "Recorded"]),
+    )
+    if rejected_at:
+        prior = prior.filter(models.ApprovalAction.created_at >= rejected_at)
+    # Remarks are Oracle CLOBs: compare the small scoped history in Python,
+    # since Oracle cannot use a plain '=' comparison against a CLOB.
+    if not any(action.comments == comments for action in prior.all()):
+        db.add(models.ApprovalAction(
+            entity_type="QA_REQUEST", entity_id=gateway.id,
+            application_master_id=application.id,
+            step_name="Previous Application Name Rejection", decision="Recorded",
+            actor_id=rejected_by,
+            actor_role="APPLICATION_OWNER" if application.app_owner_decided_by_id else "SM",
+            # A copied stamp references its original signed decision; it
+            # must not be interpreted as a new signature on this snapshot.
+            created_at=rejected_at or models.now(),
+            comments=comments.replace("[Electronic signature |", "[Historical electronic signature |") if comments else comments,
+            previous_state="REJECTED", new_state="REJECTED",
+        ))
+
+    application.status = "PENDING_APP_OWNER"
+    application.requested_by = user
+    application.department = gateway.department
+    application.qa_request = gateway
+    application.app_owner_decided_by_id = None
+    application.app_owner_decided_at = None
+    application.app_owner_comments = None
+    application.decided_by_id = None
+    application.decided_at = None
+    application.comments = None
+    details = gateway._draft_details()
+    details["application_name_reconsideration_reason"] = reason
+    gateway.draft_child_details = json.dumps(details)
+    db.add(models.ApprovalAction(
+        entity_type="QA_REQUEST", entity_id=gateway.id,
+        application_master_id=application.id,
+        step_name="Application Name Reconsideration", decision="Resubmitted",
+        actor_id=user.id, actor_role=user.roles_csv, comments=reason,
+        previous_state="REJECTED", new_state="PENDING_APP_OWNER",
+    ))
 
 
 def cleanup_orphaned_application_master(db: Session, old_master_id: Optional[int], qa_request_id: int) -> None:
@@ -129,6 +159,10 @@ def cleanup_orphaned_application_master(db: Session, old_master_id: Optional[int
         return
     old = db.get(models.ApplicationMaster, old_master_id)
     if not old or old.status not in ("PENDING_APP_OWNER", "PENDING_SM"):
+        return
+    # A pending reconsideration can already have completed decisions behind
+    # it. Retain that master and its immutable approval-history references.
+    if db.query(models.ApprovalAction.id).filter_by(application_master_id=old_master_id).first():
         return
     still_used_by_request = (
         db.query(models.QARequest.id)

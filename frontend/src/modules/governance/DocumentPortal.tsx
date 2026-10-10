@@ -8,7 +8,7 @@ import React, {
   useState,
 } from "react";
 import { api } from "../../api";
-import { Card, ErrorText, Modal, PageHeader } from "../../components/Common";
+import { Card, ErrorText, Modal, PageHeader, WarningNotice } from "../../components/Common";
 import ConfirmModal from "../../components/ConfirmModal";
 import InfoModal from "../../components/InfoModal";
 import { IconContract, IconExpand } from "../../components/Icons";
@@ -813,8 +813,8 @@ export default function DocumentPortal() {
           ) : undefined
         }
       />
-      {data && data.storage_limit_bytes == null && <div className="alert alert-warning" role="status">An administrator must set the Document Portal storage limit for {data.workspace_name} before files can be uploaded.</div>}
-      {data && data.storage_limit_bytes != null && data.family_storage_limit_bytes == null && <div className="alert alert-warning" role="status">An administrator must set the parent workspace storage limit before files can be uploaded here.</div>}
+      {data && data.storage_limit_bytes == null && <WarningNotice className="alert alert-warning" role="status">An administrator must set the Document Portal storage limit for {data.workspace_name} before files can be uploaded.</WarningNotice>}
+      {data && data.storage_limit_bytes != null && data.family_storage_limit_bytes == null && <WarningNotice className="alert alert-warning" role="status">An administrator must set the parent workspace storage limit before files can be uploaded here.</WarningNotice>}
       <Card
         className={`document-portal-card${isFullscreen ? " document-portal-fullscreen" : ""}`}
       >

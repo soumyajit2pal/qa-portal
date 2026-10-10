@@ -34,7 +34,7 @@ def _seal(payload):
 
 
 def action_payload(action):
-    return {
+    payload = {
         "kind": "approval", "version": 1, "signature_id": action.signature_id,
         "entity_type": action.entity_type or None, "entity_id": action.entity_id,
         "stage": action.step_name or None, "actor_id": action.actor_id, "actor_role": action.actor_role or None,
@@ -43,6 +43,11 @@ def action_payload(action):
         "recorded_at": as_ist(action.created_at).replace(microsecond=0).isoformat(),
         "previous_state": action.previous_state or None, "new_state": action.new_state or None,
     }
+    # Legacy seals were created before this additive review identity existed.
+    # Preserve their payload, while binding new name-review seals to the name.
+    if getattr(action, "application_master_id", None) is not None:
+        payload["application_master_id"] = action.application_master_id
+    return payload
 
 
 def seal_new_action(connection, action):

@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import {useSearchParams} from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, RequestDocuments } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, RequestDocuments, WarningNotice } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_REQUESTER_CONTROLLED_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, QA_REQUEST_CREATOR_ROLES, hasWorkflowRole as hasRole, hasDepartment, isViewOnly } from '../../constants'
@@ -74,10 +74,10 @@ function PickerLoadNotice({ label, error, loading, onRetry }: {
   if (loading) return <p className="muted small" role="status">Loading {label}…</p>
   if (!error) return null
   return (
-    <div className="execution-cycle-required-warning" role="alert">
+    <WarningNotice className="execution-cycle-required-warning" role="alert">
       <span>Could not load {label}: {pickerErrorMessage(error)}</span>
       <button type="button" className="btn btn-sm" onClick={onRetry}>Retry</button>
-    </div>
+    </WarningNotice>
   )
 }
 
@@ -959,13 +959,13 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
           ]} rows={sup.department_approvals || []} pageSize={Math.max((sup.department_approvals || []).length, 1)} showColumnControls={false} />
 
           {status === 'RETURNED_BY_SECURITY_TEAM' && sup.needs_dept_head_reapproval && (
-            <div className="execution-cycle-required-warning" role="status">
+            <WarningNotice className="execution-cycle-required-warning" role="status">
               <strong>Department Head re-approval required</strong>
               <span>
                 Security Team returned this request for correction. After the requester updates and
                 re-submits it, the request will go to all required Department Heads before returning to Security Team verification.
               </span>
-            </div>
+            </WarningNotice>
           )}
 
           <div className="section-title">Findings ({sup.items.length})</div>
@@ -1073,14 +1073,14 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
                     <Badge status="Pending" />
                   </div>
                 </div>
-                <div className="execution-cycle-required-warning suppression-scale-warning" role="alert">
+                <WarningNotice className="execution-cycle-required-warning suppression-scale-warning" role="alert">
                   <strong>Approval required from Scale 5 or above only</strong>
                   <span>
                     Suppression requests must be approved by a Department Head at Scale 5 or above.
                     Confirm your scale before approving. If you are below Scale 5, obtain approval
                     from an eligible Department Head to avoid a return from the Security Team.
                   </span>
-                </div>
+                </WarningNotice>
                 <div className="suppression-workflow-content">
                   <ApprovalDecisionButtons
                     userName={user?.full_name}

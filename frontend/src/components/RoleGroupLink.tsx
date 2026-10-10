@@ -12,11 +12,8 @@ export default function RoleGroupLink({ role, label, department, repositoryGroup
   // not two separate groups.
   role: string | string[]
   label: string
-  // Reported directly (Application Owner): "whoever Application Owner on
-  // that department should show" -- department-scoped roles (Application
-  // Owner, SM, Department Head) are actually enforced server-side by
-  // require_same_department, so a role-only member list can show people who
-  // could never really act on this specific piece of work. Optional so
+  // SM and Department Head groups require a matching department. Application
+  // Owners decide new names across departments in the workspace. Optional so
   // existing non-department-scoped callers (QA Lead, Security Analyst,
   // Executive -- none of those are department-restricted) are unaffected;
   // when provided, members are further filtered to a matching department.
@@ -39,9 +36,10 @@ export default function RoleGroupLink({ role, label, department, repositoryGroup
 }) {
   const [open, setOpen] = useState(false)
   const roles = useMemo(() => (Array.isArray(role) ? role : [role]), [role])
+  const scopedDepartment = roles.length === 1 && roles[0] === 'APPLICATION_OWNER' ? null : department
   const query = new URLSearchParams(repositoryGroup ? {} : { purpose: 'approver' })
   query.set('roles', roles.join(','))
-  if (department) { query.set('department', department); query.set('department_scoped', 'true') }
+  if (scopedDepartment) { query.set('department', scopedDepartment); query.set('department_scoped', 'true') }
   if (testCaseId) query.set('test_case_id', String(testCaseId))
   const url = `${repositoryGroup ? '/api/test-projects/eligible-users' : '/api/auth/user-options'}?${query}`
   const [members, setMembers] = useState<UserOption[]>([])
@@ -88,7 +86,7 @@ export default function RoleGroupLink({ role, label, department, repositoryGroup
     {open && <Modal title={`${label} group members`} onClose={() => setOpen(false)} variant="dialog" preventBackdropClose>
       <div className="role-group-modal-summary">
         <strong>{loading ? 'Loading active members…' : loaded ? `${members.length} active member${members.length !== 1 ? 's' : ''}` : 'Unable to confirm active members'}</strong>
-        <span>{testCaseId ? 'These members are eligible to act on this test case.' : `Any member of this group can act on work assigned to ${label}${department ? ` in ${department}` : ''}.`}</span>
+        <span>{testCaseId ? 'These members are eligible to act on this test case.' : `Any member of this group can act on work assigned to ${label}${scopedDepartment ? ` in ${scopedDepartment}` : ' in this workspace'}.`}</span>
       </div>
       {loading ? <p className="role-group-empty" role="status">Loading group members…</p>
         : error ? <div className="role-group-empty"><ErrorText error={error} title="Could not load group members" /><button type="button" className="btn" onClick={() => void showMembers(true)}>Retry</button></div>
@@ -100,7 +98,7 @@ export default function RoleGroupLink({ role, label, department, repositoryGroup
         </div>)}
       </div> : <div className="role-group-empty">
         <strong>No active members</strong>
-        <span>Assign the {label} role to at least one active user{department ? ` in ${department}` : ''} from User &amp; Access.</span>
+        <span>Assign the {label} role to at least one active user{scopedDepartment ? ` in ${scopedDepartment}` : ' in this workspace'} from User &amp; Access.</span>
       </div>}
       <div className="modal-actions"><button type="button" className="btn btn-primary" onClick={() => setOpen(false)}>Close</button></div>
     </Modal>}

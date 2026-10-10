@@ -707,6 +707,8 @@ def user_options(purpose: str = "lookup", workspace_id: Optional[int] = None,
         required = set((roles or "").split(","))
         if not required or not required <= allowed:
             raise HTTPException(400, "Invalid approval group")
+        if required == {Role.APPLICATION_OWNER}:
+            department_scoped = False
         rows = [u for u in rows if set(u.roles) & required
                 and Role.VIEW_ONLY not in u.roles and Role.SCALE_6_PLUS not in u.roles
                 and any(
@@ -714,7 +716,8 @@ def user_options(purpose: str = "lookup", workspace_id: Optional[int] = None,
                     and inherited_workspace_access_mode(db, u, workspace) != "PARENT_VIEWER"
                     for workspace in selected_scope
                 )
-                and (not u.has_role(Role.ADMIN) or (department and department in u.departments))]
+                and (required == {Role.APPLICATION_OWNER}
+                     or not u.has_role(Role.ADMIN) or (department and department in u.departments))]
     if purpose == "defect_reassign":
         if defect_id is None:
             raise HTTPException(400, "Defect is required")

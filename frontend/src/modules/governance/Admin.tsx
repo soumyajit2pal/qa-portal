@@ -1102,7 +1102,7 @@ function LDAPSettingsCard() {
         <button type="submit" className="btn btn-primary" disabled={busy || testing || readingCertificate || (certificateAction === 'replace' && !certificateData)}>{busy ? 'Saving…' : 'Save LDAP configuration'}</button>
       </div>
     </form>
-    {confirmInsecureSave && <Modal title="Save LDAP configuration without TLS?" variant="dialog" compact preventBackdropClose onClose={() => { if (!busy) setConfirmInsecureSave(false) }}>
+    {confirmInsecureSave && <Modal title="Save LDAP configuration without TLS?" variant="dialog" compact tone="warning" preventBackdropClose onClose={() => { if (!busy) setConfirmInsecureSave(false) }}>
       <div className="alert-banner" role="alert"><div className="icon-wrap"><IconWarning width={16} height={16} /></div><div className="body"><div className="title">Credentials may be exposed</div><div className="sub">Without TLS, LDAP bind credentials and user passwords can travel over the network without transport encryption. Use this only for an intentionally isolated connection after accepting the risk.</div></div></div>
       <div className="modal-actions"><button type="button" className="btn" disabled={busy} onClick={() => setConfirmInsecureSave(false)}>Cancel</button><button type="button" className="btn btn-danger" disabled={busy} onClick={() => { setConfirmInsecureSave(false); void persist() }}>{busy ? 'Saving…' : 'Save without TLS'}</button></div>
     </Modal>}
@@ -1890,7 +1890,7 @@ function MaintenanceWindowSettingsCard() {
       </aside>
 
       {cancelOpen && configuredWindow && (
-        <Modal title="Cancel planned downtime?" variant="dialog" compact preventBackdropClose closeDisabled={busy} onClose={() => { if (!busy) { setCancelReason(''); setCancelOpen(false) } }}>
+        <Modal title="Cancel planned downtime?" variant="dialog" compact tone="danger" preventBackdropClose closeDisabled={busy} onClose={() => { if (!busy) { setCancelReason(''); setCancelOpen(false) } }}>
           <form className="maintenance-cancel-form" onSubmit={cancelWindow}>
             <p>Cancellation removes the login notice and global banner. Record why the scheduled window is no longer required.</p>
             <Field label="Cancellation reason *">

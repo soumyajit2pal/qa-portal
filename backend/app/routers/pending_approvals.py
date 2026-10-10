@@ -7,6 +7,7 @@ from sqlalchemy import and_, func, or_, select, union_all
 from sqlalchemy.orm import Session, selectinload
 
 from .. import models, pagination, schemas
+from ..application_approval import application_owner_workspace_ids, application_review_gateway_condition, pending_application_owner_condition
 from ..database import get_db
 from ..time_format import as_ist
 from ..project_workspace_ownership import workspace_can_contribute
@@ -63,13 +64,15 @@ router = APIRouter(prefix="/api/pending-approvals", tags=["pending-approvals"])
 
 def _item(category, entity_type, entity_id, display_id, title, status, status_label,
           department, submitted_by, submitted_at, path,
-          parent_request_id=None, parent_path=None, parent_label=None, folder_name=None) -> dict:
+          parent_request_id=None, parent_path=None, parent_label=None, folder_name=None,
+          *, qa_workspace_id=None, requester_id=None) -> dict:
     return {
         "category": category, "entity_type": entity_type, "entity_id": entity_id,
         "display_id": display_id, "title": title, "status": status, "status_label": status_label,
         "department": department, "submitted_by": submitted_by, "submitted_at": submitted_at, "path": path,
         "parent_request_id": parent_request_id, "parent_path": parent_path,
         "parent_label": parent_label, "folder_name": folder_name,
+        "qa_workspace_id": qa_workspace_id, "requester_id": requester_id,
     }
 
 
@@ -187,8 +190,8 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
     """Application Name -- Application Owner tier (PENDING_APP_OWNER) and SM
     tier (PENDING_SM). See routers/applications.py::decide_app_owner_name /
     decide_application_name -- both keyed by the ApplicationMaster row's own
-    id, department-scoped the same way as every SM/Department Head
-    checkpoint. There's no dedicated page for this decision (see
+    id. The Application Owner tier uses workspace access across departments;
+    the legacy SM tier retains department scope. There's no dedicated page (see
     components/ApplicationNameBanner.tsx's own docstring: it renders inline
     on the master QA Request gateway's own Overview tab) -- links to the
     gateway that most recently introduced/used this exact name so the
@@ -208,14 +211,17 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
     # separately-raised QA Request over time, so this looks for ANY such
     # gateway, not just the one originally recorded on ApplicationMaster.
     # qa_request_id (see _resolve_application_name).
-    def _active_gateway(app_id: int):
+    def _active_gateway(app_id: int, *, application_owner: bool = False):
         q = db.query(models.QARequest).filter(
                 models.QARequest.application_master_id == app_id,
                 models.QARequest.status.notin_([GatewayStatus.DRAFT, GatewayStatus.CANCELLED]),
             )
-        if workspace_ids:
-            q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
-        if not is_admin:
+        gateway_workspace_ids = application_owner_workspace_ids(db, user) if application_owner else workspace_ids
+        if application_owner:
+            q = q.filter(application_review_gateway_condition())
+        if application_owner or gateway_workspace_ids:
+            q = q.filter(models.QARequest.qa_workspace_id.in_(gateway_workspace_ids))
+        if not application_owner and not is_admin:
             q = q.filter(department_unit_visibility_condition(
                 db, user, models.QARequest.department, models.QARequest.department_unit_id,
             ))
@@ -227,15 +233,9 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
         return "/qa-requests"
 
     if user.has_role(Role.APPLICATION_OWNER):
-        q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_APP_OWNER")
-        if not is_admin:
-            q = q.filter(
-                models.ApplicationMaster.department.in_(user.departments),
-                or_(models.ApplicationMaster.requested_by_id.is_(None),
-                    models.ApplicationMaster.requested_by_id != user.id),
-            )
+        q = db.query(models.ApplicationMaster).filter(pending_application_owner_condition(db, user))
         for obj in q.order_by(models.ApplicationMaster.created_at).all():
-            gw = _active_gateway(obj.id)
+            gw = _active_gateway(obj.id, application_owner=True)
             if not gw:
                 continue
             results.append(_item(
@@ -244,6 +244,7 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
                 APPLICATION_MASTER_STATUS_LABELS.get(obj.status, obj.status),
                 obj.department, _name(obj.requested_by), obj.created_at, _gateway_path(gw),
                 gw.request_id, _gateway_path(gw),
+                qa_workspace_id=gw.qa_workspace_id, requester_id=obj.requested_by_id,
             ))
 
     if user.has_role(Role.SM):
@@ -264,6 +265,7 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
                 APPLICATION_MASTER_STATUS_LABELS.get(obj.status, obj.status),
                 obj.department, _name(obj.requested_by), obj.created_at, _gateway_path(gw),
                 gw.request_id, _gateway_path(gw),
+                qa_workspace_id=gw.qa_workspace_id, requester_id=obj.requested_by_id,
             ))
     return results
 
@@ -701,14 +703,7 @@ def _pending_count_statement(db: Session, user: models.User):
         .exists()
     )
     if user.has_role(Role.APPLICATION_OWNER):
-        conditions = [models.ApplicationMaster.status == "PENDING_APP_OWNER", active_gateway]
-        if not is_admin:
-            conditions.extend([
-                models.ApplicationMaster.department.in_(user.departments),
-                or_(models.ApplicationMaster.requested_by_id.is_(None),
-                    models.ApplicationMaster.requested_by_id != user.id),
-            ])
-        add_count(models.ApplicationMaster, *conditions)
+        add_count(models.ApplicationMaster, pending_application_owner_condition(db, user))
     if user.has_role(Role.SM):
         conditions = [models.ApplicationMaster.status == "PENDING_SM", active_gateway]
         if not is_admin:
@@ -835,4 +830,6 @@ def _actionable_items(db, current_user):
         + _test_project_items(db, current_user)
         + _test_case_items(db, current_user)
     )
-    return [item for item in items if admin_department_allowed(current_user, item["department"])]
+    return [item for item in items
+            if item["category"] == "Application Name -- Application Owner Approval"
+            or admin_department_allowed(current_user, item["department"])]

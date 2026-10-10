@@ -6,7 +6,7 @@ import { api } from '../../api'
 import { resolveRequestId } from '../../requestNavigation'
 import { formatDateIST, formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons, WarningNotice } from '../../components/Common'
 import {
   SAST_DAST_STATUS_LABELS, CERTIFICATE_TYPES, RISK_TIERS, DEPLOYMENT_ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole,
   isViewOnly,
@@ -415,9 +415,9 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
             <TestingRequestIdSearch displayRequestId={certificateRequestId} requests={selectableRequests} selected={selectedRequest} onSelect={selectEligibleRequest} onClear={clearSelection} />
           )}
         </Field>
-        {securityBlockers.length > 0 && <div className="alert alert-warning" role="status">
+        {securityBlockers.length > 0 && <WarningNotice className="alert alert-warning" role="status">
           QA Clearance is waiting for active linked security requests to finish: {securityBlockers.join(', ')}. A Department Head Rejected request is final and does not block clearance.
-        </div>}
+        </WarningNotice>}
         <div className="clearance-form-intro"><span>02 · Certificate details</span><h3>Define the clearance and promotion</h3><p>Confirm the tested build, environment, risk tier, and validity before saving the draft.</p></div>
         <ClearanceRequirements certificateType={form.certificate_type} />
         <div className="form-row clearance-form-grid">
@@ -673,8 +673,8 @@ function CertificateEvidence({ item }: { item: SignOffOut }) {
       <article><small>Defects</small><strong>{summary.defects.total}</strong><span>counted once</span></article>
       <article className={openSeverity ? 'needs-review' : ''}><small>Open defects</small><strong>{openSeverity}</strong><span>{summary.open_critical_high} Critical / High</span></article>
     </div>
-    {!uniquePopulation && <div className="clearance-evidence-warning" role="status">This frozen revision uses the earlier execution-slot counting method. Refresh editable evidence to recalculate unique test cases; issued and historical revisions remain unchanged for audit integrity.</div>}
-    {summary.open_critical_high > 0 && <div className="clearance-evidence-warning" role="status">Full Clearance is blocked while {summary.open_critical_high} Critical or High defect(s) remain open.</div>}
+    {!uniquePopulation && <WarningNotice className="clearance-evidence-warning" role="status">This frozen revision uses the earlier execution-slot counting method. Refresh editable evidence to recalculate unique test cases; issued and historical revisions remain unchanged for audit integrity.</WarningNotice>}
+    {summary.open_critical_high > 0 && <WarningNotice className="clearance-evidence-warning" role="status">Full Clearance is blocked while {summary.open_critical_high} Critical or High defect(s) remain open.</WarningNotice>}
     <div className="clearance-evidence-panels">
       <details open><summary><span><b>{executionSummaryTitle}</b><small>{uniquePopulation ? 'Latest result per unique test case in the linked test scope' : 'Historical execution-slot results retained exactly as captured'}</small></span><strong>{summary.execution.total} {uniquePopulation ? (summary.execution.total === 1 ? 'unique case' : 'unique cases') : (summary.execution.total === 1 ? 'slot' : 'slots')}</strong></summary>
         <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>{populationLabel}</th>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <th key={status}>{status}</th>)}<th>Pass %</th></tr></thead><tbody><tr><td>{summary.execution.total}</td>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <td key={status}>{summary.execution.counts[status] || 0}</td>)}<td>{summary.execution.pass_pct == null ? 'NA' : `${summary.execution.pass_pct}%`}</td></tr></tbody></table></div>
@@ -925,7 +925,7 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
         {item.superseded_by_id && <button type="button" className="btn btn-sm" disabled={!!busyAction} onClick={() => void openRelatedCertificate(item.superseded_by_id!)}>Successor: {item.superseded_by_certificate_id || `#${item.superseded_by_id}`}</button>}
         {item.revision_reason && <span> Reason: {item.revision_reason}</span>}
       </div>}
-      {assignedTesters === undefined ? <div className="clearance-tester-warning" role="status"><b>Assigned testers were not captured in this revision.</b><span>To include their names, refresh the evidence and complete approval again.</span></div> : <div className="clearance-tester-line"><span>Assigned tester(s)</span><b>{assignedTesters.map(tester => tester.name).join(', ') || 'Not assigned'}</b></div>}
+      {assignedTesters === undefined ? <WarningNotice className="clearance-tester-warning" role="status"><b>Assigned testers were not captured in this revision.</b><span>To include their names, refresh the evidence and complete approval again.</span></WarningNotice> : <div className="clearance-tester-line"><span>Assigned tester(s)</span><b>{assignedTesters.map(tester => tester.name).join(', ') || 'Not assigned'}</b></div>}
 
       <section className="clearance-action-panel" aria-label="Next step and actions">
         <div className="clearance-section-heading"><div><span>Next action</span><h3>{nextStep}</h3><p>{nextStepHint}</p></div></div>

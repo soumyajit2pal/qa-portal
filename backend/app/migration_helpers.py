@@ -61,3 +61,15 @@ def ensure_foreign_key(name, table_name, referred_table, columns, referred_colum
     constraint = sa.ForeignKeyConstraint(columns, [f"{referred_table}.{column}" for column in referred_columns], name=name)
     table.append_constraint(constraint)
     _ensure_constraint(table_name, name, constraint, lambda: op.create_foreign_key(name, table_name, referred_table, columns, referred_columns), "foreign_key")
+
+
+def ensure_index(name, table_name, columns):
+    if context.is_offline_mode():
+        table = sa.Table(table_name, sa.MetaData(), *(sa.Column(column, sa.Integer) for column in columns))
+        index = sa.Index(name, *(table.c[column] for column in columns))
+        ddl = str(sa.schema.CreateIndex(index).compile(dialect=op.get_bind().dialect)).strip()
+        _guarded_oracle_ddl("USER_INDEXES", f"INDEX_NAME = '{name.upper()}'", ddl)
+    else:
+        indexes = sa.inspect(op.get_bind()).get_indexes(table_name)
+        if name.lower() not in {(item['name'] or '').lower() for item in indexes}:
+            op.create_index(name, table_name, columns)

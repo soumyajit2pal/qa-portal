@@ -1,5 +1,5 @@
 import React from 'react'
-import { Field } from '../../components/Common'
+import { Field, WarningNotice } from '../../components/Common'
 import MultiSelect from '../../components/MultiSelect'
 import { SuppressionApprovalDepartmentOption, SuppressionDepartmentApprovalOut } from '../../types'
 
@@ -30,10 +30,10 @@ function DepartmentLoadNotice({ error, loading, onRetry }: {
   if (loading) return <p className="muted small" role="status">Loading departments…</p>
   if (!error) return null
   return (
-    <div className="execution-cycle-required-warning" role="alert">
+    <WarningNotice className="execution-cycle-required-warning" role="alert">
       <span>Could not load departments: {pickerErrorMessage(error)}</span>
       <button type="button" className="btn btn-sm" onClick={onRetry}>Retry</button>
-    </div>
+    </WarningNotice>
   )
 }
 
@@ -121,19 +121,19 @@ export default function SuppressionDepartmentApprovalRouting({
         </div>
         <DepartmentLoadNotice error={error} loading={loading} onRetry={onRetry} />
         {owningDepartmentEligible === false && (
-          <div className="execution-cycle-required-warning" role="alert">
+          <WarningNotice className="execution-cycle-required-warning" role="alert">
             <strong>Owning department approval is unavailable</strong>
             <span>
               {owningDepartment || 'The owning department'} has no active, eligible Department Head who can act in this request&apos;s workspace.
               Assign the required workspace access before saving or submitting this request.
             </span>
-          </div>
+          </WarningNotice>
         )}
         {unavailableSelectedDepartments.length > 0 && (
-          <div className="execution-cycle-required-warning" role="alert">
+          <WarningNotice className="execution-cycle-required-warning" role="alert">
             <strong>Previously selected department is no longer eligible</strong>
             <span>Remove each department marked Unavailable, or restore an eligible Department Head&apos;s workspace access, before saving.</span>
-          </div>
+          </WarningNotice>
         )}
         {requiresAdditionalApprovals && (
           <div className="suppression-routing-selector">

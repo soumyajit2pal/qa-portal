@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import uuid
+from contextlib import nullcontext
 from typing import Optional, List, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
@@ -15,6 +16,7 @@ from .. import models, schemas, pagination
 from .. import documents as doc_store
 from ..upload_limits import validate_qa_document_sizes, validate_document_file_types
 from .. import application_names as app_names
+from ..application_approval import can_review_application_gateway, pending_application_gateway_condition
 from ..database import get_db
 from ..deps import (
     get_workflow_user as get_current_user, require_workflow_roles as require_roles, dashboard_department_scope,
@@ -36,6 +38,7 @@ from ..constants import (
 from ..checklist_config import get_template_items, is_mandatory_for_department
 from ..request_type_config import inactive_request_types
 from ..workspace_service import require_active_workspace
+from ..workflow_authority import application_name_reconsideration_context
 from ..pdf_export import build_request_detail_pdf
 
 router = APIRouter(prefix="/api/qa-requests", tags=["qa-requests"])
@@ -142,6 +145,8 @@ def _is_active_delegate(obj: "models.QARequest", user: models.User) -> bool:
 def _require_gateway_visibility(db: Session, obj: "models.QARequest", user: models.User) -> None:
     if not _can_view_gateway(obj, user):
         raise HTTPException(403, "You do not have access to this request")
+    if can_review_application_gateway(db, user, obj):
+        return
     require_department_visibility(
         user, obj.department, requester_id=obj.requester_id,
         delegated=_is_active_delegate(obj, user),
@@ -162,6 +167,34 @@ def _can_edit_draft(obj: "models.QARequest", user: models.User) -> bool:
     if delegation:
         return delegation.assigned_to_id == user.id
     return obj.requester_id == user.id
+
+
+def _lock_gateway_and_application(db: Session, req_id: int, new_application_name: Optional[str] = None):
+    """Lock names before their gateway, matching Application Owner decisions.
+
+    Submission must see the latest name decision and hold it until the gateway
+    is submitted or raised. Otherwise approval can miss a simultaneous submit,
+    leaving an approved name's gateway stuck at Submitted without children.
+    Draft edits use the same order because changing a name can reuse or remove
+    registry entries. Lock existing old/new entries in ID order to avoid a
+    pair of name changes acquiring those rows in opposite orders.
+    """
+    original_master_id = (db.query(models.QARequest.application_master_id)
+                          .filter(models.QARequest.id == req_id).scalar())
+    master_ids = {original_master_id} if original_master_id is not None else set()
+    if new_application_name is not None:
+        target_id = (db.query(models.ApplicationMaster.id)
+                     .filter(models.ApplicationMaster.name == new_application_name.strip().upper()).scalar())
+        if target_id is not None:
+            master_ids.add(target_id)
+    for master_id in sorted(master_ids):
+        (db.query(models.ApplicationMaster).filter_by(id=master_id)
+         .populate_existing().with_for_update().one_or_none())
+    obj = (db.query(models.QARequest).filter_by(id=req_id)
+           .populate_existing().with_for_update().one_or_none())
+    if obj and obj.application_master_id != original_master_id:
+        raise HTTPException(409, "The application name changed while this request was being updated. Reload the request and try again.")
+    return obj
 
 
 def _validate_request_types(db: Session, request_types: list[str]) -> None:
@@ -530,7 +563,8 @@ def list_requests(params: pagination.PageParams = Depends(),
         organisation_scope = department_unit_visibility_condition(
             db, current_user, models.QARequest.department, models.QARequest.department_unit_id,
         )
-        q = q.filter(or_(organisation_scope, delegated_to_user))
+        q = q.filter(or_(organisation_scope, delegated_to_user,
+                         pending_application_gateway_condition(db, current_user)))
     if workspace_scope:
         q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_scope))
     if assigned_to_me:
@@ -661,7 +695,8 @@ def get_request(req_id: int, db: Session = Depends(get_db), current_user: models
         db.query(models.QASignOff).filter(models.QASignOff.testing_request_id.in_(func_ids)).all()
         if func_ids else []
     )
-    if obj.status == GatewayStatus.RAISED and obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN, Role.SECURITY_ANALYST):
+    obj.can_review_application_name = can_review_application_gateway(db, current_user, obj)
+    if obj.status not in _GATEWAY_PRIVATE_STATUSES and obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN, Role.SECURITY_ANALYST):
         out = schemas.QARequestOut.model_validate(obj)
         for target in out.draft_dast_components:
             target.test_credentials = None
@@ -1470,8 +1505,7 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
                   current_user: models.User = Depends(get_current_user)):
     # Serialize draft edits/cancellation/submission across workers and refresh
     # any identity loaded earlier by dependencies before checking its status.
-    obj = (db.query(models.QARequest).filter_by(id=req_id)
-           .populate_existing().with_for_update().one_or_none())
+    obj = _lock_gateway_and_application(db, req_id, payload.application_name)
     if not obj:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, obj, current_user)
@@ -1578,19 +1612,9 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     for k, v in data.items():
         setattr(obj, k, v)
 
-    # Reported directly: merely opening a Draft (e.g. one an Application
-    # Owner just rejected, which reverts the gateway to Draft -- see
-    # decide_app_owner_name's Reject branch) and clicking Save WITHOUT
-    # actually changing the Application Name field was silently re-flipping
-    # a REJECTED name back to PENDING_APP_OWNER and sending it back for
-    # approval -- because the wizard always resends the current
-    # application_name value on every save (see NewRequestModal.tsx), not
-    # just when the user actually edited that field, so `application_name_in
-    # is not None` was true on every single save regardless. Only actually
-    # re-resolving (and so only actually able to un-reject a REJECTED row)
-    # when the incoming name is genuinely DIFFERENT from what's already
-    # resolved fixes this: a plain re-save of an unrelated field no longer
-    # sends the name back for approval -- only really changing it does.
+    # A save updates the registry reference only when the text changes.
+    # Resolving a previously rejected name preserves its rejection; only
+    # explicit reconsideration with a reason can start a new review round.
     if application_name_in is not None:
         incoming_upper = (application_name_in or "").strip().upper()
         if incoming_upper != (obj.application_name or "").strip().upper():
@@ -1824,16 +1848,25 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     own REJECTED branch) instead of the raise itself ever being stopped.
     application_master_status is a live delegated property (see
     models.QARequest), so this sibling's status already read REJECTED by
-    the time Submit was clicked -- create_request/edit_request re-resolve
-    the name (and silently un-reject it back to PENDING_APP_OWNER, see
-    _resolve_application_name) only when the Application Name field is
-    actually re-saved, which Submit alone never does. Blocked below instead
-    of allowed through: a gateway can never raise while resolved to a
-    REJECTED name, full stop."""
+    the time Submit was clicked. Ordinary saves and submission preserve
+    that rejection. Only explicit reconsideration with a reason reopens
+    the name, and the gateway waits for a fresh Application Owner decision.
+    """
+    return _submit_gateway(req_id, db, current_user)
+
+
+@router.post("/{req_id}/application-name/resubmit", response_model=schemas.QARequestOut)
+def resubmit_application_name(req_id: int, payload: schemas.ApplicationNameResubmission,
+                             db: Session = Depends(get_db),
+                             current_user: models.User = Depends(require_roles(*QA_REQUEST_CREATOR_ROLES))):
+    return _submit_gateway(req_id, db, current_user, reconsideration_reason=payload.reason)
+
+
+def _submit_gateway(req_id: int, db: Session, current_user: models.User,
+                    *, reconsideration_reason: Optional[str] = None):
     # Serialize draft edits/cancellation/submission across workers and refresh
     # any identity loaded earlier by dependencies before checking its status.
-    obj = (db.query(models.QARequest).filter_by(id=req_id)
-           .populate_existing().with_for_update().one_or_none())
+    obj = _lock_gateway_and_application(db, req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, obj, current_user)
@@ -1843,18 +1876,25 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
         raise HTTPException(400, "The assigned user must return the request, or the requester must recall it, before submission")
     if obj.status != GatewayStatus.DRAFT:
         raise HTTPException(400, f"'Submit' requires status 'DRAFT' (currently '{obj.status}')")
-    if obj.application_master_status == "REJECTED":
-        # Wording note: since edit_request now only re-resolves (and so only
-        # un-rejects) the Application Name when it's actually changed to
-        # different text -- see edit_request's own comment, fixing "editing
-        # and saving a Draft without touching the name field was silently
-        # resubmitting a rejected name for approval" -- simply re-selecting
-        # the exact same rejected name no longer clears this on its own; a
-        # genuinely different Application Name is the only way through.
+    if reconsideration_reason is not None:
+        from ..workspace_service import inherited_workspace_access_mode, selectable_workspace_ids
+        if (not current_user.is_active or set(current_user.roles).intersection({Role.VIEW_ONLY, Role.SCALE_6_PLUS})
+                or obj.qa_workspace_id not in selectable_workspace_ids(db, current_user)
+                or inherited_workspace_access_mode(db, current_user, obj.qa_workspace_id) == "PARENT_VIEWER"):
+            raise HTTPException(403, "Operational workspace access is required to resubmit an application name")
+        if obj.application_master_status != "REJECTED":
+            raise HTTPException(409, "This application name is no longer rejected. Reload the request before continuing.")
+        reconsideration_reason = reconsideration_reason.strip()
+        if not reconsideration_reason:
+            raise HTTPException(400, "Explain why the rejected application name should be reconsidered")
+        if any(db.query(child.id).filter_by(qa_request_id=obj.id).first() for child in (
+                models.FunctionalRequest, models.SASTRequest, models.DASTRequest, models.PerformanceRequest)):
+            raise HTTPException(400, "Reconsideration requires a draft with no generated linked requests")
+    elif obj.application_master_status == "REJECTED":
         raise HTTPException(
             400,
-            f"Cannot raise -- the Application Name '{obj.application_name}' was rejected. Edit this request "
-            "and choose a different Application Name before raising.",
+            f"Cannot raise -- the Application Name '{obj.application_name}' was rejected. "
+            "Choose a different Application Name or use 'Resubmit application name for approval' with a reason.",
         )
     request_types = obj.request_types.split(",") if obj.request_types else []
     _validate_request_types(db, request_types)
@@ -1879,31 +1919,35 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     # this call.
     _validate_child_intake(db, obj, request_types)
 
-    # The real business ID now exists and validation has succeeded. Promote
-    # all Draft uploads before either raising immediately or waiting at the
-    # Application Owner checkpoint, preventing split DRAFT/TQA folders.
-    _promote_draft_upload_folder(db, obj)
-    # The global workspace is fixed when the draft is created. Submitting it
-    # must never move the record to a different tenant.
+    reconsideration = (application_name_reconsideration_context(db, obj.application_master_id)
+                       if reconsideration_reason is not None else nullcontext())
+    with reconsideration:
+        if reconsideration_reason is not None:
+            app_names.reopen_rejected_application_name(
+                db, obj.application_master, obj, current_user, reconsideration_reason,
+            )
 
-    if obj.application_master_status == "PENDING_APP_OWNER":
-        # Brand-new "Other" name, still awaiting the first approval tier --
-        # stop here. draft_child_details is intentionally left in place;
-        # _finalize_child_requests (called from
-        # routers/applications.py::decide_app_owner_name once the name is
-        # approved) is what actually unstashes it and creates the children.
-        obj.status = GatewayStatus.SUBMITTED
-        _log(db, obj.id, "Requester", current_user, "Submitted",
-             "Awaiting Application Owner approval of the new Application Name before "
-             "linked request(s) are generated and assigned to SM")
+        # Validation has succeeded. Promote Draft uploads before raising or
+        # waiting for the owner, preventing split DRAFT/TQA folders.
+        _promote_draft_upload_folder(db, obj)
+        # Submitting a draft must retain its original workspace.
+
+        if obj.application_master_status == "PENDING_APP_OWNER":
+            # Keep draft_child_details until the owner approves the name and
+            # _finalize_child_requests creates the linked requests.
+            obj.status = GatewayStatus.SUBMITTED
+            if reconsideration_reason is None:
+                _log(db, obj.id, "Requester", current_user, "Submitted",
+                     "Awaiting Application Owner approval of the new Application Name before "
+                     "linked request(s) are generated and assigned to SM")
+            db.commit()
+            db.refresh(obj)
+            return obj
+
+        _finalize_child_requests(db, obj, current_user)
         db.commit()
         db.refresh(obj)
         return obj
-
-    _finalize_child_requests(db, obj, current_user)
-    db.commit()
-    db.refresh(obj)
-    return obj
 
 
 @router.get("/{req_id}/history", response_model=List[schemas.ApprovalActionOut])

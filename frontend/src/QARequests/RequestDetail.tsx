@@ -6,17 +6,10 @@ import { api, HttpError } from "../api";
 import { formatDateTimeIST } from "../time";
 import { useAuth } from "../context/AuthContext";
 import {Link} from "react-router-dom"
-import {
-  Badge,
-  DetailField,
-  DetailSection,
-  ErrorText,
-  Modal,
-  Table,
-  applicationNameAwareStatusLabel,
-} from "../components/Common";
+import { Badge, DetailField, DetailSection, ErrorText, Modal, Table, applicationNameAwareStatusLabel, WarningNotice } from "../components/Common";
 import InfoModal from "../components/InfoModal";
 import { ApplicationNameBanner } from "../components/ApplicationNameBanner";
+import { ApplicationNameReconsideration } from "../components/ApplicationNameReconsideration";
 import RoleGroupLink from "../components/RoleGroupLink";
 import {
   GATEWAY_CANCELLABLE_STATUSES,
@@ -244,8 +237,8 @@ export function RequestDetail({
   // since application_master_id/status already live on this same QARequestOut
   // and the decision endpoints (routers/applications.py) key off the
   // ApplicationMaster row directly, not off any specific child request --
-  // nothing backend-side needed to change. Same same-department gate every
-  // other approval checkpoint in the app uses.
+  // Application Owners decide across departments within the workspace;
+  // the legacy SM tier still requires a department match.
   const sameDept = hasDepartment(user, req.department);
 
   // After an Application Owner/SM approves or rejects this request's
@@ -533,7 +526,7 @@ export function RequestDetail({
           <GatewayPreview activeIndex={gatewayStageIndex(req.status)} />
 
           {hasActiveDelegation && (
-            <div className="info-banner warning" style={{ marginBottom: 16 }}>
+            <WarningNotice className="info-banner warning" style={{ marginBottom: 16 }}>
               <strong>Delegated for input to {activeDelegation?.assigned_to_name || "assigned user"}</strong>
               <div className="small" style={{ marginTop: 4 }}>
                 {activeDelegation?.assignment_reason}
@@ -541,7 +534,7 @@ export function RequestDetail({
               <div className="muted small" style={{ marginTop: 4 }}>
                 The request remains owned by the requester. Only the assigned user can edit it while this delegation is active; workflow submission stays locked until it is returned or recalled.
               </div>
-            </div>
+            </WarningNotice>
           )}
 
           {/* Gated on status !== "DRAFT" -- application_master_id/status get
@@ -555,11 +548,15 @@ export function RequestDetail({
               own Approve/Reject decision is made (see the comment on the
               badges below for why it moved here from each linked child
               request's own page). */}
-          {(sameDept || isAdmin) && req.status !== "DRAFT" && (
+          {(req.application_master_status === "PENDING_APP_OWNER" || sameDept || isAdmin)
+            && req.status !== "DRAFT" && req.status !== "CANCELLED" && (
             <ApplicationNameBanner
               applicationMasterId={req.application_master_id}
               applicationMasterStatus={req.application_master_status}
               applicationName={req.application_name}
+              requestedById={req.application_master_requested_by_id === undefined ? req.requester_id : req.application_master_requested_by_id}
+              canReviewApplicationName={req.can_review_application_name}
+              reconsiderationReason={req.application_name_reconsideration_reason}
               onDecided={reloadAfterApplicationNameDecision}
               onRefresh={silentRefreshRequest}
             />
@@ -717,35 +714,20 @@ export function RequestDetail({
             </p>
           )}
           {canSubmit && applicationNameRejected && (
-            <div
-              style={{
-                marginTop: 8,
-                background: "#fef2f2",
-                border: "1px solid #fecaca",
-                borderRadius: 10,
-                padding: "10px 14px",
-                color: "#991b1b",
-                fontSize: 13,
-              }}
-            >
-              <strong>Cannot Submit / Raise</strong> — the Application Name{" "}
-              <strong>{req.application_name || "—"}</strong> was rejected.
-              Edit this request and either choose a different Application
-              Name, or re-select/re-type this same name to resubmit it for
-              fresh approval, before raising.
-            </div>
+            <ApplicationNameReconsideration request={req}
+              disabled={!!busyAction || hasLinked || pendingMandatory.length > 0 || missingMandatoryEvidence.length > 0}
+              disabledReason={hasLinked ? "Previously generated linked requests cannot be restarted by this action."
+                : pendingMandatory.length > 0 || missingMandatoryEvidence.length > 0
+                  ? "Complete the mandatory readiness checklist and supporting evidence in Edit Request before resubmitting." : undefined}
+              onResubmitted={updated => {
+                onChanged(updated);
+                void load();
+                setRaisedNotice(updated);
+              }} />
           )}
-          {canSubmit && !applicationNameRejected && pendingMandatory.length > 0 && (
-            <div
-              style={{
-                marginTop: 8,
-                background: "#fffaeb",
-                border: "1px solid #fde68a",
-                borderRadius: 10,
-                padding: "10px 14px",
-                color: "#92400e",
-                fontSize: 13,
-              }}
+          {canSubmit && pendingMandatory.length > 0 && (
+            <WarningNotice
+              style={{ marginTop: 8, marginBottom: 8 }}
             >
               <strong>Cannot Submit / Raise yet</strong> — the following
               mandatory Readiness checklist item(s) must be self-declared ready
@@ -755,7 +737,7 @@ export function RequestDetail({
                   <li key={item}>{item}</li>
                 ))}
               </ul>
-            </div>
+            </WarningNotice>
           )}
           {canSubmit && missingMandatoryEvidence.length > 0 && (
             <div
@@ -1112,7 +1094,7 @@ export function RequestDetail({
             generated, and they'll be assigned to SM — you'll see them appear
             on this page and its respective section(s) at that point. If the
             name is rejected instead, this request reverts to Draft so you
-            can edit and resubmit under a different name.
+            can choose a different name or explicitly resubmit the same name with a reason for reconsideration.
           </p>
         </InfoModal>
       )}

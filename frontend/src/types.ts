@@ -445,6 +445,7 @@ export interface QARequestListOut {
   created_at: string
   updated_at: string
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   active_delegation?: QARequestDelegationOut | null
   linked_functional_requests: LinkedRequestRef[]
   linked_sast_requests: LinkedRequestRef[]
@@ -458,6 +459,9 @@ export interface QARequestListOut {
 }
 
 export interface QARequestOut {
+  can_review_application_name?: boolean
+  application_name_rejection_reason?: string | null
+  application_name_reconsideration_reason?: string | null
   can_add_testing_types?: boolean
   scope_addition_types?: string[]
   scope_addition_reason?: string
@@ -496,6 +500,7 @@ export interface QARequestOut {
   // SM's Approve/Reject action target the right master row.
   application_master_id?: number | null
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   qa_workspace_id?: number | null
   qa_workspace_name?: string | null
   workspace_routing_status: string
@@ -537,6 +542,7 @@ export interface FunctionalListOut {
   request_id: string
   status: string
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   requester_id?: number | null
   qa_lead_id?: number | null
   assigned_tester_ids?: string | null
@@ -601,6 +607,7 @@ export interface FunctionalOut {
   // Application Name right from this request's own detail view.
   application_master_id?: number | null
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   // "Ready for Testing" readiness checklist -- see ChecklistItemOut. Lets
   // the Edit Details modal show/refresh a self-declaration section, same
   // as SASTOut/DASTOut/PerformanceOut's own checklist_items.
@@ -788,6 +795,7 @@ export interface SASTListOut {
   request_id: string
   status: string
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   requester_id?: number | null
   security_lead_id?: number | null
   priority?: string | null
@@ -842,6 +850,7 @@ export interface SASTOut {
   // Name right from this request's own detail view.
   application_master_id?: number | null
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   environment?: string | null
   target_promotion_environment?: string | null
   // One row per repository -- see SASTComponentOut above.
@@ -895,6 +904,7 @@ export interface DASTListOut {
   request_id: string
   status: string
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   requester_id?: number | null
   security_lead_id?: number | null
   priority?: string | null
@@ -940,6 +950,7 @@ export interface DASTOut {
   // Name right from this request's own detail view.
   application_master_id?: number | null
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   // Delegated from the QA Request gateway -- collected once, at QA Request
   // creation time. No separate target_release field anymore.
   target_release_date?: string | null
@@ -985,6 +996,7 @@ export interface PerformanceListOut {
   request_id: string
   status: string
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   requester_id?: number | null
   engineer_id?: number | null
   priority?: string | null
@@ -1044,6 +1056,7 @@ export interface PerformanceOut {
   // Name right from this request's own detail view.
   application_master_id?: number | null
   application_master_status?: string | null
+  application_master_requested_by_id?: number | null
   checklist_items: PerformanceChecklistItemOut[]
 }
 
@@ -2361,6 +2374,8 @@ export interface PendingApprovalItem {
   category: string
   entity_type: string
   entity_id: number
+  qa_workspace_id?: number | null
+  requester_id?: number | null
   display_id?: string | null
   parent_request_id?: string | null
   parent_path?: string | null
