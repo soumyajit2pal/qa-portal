@@ -1412,7 +1412,7 @@ def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[
         q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_scope))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, delegated_to_user))
-    q = pagination.apply_search(q, params, models.SASTRequest.request_id, models.QARequest.application_name)
+    q = pagination.apply_search(q, params, models.SASTRequest.request_id, models.QARequest.application_name, models.QARequest.module_name)
     q = pagination.apply_status_filter(q, params, models.SASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
     q = pagination.apply_terminal_raised_date_filter(
@@ -1430,6 +1430,7 @@ def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[
             "updated_at": models.SASTRequest.updated_at,
             "status": models.SASTRequest.status,
             "application_name": models.QARequest.application_name,
+            "module_name": models.QARequest.module_name,
         },
         default_column=models.SASTRequest.created_at, id_column=models.SASTRequest.id,
     )
@@ -1685,6 +1686,7 @@ def export_sast(req_id: int, db: Session = Depends(get_db), current_user: models
         ]),
         ("Application & Change", [
             ("Application Name", obj.application_name),
+            *([("Module Name", obj.module_name)] if obj.module_name else []),
             ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Department", obj.department),
             ("Application Owner", obj.application_owner),
@@ -1945,7 +1947,7 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
         q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_scope))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, delegated_to_user))
-    q = pagination.apply_search(q, params, models.DASTRequest.request_id, models.QARequest.application_name)
+    q = pagination.apply_search(q, params, models.DASTRequest.request_id, models.QARequest.application_name, models.QARequest.module_name)
     q = pagination.apply_status_filter(q, params, models.DASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
     q = pagination.apply_terminal_raised_date_filter(
@@ -1963,6 +1965,7 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
             "updated_at": models.DASTRequest.updated_at,
             "status": models.DASTRequest.status,
             "application_name": models.QARequest.application_name,
+            "module_name": models.QARequest.module_name,
         },
         default_column=models.DASTRequest.created_at, id_column=models.DASTRequest.id,
     )
@@ -2186,6 +2189,7 @@ def export_dast(req_id: int, db: Session = Depends(get_db), current_user: models
         ]),
         ("Application & Change", [
             ("Application Name", obj.application_name),
+            *([("Module Name", obj.module_name)] if obj.module_name else []),
             ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Department", obj.department),
             ("Application Owner", obj.application_owner),

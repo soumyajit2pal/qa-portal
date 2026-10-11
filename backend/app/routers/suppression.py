@@ -558,8 +558,8 @@ def list_suppressions(db: Session = Depends(get_db), current_user: models.User =
         selectinload(models.SuppressionRequest.items),
         selectinload(models.SuppressionRequest.department_approvals).joinedload(models.SuppressionDepartmentApproval.department),
         selectinload(models.SuppressionRequest.department_approvals).joinedload(models.SuppressionDepartmentApproval.approver),
-        joinedload(models.SuppressionRequest.sast_request),
-        joinedload(models.SuppressionRequest.dast_request),
+        joinedload(models.SuppressionRequest.sast_request).joinedload(models.SASTRequest.qa_request),
+        joinedload(models.SuppressionRequest.dast_request).joinedload(models.DASTRequest.qa_request),
     )
     scope = dashboard_department_scope(current_user)
     if scope is not None:
@@ -1127,6 +1127,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
         ]),
         ("Application", [
             ("Application Name", obj.application_name),
+            *([("Module Name", obj.module_name)] if obj.module_name else []),
             ("Department", obj.department),
             ("Application Owner", obj.application_owner),
         ]),

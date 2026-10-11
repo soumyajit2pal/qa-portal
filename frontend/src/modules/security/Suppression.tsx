@@ -110,7 +110,7 @@ function RequestIdSearch({ requests, selected, onSelect, onClear, loading = fals
         <div className="searchable-select-trigger" style={{ cursor: 'default' }}>
           <span>
             <span className={`badge ${selected._kind === 'SAST' ? 'badge-blue' : 'badge-yellow'}`} style={{ marginRight: 8 }}>{selected._kind}</span>
-            {selected.request_id} — {label}
+            {selected.request_id} — {label}{selected.module_name && ` · ${selected.module_name}`}
           </span>
           <button type="button" className="btn btn-sm" onClick={onClear}>Change</button>
         </div>
@@ -121,14 +121,15 @@ function RequestIdSearch({ requests, selected, onSelect, onClear, loading = fals
   const q = query.trim().toLowerCase()
   const matches = (q
     ? requests.filter((r) => r.request_id.toLowerCase().includes(q)
-        || ((r as any).application_name || (r as any).application_url || '').toLowerCase().includes(q))
+        || ((r as any).application_name || (r as any).application_url || '').toLowerCase().includes(q)
+        || (r.module_name || '').toLowerCase().includes(q))
     : requests
   ).slice(0, 8)
 
   return (
     <div className="searchable-select" ref={boxRef}>
       <ClearableSearchInput
-        placeholder="Search SAST or DAST Request ID or application..."
+        placeholder="Search security Request ID, application or module..."
         value={query}
         aria-busy={loading}
         onFocus={() => setOpen(true)}
@@ -149,6 +150,7 @@ function RequestIdSearch({ requests, selected, onSelect, onClear, loading = fals
                   <span className={`badge ${r._kind === 'SAST' ? 'badge-blue' : 'badge-yellow'}`} style={{ marginRight: 8 }}>{r._kind}</span>
                   {r.request_id} — {(r as any).application_name || (r as any).application_url}
                 </div>
+                {r.module_name && <div className="muted small">Module: {r.module_name}</div>}
                 {(r.department || r.application_owner) && (
                   <div className="muted small">{r.application_owner || '—'} &middot; {r.department || '—'}</div>
                 )}
@@ -270,6 +272,7 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
         requester_id: r.requester_id, security_lead_id: r.security_lead_id,
         priority: r.priority, risk_category: r.risk_category,
         application_name: r.application_name,
+        module_name: r.module_name,
         department: r.department, application_owner: r.application_owner,
         findings_count: 0, has_open_suppression: false,
         qa_request: r.qa_request, created_at: r.created_at, updated_at: r.updated_at,
@@ -446,6 +449,7 @@ export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
               <Field label="Application Name *">
                 <input required value={form.application_name} disabled />
               </Field>
+              {selectedRef?.module_name && <Field label="Module Name"><input disabled value={selectedRef.module_name} /></Field>}
               <Field label="Application Owner *">
                 <input required value={form.application_owner} disabled />
               </Field>
@@ -735,6 +739,7 @@ function EditSuppressionModal({ sup, onClose, onSaved }: {
               <Field label="Request ID"><input disabled value={sup.linked_request?.request_id || '—'} /></Field>
               <Field label="Scan Type"><input disabled value={form.scan_type} /></Field>
               <Field label="Application Name"><input disabled value={form.application_name} /></Field>
+              {sup.module_name && <Field label="Module Name"><input disabled value={sup.module_name} /></Field>}
               <Field label="Department"><input disabled value={form.department} /></Field>
             </div>
             <p className="muted small" style={{ margin: '6px 0 0' }}>
@@ -932,6 +937,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
           <div className="grid grid-2 suppression-overview-grid">
             <div><strong>Status:</strong> <WorkflowStatusBadge record={sup} status={status} label={SUPPRESSION_STATUS_LABELS[status] || status} /></div>
             <div><strong>Scan Type:</strong> {sup.scan_type}</div>
+            {sup.module_name && <div><strong>Module Name:</strong> {sup.module_name}</div>}
             <div>
               <strong>{sup.scan_type} Request ID:</strong> {sup.linked_request?.request_id || '—'}
               {canRelink && (
@@ -1292,6 +1298,7 @@ export default function Suppression() {
         <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
           { key: 'suppression_id', header: 'ID' },
           { key: 'application_name', header: 'Application' },
+          { key: 'module_name', header: 'Module', render: (r) => r.module_name || '—' },
           { key: 'created_by_id', header: 'Requester', render: (r) => userName(users, r.created_by_id) || '—', filterValue: (r) => userName(users, r.created_by_id) || '' },
           { key: 'scan_type', header: 'Scan Type' },
           { key: 'linked_request', header: 'Linked Request', render: (r) => r.linked_request?.request_id || '—', filterValue: (r) => r.linked_request?.request_id || '' },

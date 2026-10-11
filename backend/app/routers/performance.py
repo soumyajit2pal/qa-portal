@@ -233,7 +233,7 @@ def list_performance(params: pagination.PageParams = Depends(), requester_id: Op
         q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_scope))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, delegated_to_user))
-    q = pagination.apply_search(q, params, models.PerformanceRequest.request_id, models.PerformanceRequest.application_name)
+    q = pagination.apply_search(q, params, models.PerformanceRequest.request_id, models.PerformanceRequest.application_name, models.QARequest.module_name)
     q = pagination.apply_status_filter(q, params, models.PerformanceRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
     q = pagination.apply_terminal_raised_date_filter(
@@ -251,6 +251,7 @@ def list_performance(params: pagination.PageParams = Depends(), requester_id: Op
             "updated_at": models.PerformanceRequest.updated_at,
             "status": models.PerformanceRequest.status,
             "application_name": models.PerformanceRequest.application_name,
+            "module_name": models.QARequest.module_name,
         },
         default_column=models.PerformanceRequest.created_at, id_column=models.PerformanceRequest.id,
     )
@@ -818,6 +819,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
         ]),
         ("Application & Change", [
             ("Application Name", obj.application_name),
+            *([("Module Name", obj.module_name)] if obj.module_name else []),
             ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Department", obj.department),
             ("Change Type", obj.change_type),

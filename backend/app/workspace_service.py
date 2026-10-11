@@ -167,7 +167,7 @@ def remove_default_membership_after_assignment(
 ) -> None:
     """Make DEFAULT a fallback once a normal user joins a real workspace."""
     workspace = db.get(models.QAWorkspace, workspace_id)
-    if workspace is None or workspace.is_default or user.has_role(Role.ADMIN):
+    if workspace is None or not workspace.is_active or workspace.is_default or user.has_role(Role.ADMIN):
         return
     default_ids = [
         row_id for (row_id,) in db.query(models.QAWorkspace.id).filter(

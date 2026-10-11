@@ -560,6 +560,7 @@ class LinkedRequestRef(ORMModel):
     property so this shape works uniformly across all 4 linked-request
     types."""
     id: int
+    module_name: Optional[str] = None
     request_id: str
     status: Optional[str] = None
     priority: Optional[str] = None
@@ -702,6 +703,15 @@ class QARequestCreate(BaseModel):
     department: Optional[str] = None
     department_unit_id: Optional[int] = None
     application_name: str
+    module_name: Optional[str] = Field(default=None, max_length=150)
+
+    @field_validator("module_name", mode="before")
+    @classmethod
+    def normalize_module_name(cls, value):
+        if isinstance(value, str):
+            return " ".join(value.split()).upper() or None
+        return value
+
     application_owner: Optional[str] = None
     cr_number: Optional[str] = None
     epic_number: Optional[str] = None
@@ -881,6 +891,7 @@ class QARequestOut(ORMModel):
     department_unit_id: Optional[int] = None
     department_unit_name: Optional[str] = None
     application_name: str
+    module_name: Optional[str] = None
     application_owner: Optional[str] = None
     cr_number: Optional[str] = None
     epic_number: Optional[str] = None
@@ -962,6 +973,7 @@ class QARequestListOut(ORMModel):
     department_unit_id: Optional[int] = None
     department_unit_name: Optional[str] = None
     application_name: str
+    module_name: Optional[str] = None
     application_master_id: Optional[int] = None
     qa_workspace_id: Optional[int] = None
     qa_workspace_name: Optional[str] = None
@@ -1065,6 +1077,7 @@ class FunctionalListOut(ORMModel):
     scoping/filter). See FunctionalOut below for the full
     detail-view shape fetched on open (PAG-006)."""
     id: int
+    module_name: Optional[str] = None
     request_id: str
     status: str
     application_master_status: Optional[str] = None
@@ -1097,6 +1110,7 @@ class FunctionalOut(ORMModel):
     missing_testing_types: List[str] = Field(default_factory=list)
     qa_request_id: Optional[int] = None
     id: int
+    module_name: Optional[str] = None
     request_id: str
     status: str
     # True while `status` is RETURNED_BY_QA_LEAD *and* that return was flagged
@@ -1595,6 +1609,7 @@ class SASTListOut(ORMModel):
     list table exactly (findings_count instead of the full findings list --
     see models.SASTRequest.findings_count)."""
     id: int
+    module_name: Optional[str] = None
     request_id: str
     status: str
     application_master_status: Optional[str] = None
@@ -1626,6 +1641,7 @@ class SASTOut(ORMModel):
     missing_testing_types: List[str] = Field(default_factory=list)
     request_types: Optional[str] = None
     id: int
+    module_name: Optional[str] = None
     request_id: str
     application_name: str
     epic_number: Optional[str] = None
@@ -1717,6 +1733,7 @@ class DASTListOut(ORMModel):
     test_credentials masking, see _dast_out in routers/sast_dast.py, is only
     ever a concern for the detail endpoint, not this list)."""
     id: int
+    module_name: Optional[str] = None
     request_id: str
     status: str
     application_master_status: Optional[str] = None
@@ -1743,6 +1760,7 @@ class DASTOut(ORMModel):
     missing_testing_types: List[str] = Field(default_factory=list)
     request_types: Optional[str] = None
     id: int
+    module_name: Optional[str] = None
     request_id: str
     risk_category: Optional[str] = None
     priority: Optional[str] = None
@@ -1878,6 +1896,7 @@ class PerformanceListOut(ORMModel):
     """PAG-005 lightweight list schema -- mirrors
     modules/specialised-testing/Performance.tsx's list table exactly."""
     id: int
+    module_name: Optional[str] = None
     request_id: str
     status: str
     application_master_status: Optional[str] = None
@@ -1903,6 +1922,7 @@ class PerformanceOut(ORMModel):
     missing_testing_types: List[str] = Field(default_factory=list)
     request_types: Optional[str] = None
     id: int
+    module_name: Optional[str] = None
     request_id: str
     application_name: str
     epic_number: Optional[str] = None
@@ -2025,6 +2045,7 @@ class SuppressionDepartmentApprovalOut(ORMModel):
 
 class SuppressionOut(ORMModel):
     id: int
+    module_name: Optional[str] = None
     suppression_id: str
     application_name: str
     scan_type: str
@@ -2502,6 +2523,7 @@ class SignOffOwnershipTakeoverIn(BaseModel):
 class SignOffListOut(ORMModel):
     """Register fields only; evidence is fetched when a certificate is opened."""
     id: int
+    module_name: Optional[str] = None
     certificate_id: str
     certificate_type: str
     certificate_testing_type: Optional[str] = None
@@ -2530,6 +2552,7 @@ class SignOffOut(ORMModel):
 
     certificate_summary: Optional[dict] = None
     id: int
+    module_name: Optional[str] = None
     certificate_id: str
     certificate_date: Optional[datetime.date] = None
     certificate_type: str

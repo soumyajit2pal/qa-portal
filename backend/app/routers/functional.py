@@ -639,7 +639,7 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
         q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_scope))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, requester_work, delegated_to_user))
-    q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name)
+    q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name, models.QARequest.module_name)
     q = pagination.apply_status_filter(q, params, models.FunctionalRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
     q = pagination.apply_terminal_raised_date_filter(
@@ -658,6 +658,7 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
             "updated_at": models.FunctionalRequest.updated_at,
             "status": models.FunctionalRequest.status,
             "application_name": models.QARequest.application_name,
+            "module_name": models.QARequest.module_name,
         },
         default_column=models.FunctionalRequest.created_at, id_column=models.FunctionalRequest.id,
     )
@@ -778,6 +779,9 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
             obj.qa_request.application_name, obj.qa_request.application_master_id = app_names.resolve_application_name(
                 db, application_name_in, obj.qa_request.department, current_user.id, qa_request_id=obj.qa_request.id,
             )
+            # Modules belong to the original application. Match the gateway
+            # editor's behavior when this shared parent changes application.
+            obj.qa_request.module_name = None
             app_names.cleanup_orphaned_application_master(db, old_master_id, obj.qa_request.id)
     for k, v in data.items():
         if k in _FUNCTIONAL_OWN_FIELDS:
@@ -1754,6 +1758,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         ]),
         ("Application & Change", [
             ("Application Name", obj.application_name),
+            *([("Module Name", obj.module_name)] if obj.module_name else []),
             ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Change Type", obj.change_type),
             ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type in {"Bug Fix", "Enhancement"} else None),

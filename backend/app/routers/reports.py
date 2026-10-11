@@ -151,7 +151,7 @@ def qa_request_summary(date_from: str | None = None, date_to: str | None = None,
         )
         out.append({
             "Request ID": r.request_id, "Request Date": r.request_date, "Department": r.department,
-            "Application Name": r.application_name,
+            "Application Name": r.application_name, "Module Name": r.module_name,
             "CR Number/EPIC Number": r.cr_number or r.epic_number,
             "Previous Completed Request ID": r.bug_fix_source_request_id if r.change_type in {"Bug Fix", "Enhancement"} else None,
             "Defect Number (Raised By Business)": r.business_defect_number if r.change_type == "Bug Fix" else None,
@@ -211,7 +211,7 @@ def functional_request_register(date_from: str | None = None, date_to: str | Non
     return [{
         "Functional Request ID": item.request_id,
         "QA Request ID": item.qa_request.request_id if item.qa_request else None,
-        "Application": item.application_name,
+        "Application": item.application_name, "Module Name": item.module_name,
         "Department": item.department,
         "Request Type(s)": item.request_types,
         "Change Description": item.change_description,
@@ -462,7 +462,10 @@ def sast_scan_report(date_from: str | None = None, date_to: str | None = None, d
     if scope is not None:
         q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
              .filter(models.QARequest.department.in_(scope))
-    rows = _in_period(q.options(selectinload(models.SASTRequest.components)), models.SASTRequest.created_at, date_from, date_to).all()
+    rows = _in_period(q.options(
+        selectinload(models.SASTRequest.components),
+        joinedload(models.SASTRequest.qa_request),
+    ), models.SASTRequest.created_at, date_from, date_to).all()
     latest_scans = _latest_scan_by_request(db, "SAST", [r.id for r in rows])
     from ..security_scan_state import repository_states
     out = []
@@ -471,7 +474,7 @@ def sast_scan_report(date_from: str | None = None, date_to: str | None = None, d
         states = repository_states(request, scan.scan_history if scan else [])
         clear = sum(row['state'] == 'CLEAR' for row in states)
         out.append({
-            "Request ID": request.request_id, "Application": request.application_name, "Build": request.build_number,
+            "Request ID": request.request_id, "Application": request.application_name, "Module Name": request.module_name, "Build": request.build_number,
             "Status": request.status, "Findings": scan.total_count if scan else None,
             "Repository Coverage": f"{clear}/{len(states)} clear",
             "Unscanned Repositories": sum(row['state'] == 'NOT_SCANNED' for row in states),
@@ -491,10 +494,10 @@ def dast_scan_report(date_from: str | None = None, date_to: str | None = None, d
     if scope is not None:
         q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
              .filter(models.QARequest.department.in_(scope))
-    rows = _in_period(q, models.DASTRequest.created_at, date_from, date_to).all()
+    rows = _in_period(q.options(joinedload(models.DASTRequest.qa_request)), models.DASTRequest.created_at, date_from, date_to).all()
     latest_scans = _latest_scan_by_request(db, "DAST", [r.id for r in rows])
     return [{
-        "Request ID": r.request_id, "Application URL": r.application_url, "Environment": r.environment,
+        "Request ID": r.request_id, "Application URL": r.application_url, "Module Name": r.module_name, "Environment": r.environment,
         "Status": r.status,
         "Findings": latest_scans[r.id].total_count if r.id in latest_scans else 0,
     } for r in rows]
@@ -518,7 +521,7 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
             .join(models.QARequest, request_model.qa_request_id == models.QARequest.id)
             .filter(models.QARequest.department.in_(scope))
         )
-    requests = request_query.all()
+    requests = request_query.options(joinedload(request_model.qa_request)).all()
     by_id = {request.id: request for request in requests}
     if not by_id:
         return []
@@ -579,6 +582,7 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
                 "Scan Type": kind,
                 "Request ID": request.request_id,
                 "Application": scan.application_name,
+                "Module Name": request.module_name,
                 "Application Version": scan.application_version,
                 "Selected Scan Targets": "\n".join(target_labels) or "Not captured (legacy scan)",
                 "Selected Target Count": len(target_labels) if scan_targets else None,
@@ -649,7 +653,7 @@ def performance_testing_report(date_from: str | None = None, date_to: str | None
         tester_ids.update(int(value) for value in (item.assigned_tester_ids or "").split(",") if value.strip().isdigit())
     names = _user_name_map(db, tester_ids)
     return [{
-        "Request ID": item.request_id, "Application": item.application_name,
+        "Request ID": item.request_id, "Application": item.application_name, "Module Name": item.module_name,
         "CR Number/EPIC Number": item.cr_number or item.epic_number,
         "Previous Completed Request ID": item.bug_fix_source_request_id if item.change_type in {"Bug Fix", "Enhancement"} else None,
         "Defect Number (Raised By Business)": item.business_defect_number if item.change_type == "Bug Fix" else None,
@@ -714,6 +718,8 @@ def suppression_register(date_from: str | None = None, date_to: str | None = Non
     # is enough, same as list_suppressions in routers/suppression.py.
     q = db.query(models.SuppressionRequest).options(
         selectinload(models.SuppressionRequest.items),
+        joinedload(models.SuppressionRequest.sast_request).joinedload(models.SASTRequest.qa_request),
+        joinedload(models.SuppressionRequest.dast_request).joinedload(models.DASTRequest.qa_request),
         selectinload(models.SuppressionRequest.department_approvals).joinedload(
             models.SuppressionDepartmentApproval.department,
         ),
@@ -759,7 +765,7 @@ def suppression_register(date_from: str | None = None, date_to: str | None = Non
         items = s.items or [None]
         for item in items:
             out.append({
-                "Suppression ID": s.suppression_id, "Application": s.application_name, "Scan Type": s.scan_type,
+                "Suppression ID": s.suppression_id, "Application": s.application_name, "Module Name": s.module_name, "Scan Type": s.scan_type,
                 "Department": s.department, "Application Owner": s.application_owner,
                 "Issue Group": item.issue_id if item else None, "Severity": item.severity if item else None,
                 "Status": s.status,
@@ -837,7 +843,9 @@ def quality_scorecard(date_from: str | None = None, date_to: str | None = None, 
 
 def _visible_signoffs(db: Session, current_user: models.User,
                       date_from: str | None = None, date_to: str | None = None):
-    q = db.query(models.QASignOff).options(joinedload(models.QASignOff.source_functional_request))
+    q = db.query(models.QASignOff).options(
+        joinedload(models.QASignOff.source_functional_request).joinedload(models.FunctionalRequest.qa_request),
+    )
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         q = (q.join(models.FunctionalRequest,
@@ -861,7 +869,7 @@ def qa_signoff_register(date_from: str | None = None, date_to: str | None = None
         "Certificate ID": item.certificate_id,
         "Certificate Date": item.certificate_date,
         "Testing Request ID": item.certificate_testing_request_id,
-        "Application": item.application_name,
+        "Application": item.application_name, "Module Name": item.module_name,
         "Request Department": item.request_department,
         "CR Number/EPIC Number": item.change_request_ids,
         "Certificate Type": item.certificate_type,
@@ -902,6 +910,7 @@ def qa_clearance_evidence(date_from: str | None = None, date_to: str | None = No
             "Certificate ID": item.certificate_id,
             "Testing Request ID": item.certificate_testing_request_id,
             "Application": item.application_name,
+            "Module Name": item.module_name,
             "Department": item.request_department,
             "Certificate Type": item.certificate_type,
             "Status": qa_clearance_export_status(item.status),
@@ -1012,7 +1021,7 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
     counts = defaultdict(Counter)
 
     def add(workspace_id, module, record_id, status_value, *, parent="", description="",
-            context="", department="", testcases="", metrics="", defects="",
+            context="", module_name="", department="", testcases="", metrics="", defects="",
             severity="", created=None):
         if not _within_period(created, start, end):
             return
@@ -1025,6 +1034,7 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
             "Workspace": name, "Row Type": "Record", "Module": module,
             "Record ID": record_id or "", "Parent / Linked ID": parent or "",
             "Description": description or "", "Application / Project": context or "",
+            "Module Name": module_name or "",
             "Department": department or "", "Status": status_label, "Count": "",
             "Testcases": testcases, "Execution Results": metrics or "",
             "Defects": defects, "Created At": created,
@@ -1049,7 +1059,7 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
     parent_ids = set(parent_by_id)
     for row in parents:
         add(row.qa_workspace_id, "QA Request", row.request_id or f"Draft #{row.id}", row.status,
-            description=row.change_description, context=row.application_name,
+            description=row.change_description, context=row.application_name, module_name=row.module_name,
             department=row.department, created=row.created_at)
 
     child_types = (
@@ -1073,6 +1083,7 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
                 parent=parent.request_id if parent else "",
                 description=parent.change_description if parent else "",
                 context=parent.application_name if parent else getattr(row, "application_name", ""),
+                module_name=parent.module_name if parent else None,
                 department=parent.department if parent else "",
                 created=row.created_at)
 
@@ -1085,7 +1096,7 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
         suppression_query = suppression_query.filter(models.SuppressionRequest.department.in_(department_scope))
     for row in suppression_query.all():
         add(row.qa_workspace_id, "Suppression Request", row.suppression_id, row.status,
-            description=row.scan_type, context=row.application_name,
+            description=row.scan_type, context=row.application_name, module_name=row.module_name,
             department=row.department, created=row.created_at)
 
     project_query = db.query(models.TestProject)
@@ -1230,7 +1241,7 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
     for row in clearance_query.all():
         add(row.qa_workspace_id, "QA Clearance", row.certificate_id, row.status,
             parent=row.testing_request_id, description=row.certificate_type,
-            context=row.application_name, department=row.request_department,
+            context=row.application_name, module_name=row.module_name, department=row.request_department,
             created=row.created_at)
 
     summaries = []
@@ -1243,7 +1254,7 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
                 summaries.append({
                     "Workspace": name, "Row Type": "Summary", "Module": module,
                     "Record ID": "", "Parent / Linked ID": "", "Description": "",
-                    "Application / Project": "", "Department": "", "Status": status_label,
+                    "Application / Project": "", "Module Name": "", "Department": "", "Status": status_label,
                     "Count": count, "Testcases": "", "Execution Results": "",
                     "Defects": "", "Created At": "",
                 })

@@ -331,6 +331,7 @@ export default function QARequests() {
               filterValue: (r) => r.request_id || `Draft #${r.id}`,
             },
             { key: "application_name", header: "Application" },
+            { key: "module_name", header: "Module", render: (r) => r.module_name || '—' },
             {
               key: "department",
               header: "Department Scope",

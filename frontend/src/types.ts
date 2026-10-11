@@ -367,6 +367,7 @@ export interface LinkedRequestRef {
   risk_category?: string | null
   department_unit_id?: number | null
   department_unit_name?: string | null
+  module_name?: string | null
 }
 
 // Minimal cross-reference the other direction from LinkedRequestRef -- one
@@ -430,6 +431,7 @@ export interface QARequestListOut {
   department_unit_id?: number | null
   department_unit_name?: string | null
   application_name: string
+  module_name?: string | null
   application_master_id?: number | null
   qa_workspace_id?: number | null
   qa_workspace_name?: string | null
@@ -474,6 +476,7 @@ export interface QARequestOut {
   department_unit_id?: number | null
   department_unit_name?: string | null
   application_name: string
+  module_name?: string | null
   application_owner?: string | null
   cr_number?: string | null
   epic_number?: string | null
@@ -556,6 +559,7 @@ export interface FunctionalListOut {
   qa_request?: LinkedRequestRef | null
   created_at: string
   updated_at: string
+  module_name?: string | null
 }
 
 export interface FunctionalOut {
@@ -613,6 +617,7 @@ export interface FunctionalOut {
   // as SASTOut/DASTOut/PerformanceOut's own checklist_items.
   checklist_items: ChecklistItemOut[]
   linked_test_cycles: LinkedTestCycleRef[]
+  module_name?: string | null
 }
 
 export interface LinkedTestCycleRef {
@@ -815,6 +820,7 @@ export interface SASTListOut {
   qa_request?: LinkedRequestRef | null
   created_at: string
   updated_at: string
+  module_name?: string | null
 }
 
 export interface SASTOut {
@@ -862,6 +868,7 @@ export interface SASTOut {
   // Every Suppression / False Positive request raised against this SAST
   // request -- see backend models.SASTRequest.suppressions.
   suppressions: LinkedSuppressionRef[]
+  module_name?: string | null
 }
 
 export interface DASTFindingOut {
@@ -920,6 +927,7 @@ export interface DASTListOut {
   qa_request?: LinkedRequestRef | null
   created_at: string
   updated_at: string
+  module_name?: string | null
 }
 
 export interface DASTOut {
@@ -968,6 +976,7 @@ export interface DASTOut {
   checklist_items: ChecklistItemOut[]
   // See SASTOut.suppressions above -- same idea, for DAST.
   suppressions: LinkedSuppressionRef[]
+  module_name?: string | null
 }
 
 // A combined SAST/DAST record used by the Suppression "Request ID"
@@ -1009,6 +1018,7 @@ export interface PerformanceListOut {
   qa_request?: LinkedRequestRef | null
   created_at: string
   updated_at: string
+  module_name?: string | null
 }
 
 export interface PerformanceOut {
@@ -1058,6 +1068,7 @@ export interface PerformanceOut {
   application_master_status?: string | null
   application_master_requested_by_id?: number | null
   checklist_items: PerformanceChecklistItemOut[]
+  module_name?: string | null
 }
 
 // ---------------- Suppression ----------------
@@ -1118,6 +1129,7 @@ export interface SuppressionOut {
   security_decision?: string | null
   needs_dept_head_reapproval: boolean
   created_at: string
+  module_name?: string | null
 }
 
 // ---------------- QA Clearance ----------------
@@ -1147,6 +1159,7 @@ export interface CertificateSummary {
   defects: { total: number; counts: Record<string, number> }
   severity: { severity: string; open: number; closed: number; total: number }[]
   open_critical_high: number
+  module_name?: string | null
 }
 
 export interface SignOffOut {
@@ -1217,6 +1230,7 @@ export interface SignOffOut {
   superseded_at?: string | null
   created_at: string
   updated_at: string
+  module_name?: string | null
 }
 
 // ---------------- Dashboard ----------------

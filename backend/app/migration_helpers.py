@@ -31,6 +31,14 @@ def ensure_column(table_name, column):
             op.add_column(table_name, column)
 
 
+def ensure_table(table):
+    if context.is_offline_mode():
+        ddl = str(sa.schema.CreateTable(table).compile(dialect=op.get_bind().dialect)).strip()
+        _guarded_oracle_ddl("USER_TABLES", f"TABLE_NAME = '{table.name.upper()}'", ddl)
+    elif not sa.inspect(op.get_bind()).has_table(table.name):
+        table.create(op.get_bind())
+
+
 def _ensure_constraint(table_name, name, constraint, create, kind):
     if context.is_offline_mode():
         ddl = str(sa.schema.AddConstraint(constraint).compile(dialect=op.get_bind().dialect)).strip()

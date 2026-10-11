@@ -819,6 +819,20 @@ class ApplicationMaster(Base):
 # ---------------------------------------------------------------------------
 # Module 1: QA Request Management -- pure intake/gateway record
 # ---------------------------------------------------------------------------
+class ApplicationModule(Base):
+    """Reusable module names within one application and workspace, without review."""
+    __tablename__ = "qap_application_modules"
+    __table_args__ = (
+        UniqueConstraint("qa_workspace_id", "application_master_id", "name", name="uq_qap_app_module_scope"),
+        Index("ix_qap_app_modules_app_id", "application_master_id"),
+    )
+    id = pk_column()
+    qa_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id", ondelete="CASCADE"), nullable=False)
+    application_master_id = Column(Integer, ForeignKey("qap_application_master.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(150), nullable=False)
+    created_at = Column(DateTime, default=now, nullable=False)
+
+
 class QARequest(Base):
     """The QA Request is a lightweight intake/gateway record only -- it has no
     approval workflow of its own (see constants.GatewayStatus: Draft ->
@@ -848,6 +862,7 @@ class QARequest(Base):
     department = Column(String(150))
     department_unit_id = Column(Integer, ForeignKey("qap_department_units.id"), nullable=True, index=True)
     application_name = Column(String(150), nullable=False)
+    module_name = Column(String(150), nullable=True)
     application_owner = Column(String(150))
     cr_number = Column(String(64))
     epic_number = Column(String(150))
@@ -1123,7 +1138,13 @@ class QARequestDocument(Base):
 # ---------------------------------------------------------------------------
 # Module 1b: Functional Testing Request (Functional/Sanity/Regression/UAT Support)
 # ---------------------------------------------------------------------------
-class FunctionalRequest(Base):
+class QARequestModuleMixin:
+    @property
+    def module_name(self):
+        return self.qa_request.module_name if self.qa_request else None
+
+
+class FunctionalRequest(QARequestModuleMixin, Base):
     """Auto-created from a QA Request when any of Functional Testing/Sanity
     Testing/Regression Testing/UAT Support is one of its request types (see
     routers/qa_requests.py::_sync_linked_child_requests) -- same auto-link
@@ -1404,7 +1425,7 @@ class ReadinessChecklistItem(Base):
 # ---------------------------------------------------------------------------
 # Module 4: SAST Request Management
 # ---------------------------------------------------------------------------
-class SASTRequest(Base):
+class SASTRequest(QARequestModuleMixin, Base):
     @property
     def missing_testing_types(self):
         from .request_scope import missing_for_child
@@ -1649,7 +1670,7 @@ class SASTChecklistItem(Base):
 # ---------------------------------------------------------------------------
 # Module 5: DAST Request Management
 # ---------------------------------------------------------------------------
-class DASTRequest(Base):
+class DASTRequest(QARequestModuleMixin, Base):
     @property
     def missing_testing_types(self):
         from .request_scope import missing_for_child
@@ -1935,7 +1956,7 @@ class SecurityScanResult(Base):
 # ---------------------------------------------------------------------------
 # Module 4c: Performance Testing Request Management
 # ---------------------------------------------------------------------------
-class PerformanceRequest(Base):
+class PerformanceRequest(QARequestModuleMixin, Base):
     """Auto-created from a QA Request when 'Performance Testing' is one of its
     request types -- same pattern as SASTRequest/DASTRequest.
     See constants.PERFORMANCE_STATUSES for the independent lifecycle.
@@ -2171,6 +2192,11 @@ class ChecklistTemplateItem(Base):
 # Module 6: False Positive / Suppression Management
 # ---------------------------------------------------------------------------
 class SuppressionRequest(Base):
+    @property
+    def module_name(self):
+        request = self.linked_request
+        return request.module_name if request else None
+
     __tablename__ = "qap_suppression_requests"
     id = pk_column()
     suppression_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["SUPPRESSION"]))
@@ -2588,6 +2614,16 @@ class QASignOff(Base):
     def certificate_summary(self):
         import json
         return json.loads(self.certificate_data_json or '{}').get('current')
+
+    @property
+    def module_name(self):
+        snapshot = self.certificate_summary
+        if snapshot is not None:
+            # Older reviewed snapshots did not record a module. Do not add
+            # live metadata to an already signed or historical certificate.
+            return snapshot.get('module_name')
+        source = self.source_functional_request
+        return source.module_name if source and self.status == 'DRAFT' else None
 
     certificate_date = Column(Date, default=today_ist)
     certificate_type = Column(String(32))

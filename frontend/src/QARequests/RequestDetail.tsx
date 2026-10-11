@@ -626,6 +626,7 @@ export function RequestDetail({
                 </span>
               )}
             </DetailField>
+            {req.module_name && <DetailField label="Module Name">{req.module_name}</DetailField>}
             <DetailField label="Department">
               {req.department || "—"}
             </DetailField>

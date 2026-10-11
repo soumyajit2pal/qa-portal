@@ -68,7 +68,7 @@ def all_data_sections(rows):
     specs = [
         ("Requests", {"QA Request", "Functional Request", "SAST Request", "DAST Request", "Performance Request"}, [
             ("Workspace", "Workspace"), ("Request Type", "Module"), ("Request ID", "Record ID"),
-            ("Parent QA Request", "Parent / Linked ID"), ("Application", "Application / Project"),
+            ("Parent QA Request", "Parent / Linked ID"), ("Application", "Application / Project"), ("Module Name", "Module Name"),
             ("Department", "Department"), ("Change Description", "Description"),
             ("Status", "Status"), ("Created At", "Created At"),
         ]),
@@ -108,7 +108,7 @@ def all_data_sections(rows):
         ]),
         ("Governance", {"Suppression Request", "QA Clearance"}, [
             ("Workspace", "Workspace"), ("Record Type", "Module"), ("Record ID", "Record ID"),
-            ("Linked Record", "Parent / Linked ID"), ("Application", "Application / Project"),
+            ("Linked Record", "Parent / Linked ID"), ("Application", "Application / Project"), ("Module Name", "Module Name"),
             ("Department", "Department"), ("Description", "Description"),
             ("Status", "Status"), ("Created At", "Created At"),
         ]),

@@ -34,7 +34,7 @@ export function blankDastComponent(): DastComponent {
 // object -- see NewRequestModal.tsx for how it's initialized (blank, or
 // pre-filled from an existing request being edited).
 export const EMPTY_FORM = {
-  department: '', application_name: '', application_owner: '', cr_number: '',
+  department: '', application_name: '', module_name: '', application_owner: '', cr_number: '',
   epic_number: '', change_type: 'New', bug_fix_source_request_id: '', business_defect_number: '', vendor_si_partner: '', technology_stack: '',
   // Reported directly: new mandatory field describing the change itself,
   // distinct from Change Type's New/Enhancement/Bug Fix classification --

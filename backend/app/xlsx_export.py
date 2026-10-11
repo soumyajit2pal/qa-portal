@@ -26,6 +26,16 @@ GRID = "D8DEE9"
 _ILLEGAL_XML = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 
 
+def safe_spreadsheet_text(value):
+    """Keep user text literal in both Excel cells and CSV spreadsheet imports."""
+    if not isinstance(value, str):
+        return value
+    text = _ILLEGAL_XML.sub("", value)[:32767]
+    if text.lstrip().startswith(("=", "+", "-", "@")):
+        text = "'" + text
+    return text
+
+
 def safe_cell(value):
     """Make values Excel-safe while retaining dates and numeric values."""
     timestamp = parse_timestamp(value)
@@ -33,10 +43,7 @@ def safe_cell(value):
         return as_ist(timestamp).replace(tzinfo=None)
     if isinstance(value, (datetime.date, int, float, bool)) or value is None:
         return value
-    text = _ILLEGAL_XML.sub("", str(value))[:32767]
-    if text.startswith(("=", "+", "-", "@")):
-        text = "'" + text
-    return text
+    return safe_spreadsheet_text(str(value))
 
 
 def new_workbook() -> Workbook:

@@ -127,7 +127,6 @@ qualityops/
     Dockerfile, nginx.conf       # production SPA + same-origin TLS reverse proxy
     src/                    # see Frontend architecture above
   docker-compose.yml         # core API, isolated Document Portal API, frontend and Redis
-  docker-compose.static-ip.yml # stable nginx address for trusted-proxy deployments
   .env.dev.example, .env.uat.example, .env.prod.example
   README.md
 ```
@@ -230,6 +229,33 @@ deployment's `alembic upgrade head` procedure, then deploy backend and frontend 
 The migration adds a nullable application-name reference, foreign key, and index to the
 approval history. Existing history is not rewritten, and interrupted upgrades can be
 retried. Rollback retains the history references.
+
+## QA request module names
+
+The Application & Change Details step includes an optional searchable Module Name
+dropdown beside Application Name. Select a saved module or choose **Other (new
+module)** and enter a name. New names are saved when the QA request is saved as a
+Draft, with no module approval workflow. Modules are shared only within the same
+application and workspace; capitalization and extra whitespace do not create
+duplicates. Changing Application Name clears the selected module. Leave it blank
+for a request covering the whole application. Saved modules appear on the QA
+request list, detail view, and request PDF; the list search also matches modules.
+Application Name approval continues to apply independently. Module Name is also
+inherited by linked Functional, SAST, DAST, and Performance requests and by their
+suppression requests. It appears in their detail/edit screens, registers, PDF
+exports, and report/spreadsheet exports when provided on the parent QA request.
+
+The clearance certificate form displays the source module as a locked field.
+Evidence capture freezes Module Name in the certificate snapshot; certificate
+views, revisions, registers, and PDF exports use that captured value. Existing
+reviewed snapshots without module metadata are not rewritten. Refresh an editable
+certificate's evidence and complete its normal approvals to include the module.
+This propagation uses existing parent links and certificate snapshot JSON, so it
+does not require another database migration.
+
+Apply migration `d7c2a9e4b610` with the existing `alembic upgrade head` deployment
+procedure before starting the updated backend, then deploy backend and frontend
+together. Existing requests retain a blank module name.
 
 ## DAST target workflow
 
@@ -560,25 +586,29 @@ Python services over HTTP on port 8000.
 ```bash
 # Local development profile (still served through nginx TLS)
 cp .env.dev.example .env.dev
-# Populate DATABASE_URL, SECRET_KEY, certificate path, and login-key settings.
+# Populate DATABASE_URL, SECRET_KEY, certificate path, login-key settings,
+# FORWARDED_ALLOW_IPS, and TRUSTED_PROXY_CIDRS for the actual nginx source IP.
 # One-time Compose key provisioning (the generator refuses to overwrite):
 mkdir -p secrets
 chmod 700 secrets
 (cd backend && python -m app.generate_login_key ../secrets/login-private.pem)
-docker compose -f docker-compose.yml -f docker-compose.static-ip.yml \
-  --env-file .env.dev up --build
+docker compose -f docker-compose.yml --env-file .env.dev up --build
 
-# UAT/deployed profile. The static overlay gives nginx the exact address
-# configured in FORWARDED_ALLOW_IPS.
+# UAT/deployed profile.
 cp .env.uat.example .env.uat
-# Replace every placeholder and review PORTAL_SUBNET before starting.
-docker compose -f docker-compose.yml -f docker-compose.static-ip.yml \
-  --env-file .env.uat up --build -d
+# Replace every placeholder and configure the actual trusted proxy addresses.
+docker compose -f docker-compose.yml --env-file .env.uat up --build -d
 
 # Portal and same-origin API: https://localhost:8080
 # `backend` and `document_portal` are internal-only; no Python port is
 # published on the host.
 ```
+
+The supplied Compose file does not assign nginx a fixed container IP. Set
+`FORWARDED_ALLOW_IPS` to nginx's actual source address and `TRUSTED_PROXY_CIDRS`
+to its matching host CIDR through the deployment's network configuration. Keep
+both values synchronized if that address changes; the example profiles leave
+them blank because there is no default fixed address.
 
 Each root profile file is a complete Compose environment and includes both
 `APP_ENV=uat` and `APP_ENV_FILE=.env.uat` (using the matching profile name).
@@ -821,13 +851,39 @@ audited Client IP will correctly be the load balancer address rather than an unt
 
 ### Verification status
 
-Current verification includes the complete backend pytest suite under the pinned dependencies,
-backend compile/import checks, Python dependency auditing, frontend TypeScript and Node tests, the
-Vite production build, and base/static-overlay `docker compose config` validation. A real image
-build and live Oracle-backed Compose smoke test were not run here and remain required in the target
-deployment environment before promotion.
+The module regression run on 10 October 2026 completed all checked-in backend
+unittest cases (44 passed) and the complete frontend Node suite (438 passed,
+zero failures or skips). The initial two frontend failures referred to the
+intentionally removed application merge dialog and static-IP Compose overlay.
+The obsolete dialog suite was removed and the proxy-trust check now validates
+the active `docker-compose.yml`; those failures are resolved.
+
+Backend compilation, the isolated full-app OpenAPI import, frontend TypeScript,
+the Vite production build, and the production bundle audit passed. The backend
+cases exercise real request routers against isolated SQLite fixtures, including
+workspace isolation, readiness and Application Owner gates, certificate snapshot
+revisions, seven request PDF exporters, and 27 report exports across XLSX, CSV,
+and PDF. Test dependencies supply the actor and database; these are not end-to-end
+tests of production authentication or external services.
+
+The local Python environment passed `pip check`, but 12 installed package versions
+differ from `backend/requirements.txt` and Redis is absent. This run does not
+verify the pinned deployment environment. The live Oracle module column and
+catalogue constraints were checked; live record serialization and the migration
+version query remain incomplete. Browser acceptance checks were deferred at the
+user's request. A pinned-dependency run, signed-in browser acceptance, and a real
+Oracle-backed deployment smoke test remain required before promotion. The
+structured results are in
+`regression-results/module-regression-2026-10-10.json`.
 
 ## Authentication & the Admin section
+
+Default Workspace is the automatic fallback for users without another active
+workspace membership. Adding a user to an active workspace removes their Default
+Workspace membership; removing their last active assignment returns them to Default
+Workspace. A default-only membership is shown as **Automatic** in the workspace
+member editor. To move that user out, add them to the destination workspace.
+System Administrators remain required members of every workspace.
 
 Every user account has a `login_type` of either **Standard** or **LDAP**:
 

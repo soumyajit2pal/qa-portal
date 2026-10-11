@@ -149,7 +149,7 @@ function TestingRequestIdSearch({ requests, selected, onSelect, onClear, display
     return (
       <div className="searchable-select">
         <div className="searchable-select-trigger" style={{ cursor: 'default' }}>
-          <span>{displayRequestId || selected.request_id} — {selected.application_name || '—'}</span>
+          <span>{displayRequestId || selected.request_id} — {selected.application_name || '—'}{selected.module_name && ` · ${selected.module_name}`}</span>
           <button type="button" className="btn btn-sm" onClick={onClear}>Change</button>
         </div>
       </div>
@@ -159,14 +159,15 @@ function TestingRequestIdSearch({ requests, selected, onSelect, onClear, display
   const q = query.trim().toLowerCase()
   const matches = (q
     ? requests.filter((r) => r.request_id.toLowerCase().includes(q)
-        || (r.application_name || '').toLowerCase().includes(q))
+        || (r.application_name || '').toLowerCase().includes(q)
+        || (r.module_name || '').toLowerCase().includes(q))
     : requests
   ).slice(0, 8)
 
   return (
     <div className="searchable-select" ref={boxRef}>
       <ClearableSearchInput
-        placeholder="Search Testing Request ID or application..."
+        placeholder="Search Testing Request ID, application or module..."
         value={query}
         onFocus={() => setOpen(true)}
         onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
@@ -182,6 +183,7 @@ function TestingRequestIdSearch({ requests, selected, onSelect, onClear, display
                    onClick={() => { onSelect(r); setQuery(''); setOpen(false) }}
                    onKeyDown={(event) => { if (isKeyboardActivationKey(event.key)) { event.preventDefault(); onSelect(r); setQuery(''); setOpen(false) } }}>
                 <div>{r.request_id} — {r.application_name || '—'}</div>
+                {r.module_name && <div className="muted small">Module: {r.module_name}</div>}
                 {(r.department || r.application_owner) && (
                   <div className="muted small">{r.application_owner || '—'} &middot; {r.department || '—'}</div>
                 )}
@@ -422,6 +424,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
         <ClearanceRequirements certificateType={form.certificate_type} />
         <div className="form-row clearance-form-grid">
           <Field label="Application Name *"><input required disabled value={form.application_name} onChange={() => {}} /></Field>
+          {selectedRequest?.module_name && <Field label="Module Name"><input disabled value={selectedRequest.module_name} /></Field>}
           <Field label="Application Owner *"><input required disabled value={form.application_owner} onChange={() => {}} /></Field>
           <Field label="Request Department *"><input required disabled value={form.department} onChange={() => {}} /></Field>
           <Field label="CR Number/EPIC Number *"><input required disabled value={form.change_request_ids} onChange={() => {}} /></Field>
@@ -581,6 +584,7 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
         <div className="form-row clearance-form-grid">
           <Field label="Testing Request ID"><input disabled value={item.certificate_testing_request_id || item.testing_request_id || ''} /></Field>
           <Field label="Application Name"><input disabled value={item.application_name} /></Field>
+          {item.module_name && <Field label="Module Name"><input disabled value={item.module_name} /></Field>}
           <Field label="Application Owner"><input disabled value={item.application_owner || ''} /></Field>
           <Field label="Request Department"><input disabled value={item.request_department || item.department || ''} /></Field>
           <Field label="Approving QA Team"><input disabled value={item.approving_qa_team || 'Not configured'} /></Field>
@@ -915,7 +919,7 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
       <ErrorText error={error} />
       {takeoverNotice && <div className="alert alert-success" role="status">{takeoverNotice}</div>}
       <section className="clearance-hero clearance-overview" aria-label="Certificate overview">
-        <div className="clearance-hero-main"><span className="clearance-eyebrow">QA clearance · {item.certificate_type}</span><h2>{item.application_name}</h2><p>{item.change_description || 'Change description not recorded'}</p><div className="clearance-hero-chips"><span>Revision <b>{item.revision_number || 1}</b></span><span>CR / EPIC <b>{item.change_request_ids || '—'}</b></span><span>Request <b>{item.certificate_testing_request_id || item.testing_request_id || '—'}</b></span><span>Build <b>{item.build_number || '—'}</b></span><span>Testing <b>{item.certificate_testing_type || item.testing_type}</b></span><span>Promotion <b>{item.environment_tested || '—'} → {item.target_promotion_environment || '—'}</b></span><span>Validity <b>{validityLabel(item.validity_from, item.validity_to)}</b></span></div></div>
+        <div className="clearance-hero-main"><span className="clearance-eyebrow">QA clearance · {item.certificate_type}</span><h2>{item.application_name}</h2><p>{item.change_description || 'Change description not recorded'}</p><div className="clearance-hero-chips">{item.module_name && <span>Module <b>{item.module_name}</b></span>}<span>Revision <b>{item.revision_number || 1}</b></span><span>CR / EPIC <b>{item.change_request_ids || '—'}</b></span><span>Request <b>{item.certificate_testing_request_id || item.testing_request_id || '—'}</b></span><span>Build <b>{item.build_number || '—'}</b></span><span>Testing <b>{item.certificate_testing_type || item.testing_type}</b></span><span>Promotion <b>{item.environment_tested || '—'} → {item.target_promotion_environment || '—'}</b></span><span>Validity <b>{validityLabel(item.validity_from, item.validity_to)}</b></span></div></div>
         <div className="clearance-hero-status"><small>Current status</small><WorkflowStatusBadge record={item} workflow="signoff" status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /><span>{SIGNOFF_PENDING_WITH[status] && SIGNOFF_PENDING_WITH[status] !== '—' ? `Pending with ${SIGNOFF_PENDING_WITH[status]}` : item.certificate_date ? `Dated ${item.certificate_date}` : 'See Approvals & activity'}</span></div>
       </section>
       <nav className="clearance-stage-track" aria-label="Approval progress">{stageNames.map((name, index) => <div key={name} aria-current={index === stageIndex ? 'step' : undefined} className={`clearance-stage ${index < stageIndex ? 'is-done' : index === stageIndex ? (isRejected ? 'is-rejected' : 'is-current') : ''}`}><span>{index === stageIndex && isRejected ? '×' : index < stageIndex || ['ISSUED', 'ISSUED_UNDER_REVIEW', 'SUPERSEDED'].includes(status) ? '✓' : index + 1}</span><b>{name}</b></div>)}</nav>
@@ -1034,7 +1038,7 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
   )
 }
 
-type SignOffListRow = Pick<SignOffOut, 'id' | 'certificate_id' | 'certificate_type' | 'certificate_testing_type' | 'application_name' | 'change_description' | 'request_department' | 'requester_id' | 'reviewed_by_id' | 'approved_by_id' | 'status' | 'created_at' | 'qa_workspace_id'>
+type SignOffListRow = Pick<SignOffOut, 'id' | 'certificate_id' | 'certificate_type' | 'certificate_testing_type' | 'application_name' | 'module_name' | 'change_description' | 'request_department' | 'requester_id' | 'reviewed_by_id' | 'approved_by_id' | 'status' | 'created_at' | 'qa_workspace_id'>
 type SignOffPage = PageOut<SignOffListRow> & { departments: string[]; status_counts: Record<string, number> }
 
 export default function SignOff() {
@@ -1178,6 +1182,7 @@ export default function SignOff() {
           },
           { key: 'status', header: 'Status', render: (r) => <WorkflowStatusBadge record={r} workflow="signoff" status={r.status} label={SIGNOFF_STATUS_LABELS[r.status] || r.status} /> },
           { key: 'application_name', header: 'Application' },
+          { key: 'module_name', header: 'Module', render: (r) => r.module_name || '—' },
           { key: 'change_description', header: 'Change Description', render: (r) => (
             <span className="truncate-cell" title={r.change_description || ''}>{r.change_description || '—'}</span>
           ), filterValue: (r) => r.change_description || '' },

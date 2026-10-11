@@ -178,6 +178,7 @@ function DASTFormModal({
         no separate one here).
       </p>
       <form onSubmit={submit}>
+        {editing.module_name && <Field label="Module Name"><input disabled value={editing.module_name} /></Field>}
         <div className="form-section">
           <div className="form-section-title">Classification</div>
           <div className="form-row">
@@ -717,6 +718,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
                 </span>
               )}
             </DetailField>
+            {req.module_name && <DetailField label="Module Name">{req.module_name}</DetailField>}
             <DetailField label="CR Number/EPIC Number">{req.cr_number || req.epic_number || '—'}</DetailField>
             <DetailField label="Change Description">{req.change_description || '—'}</DetailField>
             <DetailField label="Department">{req.department || '—'}</DetailField>
@@ -1218,6 +1220,7 @@ export default function DAST() {
             render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
           },
           { key: 'application_name', header: 'Application', render: (r) => r.application_name || '—' },
+          { key: 'module_name', header: 'Module', render: (r) => r.module_name || '—' },
           { key: 'department', header: 'Department Scope', render: (r) => r.department || '—', filterValue: (r) => r.department || '' },
           { key: 'change_description', header: 'Change Description', render: (r) => (
             <span className="truncate-cell" title={r.change_description || ''}>{r.change_description || '—'}</span>

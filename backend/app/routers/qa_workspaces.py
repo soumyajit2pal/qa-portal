@@ -62,7 +62,7 @@ def _ensure_workspace_fallback(db: Session, user: models.User, excluded_workspac
         models.QAWorkspaceMember.workspace_id != excluded_workspace_id,
         models.QAWorkspaceMember.is_active == True,  # noqa: E712
         models.QAWorkspace.is_active == True,  # noqa: E712
-    ).order_by(models.QAWorkspace.is_default.desc(), models.QAWorkspace.id).first()
+    ).order_by(models.QAWorkspace.is_default, models.QAWorkspace.id).first()
     if existing is not None:
         return existing.workspace_id
 
@@ -73,17 +73,18 @@ def _ensure_workspace_fallback(db: Session, user: models.User, excluded_workspac
             "Assign this user to another workspace before removing their Default Workspace membership",
         )
 
-    # Prefer the organisation default. If the excluded workspace itself is
-    # the default, the first other active workspace is the only valid safe
-    # fallback because adding the user back would cancel the removal.
+    # Only the organisation default is an automatic fallback. Assigning an
+    # unrelated workspace here would grant access the administrator did not
+    # request when removing the user's last membership.
     fallback = db.query(models.QAWorkspace).filter(
         models.QAWorkspace.id != excluded_workspace_id,
         models.QAWorkspace.is_active == True,  # noqa: E712
-    ).order_by(models.QAWorkspace.is_default.desc(), models.QAWorkspace.id).first()
+        models.QAWorkspace.is_default == True,  # noqa: E712
+    ).order_by(models.QAWorkspace.id).first()
     if fallback is None:
         raise HTTPException(
             409,
-            "Create another active workspace before removing this user's only workspace membership",
+            "Restore the active Default Workspace before removing this user's only workspace membership",
         )
 
     membership = db.query(models.QAWorkspaceMember).filter_by(

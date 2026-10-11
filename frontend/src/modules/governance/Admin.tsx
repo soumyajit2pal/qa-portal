@@ -17,6 +17,7 @@ import UserAssignSelect from '../../components/UserAssignSelect'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import TestProjectAdmin from './TestProjectAdmin'
 import { formatDateTimeIST, portalDate } from '../../time'
+import { hasOtherActiveWorkspace } from '../../workspaceMembership'
 import {
   MAINTENANCE_WINDOW_ADMIN_PATH,
   MAINTENANCE_WINDOW_CANCEL_PATH,
@@ -1335,7 +1336,10 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
 
   function groupedMembers() {
     const grouped = new Map<number, string[]>()
-    for (const row of selected?.members || []) grouped.set(row.user_id, [...(grouped.get(row.user_id) || []), row.role])
+    for (const row of selected?.members || []) {
+      if (!row.is_active) continue
+      grouped.set(row.user_id, [...(grouped.get(row.user_id) || []), row.role])
+    }
     // Older databases can contain both WORKSPACE_MEMBER and a parent access
     // role for the same person. The table already presents their effective
     // access as one value; submit that same normalized value so an unrelated
@@ -1497,7 +1501,9 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
           ? <span className="badge badge-blue" title="System Administrators belong to every workspace">Required</span>
           : member.isInheritedParentAccess
             ? <button type="button" className="btn btn-sm inherited-member-lock" disabled title="Change this user’s permission on the parent workspace">Inherited</button>
-            : <button type="button" className="btn btn-sm workspace-remove-member" aria-label={`Remove ${member.user?.full_name || 'user'} from workspace`} disabled={busy} onClick={() => void replaceMembers(groupedMembers().filter((row) => row.user_id !== member.user_id))}>Remove</button>}
+            : selected?.is_default && !hasOtherActiveWorkspace(member.user_id, selected.id, workspaces)
+              ? <span className="badge badge-blue" title="Default Workspace membership is automatic. Add this user to another active workspace to move them out of Default Workspace.">Automatic</span>
+              : <button type="button" className="btn btn-sm workspace-remove-member" aria-label={`Remove ${member.user?.full_name || 'user'} from workspace`} disabled={busy} onClick={() => void replaceMembers(groupedMembers().filter((row) => row.user_id !== member.user_id))}>Remove</button>}
       </div>,
     },
   ]
@@ -1533,6 +1539,9 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
               <button type="button" role="tab" aria-selected={memberView === 'add'} className={memberView === 'add' ? 'active' : ''} onClick={() => setMemberView('add')}><IconPlus width={13} /> Add members <span>{memberCandidates.length}</span></button>
             </div>
           </div>
+          <p className="workspace-instruction">{selected.is_default
+            ? 'Default Workspace membership is automatic for users without another active workspace. Add a user to another active workspace to remove their Default Workspace membership automatically.'
+            : 'Adding a user here automatically removes their Default Workspace membership. Removing their last active workspace membership automatically returns them to Default Workspace.'} System Administrators remain members of every workspace.</p>
           {!selected.parent_workspace_id && !selected.is_default && <details className="workspace-access-help">
             <summary>How parent workspace access works</summary>
             <div className="parent-access-guide" aria-label="Parent workspace permission guide">

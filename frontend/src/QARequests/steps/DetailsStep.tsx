@@ -3,9 +3,12 @@ import { api } from "../../api";
 import { istToday } from "../../time";
 import { Field, Modal } from "../../components/Common";
 import SearchableSelect from "../../components/SearchableSelect";
+import RoleGroupLink from "../../components/RoleGroupLink";
+import { IconUsers } from "../../components/Icons";
 import { CHANGE_TYPES, DEPLOYMENT_ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
 import { ApplicationMasterOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
+import { ModuleNameField } from "./ModuleNameField";
 import { CHANGE_REFERENCE_REGEX, CHANGE_REFERENCE_MAX_LENGTH, CHANGE_REFERENCE_FORMAT_ERROR } from "../../changeReference";
 
 // Sentinel dropdown value for "Other" -- never a real application name (all
@@ -114,7 +117,26 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
         >
           <p>
             A new application name must comply with the <strong>BCP policy</strong>.
-            If it does not meet the policy requirements, the Application Owner will reject the name.
+            If it does not meet the policy requirements, the{" "}
+            <RoleGroupLink
+              role="APPLICATION_OWNER"
+              label="Application Owner"
+              renderTrigger={(_count, onClick) => (
+                <button
+                  type="button"
+                  className="application-owner-group-link"
+                  onClick={onClick}
+                  aria-label="View responsible Application Owners in this workspace"
+                  aria-haspopup="dialog"
+                  title="View the people responsible for application name approval"
+                >
+                  <IconUsers width={16} height={16} aria-hidden="true" />
+                  <span className="application-owner-group-link-label">Application Owner</span>
+                  <span className="application-owner-group-link-hint">View people</span>
+                </button>
+              )}
+            />{" "}
+            will reject the name.
           </p>
           <p>
             To make the approval process easier, please select an available application whenever possible.
@@ -189,6 +211,12 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
               </>
             )}
           </Field>
+          <ModuleNameField
+            key={form.application_name}
+            applicationName={form.application_name}
+            value={form.module_name}
+            onChange={(value) => set("module_name", value)}
+          />
           <Field label="Application Owner *">
             <input
               required

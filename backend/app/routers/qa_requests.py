@@ -16,6 +16,7 @@ from .. import models, schemas, pagination
 from .. import documents as doc_store
 from ..upload_limits import validate_qa_document_sizes, validate_document_file_types
 from .. import application_names as app_names
+from ..application_modules import list_module_names, save_module_name
 from ..application_approval import can_review_application_gateway, pending_application_gateway_condition
 from ..database import get_db
 from ..deps import (
@@ -486,6 +487,7 @@ def _unstash_draft_details(raw: Optional[str]):
 @router.get("", response_model=pagination.Page[schemas.QARequestListOut])
 def list_requests(params: pagination.PageParams = Depends(),
                    application_name: Optional[str] = None,
+                   module_name: Optional[str] = None,
                    cr_number: Optional[str] = None,
                    requester_id: Optional[int] = None,
                    assigned_to_me: bool = False,
@@ -542,6 +544,8 @@ def list_requests(params: pagination.PageParams = Depends(),
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
     if application_name:
         q = q.filter(models.QARequest.application_name.ilike(f"%{application_name}%"))
+    if module_name:
+        q = q.filter(models.QARequest.module_name.ilike(f"%{module_name}%"))
     if requester_id is not None:
         q = q.filter(models.QARequest.requester_id == requester_id)
     # Reported directly: "In dashboard, every-where show data from which
@@ -572,7 +576,7 @@ def list_requests(params: pagination.PageParams = Depends(),
     # Broad "requests or IDs" search (topbar search box and the QA Requests
     # list's own search field) -- matches Request ID, Application Name, or
     # The consolidated CR/EPIC identifier is stored in cr_number.
-    q = pagination.apply_search(q, params, models.QARequest.request_id, models.QARequest.application_name, models.QARequest.cr_number)
+    q = pagination.apply_search(q, params, models.QARequest.request_id, models.QARequest.application_name, models.QARequest.module_name, models.QARequest.cr_number)
     # A raised-date filter narrows only cancelled gateway history. Raised
     # gateways can still have active child work, so they remain visible.
     q = pagination.apply_terminal_raised_date_filter(
@@ -613,6 +617,7 @@ def list_requests(params: pagination.PageParams = Depends(),
         "created_at": models.QARequest.created_at,
         "updated_at": models.QARequest.updated_at,
         "application_name": models.QARequest.application_name,
+        "module_name": models.QARequest.module_name,
         "status": models.QARequest.status,
         "target_release_date": models.QARequest.target_release_date,
     }, default_column=models.QARequest.created_at, id_column=models.QARequest.id)
@@ -639,6 +644,12 @@ def list_requests(params: pagination.PageParams = Depends(),
     for row in result.items:
         row.linked_signoffs = [so for fid in func_ids_by_qa_id[row.id] for so in signoffs_by_func_id.get(fid, [])]
     return pagination.to_page_response(result, params)
+
+
+@router.get("/module-options", response_model=list[str])
+def module_options(application_name: str = Query(..., min_length=1, max_length=150),
+                   db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    return list_module_names(db, workspace_id=require_active_workspace(current_user), application_name=application_name)
 
 
 @router.get("/bug-fix-source-options")
@@ -1422,6 +1433,9 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     _, obj.application_master_id = _resolve_application_name(
         db, name_upper, data["department"], current_user.id, qa_request_id=obj.id,
     )
+    obj.module_name = save_module_name(
+        db, workspace_id=obj.qa_workspace_id, application_id=obj.application_master_id, name=obj.module_name,
+    )
     _log(db, obj.id, "Requester", current_user, "Drafted", "QA Request created as draft")
     db.commit()
     db.refresh(obj)
@@ -1585,6 +1599,9 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     application_name_in = data.pop("application_name", None)
     final_application_name = ((application_name_in or "").strip().upper()
                               if application_name_in is not None else obj.application_name)
+    application_changed = final_application_name != obj.application_name
+    module_sent = "module_name" in data
+    module_name_in = data.pop("module_name", None)
     final_change_type = data.get("change_type", obj.change_type)
     data["business_defect_number"] = _business_defect_number(
         data.get("business_defect_number", obj.business_defect_number), final_change_type,
@@ -1623,6 +1640,12 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
                 db, application_name_in, obj.department, current_user.id, qa_request_id=obj.id,
             )
             _cleanup_orphaned_application_master(db, old_master_id, obj.id)
+
+    if module_sent or application_changed:
+        obj.module_name = save_module_name(
+            db, workspace_id=obj.qa_workspace_id, application_id=obj.application_master_id,
+            name=module_name_in if module_sent else None,
+        )
 
     if request_types is not None:
         obj.request_types = ",".join(request_types)
@@ -1990,6 +2013,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
         ]),
         ("Application & Change", [
             ("Application Name", obj.application_name),
+            *([("Module Name", obj.module_name)] if obj.module_name else []),
             ("Application Owner", obj.application_owner),
             ("CR Number/EPIC Number", obj.cr_number),
             ("Change Type", obj.change_type),

@@ -1103,6 +1103,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         ("Status", status_fields),
         ("Application & Change", [
             ("Application Name", obj.application_name),
+            *([("Module Name", obj.module_name)] if obj.module_name else []),
             ("Application Owner", obj.application_owner),
             ("Request Department", obj.request_department),
             ("Approving QA Team", obj.approving_qa_team or "Not configured"),

@@ -39,6 +39,7 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
   return {
     department: editing.department || department,
     application_name: editing.application_name || '',
+    module_name: editing.module_name || '',
     application_owner: editing.application_owner || '',
     // Consolidated identifier: legacy Drafts that only have epic_number are
     // carried into the single CR/EPIC field when reopened.
@@ -233,7 +234,13 @@ export function NewRequestModal({ onClose, onCreated, editing, scopeAddition = f
   const step = steps[stepIndex]
   if (!step) return null
 
-  function set<K extends keyof QARequestForm>(k: K, v: QARequestForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
+  function set<K extends keyof QARequestForm>(k: K, v: QARequestForm[K]) {
+    setForm((f) => ({
+      ...f,
+      [k]: v,
+      ...(k === 'application_name' && v !== f.application_name ? { module_name: '' } : {}),
+    }))
+  }
   function evidenceFiles(kind: EvidenceKind, itemIndex: number): File[] {
     return checklistEvidence[evidenceKey(kind, itemIndex)] || []
   }

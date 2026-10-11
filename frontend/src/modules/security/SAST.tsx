@@ -156,6 +156,7 @@ function SASTFormModal({
           {/* <div className="form-section-title">Identity{!isAdmin ? ' (Admin-only)' : ''}</div> */}
           <div className="form-row">
             <Field label="Application Name *"><input required disabled={!isAdmin} value={form.application_name} onChange={(e) => set('application_name', e.target.value)} /></Field>
+            {editing.module_name && <Field label="Module Name"><input disabled value={editing.module_name} /></Field>}
             <Field label="CR Number/EPIC Number *"><input required disabled={!isAdmin} value={form.cr_number} onChange={(e) => set('cr_number', e.target.value)} /></Field>
           </div>
         </div>
@@ -707,6 +708,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
                 </span>
               )}
             </DetailField>
+            {req.module_name && <DetailField label="Module Name">{req.module_name}</DetailField>}
             <DetailField label="CR Number/EPIC Number">{req.cr_number || req.epic_number || '—'}</DetailField>
             <DetailField label="Change Description">{req.change_description || '—'}</DetailField>
             <DetailField label="Department">{req.department || '—'}</DetailField>
@@ -1218,6 +1220,7 @@ export default function SAST() {
             render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
           },
           { key: 'application_name', header: 'Application' },
+          { key: 'module_name', header: 'Module', render: (r) => r.module_name || '—' },
           { key: 'department', header: 'Department Scope', render: (r) => r.department || '—', filterValue: (r) => r.department || '' },
           { key: 'change_description', header: 'Change Description', render: (r) => (
             <span className="truncate-cell" title={r.change_description || ''}>{r.change_description || '—'}</span>

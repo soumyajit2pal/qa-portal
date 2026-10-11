@@ -263,6 +263,7 @@ def capture(db, obj):
     result['testing_scope'] = obj.live_testing_scope
     result['assigned_testers'] = assigned_testers(db, source)
     result['certificate_fields'] = {key: str(getattr(obj, key, None) or '') for key in ('certificate_type', 'testing_type', 'testing_request_id', 'application_name', 'application_owner', 'department', 'release_version', 'build_number', 'environment_tested', 'target_promotion_environment', 'exit_criteria_notes', 'open_defect_summary', 'residual_risk_notes', 'known_limitations', 'business_acceptance_status', 'security_testing_status', 'conditional_observations', *CONDITIONAL_FIELDS)}
+    result['certificate_fields']['module_name'] = source.module_name or ''
     result['execution_results'] = sorted([{'id': item.id, 'status': item.status, 'pinned_version_id': item.pinned_version_id, 'run_version': item.run_version, 'executed_at': str(item.executed_at)} for item in executions], key=lambda item: item['id'])
     result['cycle_results'] = [
         {'id': cycle.id, 'status': cycle.status, 'environment': cycle.environment}
@@ -312,6 +313,7 @@ def capture(db, obj):
                     'all_clear': bool(states) and all(row['state'] == 'CLEAR' for row in states),
                 }
     result.update(captured_at=models.now().isoformat(), application_name=source.qa_request.application_name,
+                  module_name=source.module_name,
                   change_request_ids=obj.change_request_ids or ' / '.join(filter(None, [source.qa_request.cr_number, source.qa_request.epic_number])),
                   change_description=source.qa_request.change_description or '',
                   change_type=source.qa_request.change_type,

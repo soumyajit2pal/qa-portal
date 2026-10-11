@@ -216,6 +216,7 @@ function FunctionalFormModal({
                 onChange={(e) => set("application_name", e.target.value)}
               />
             </Field>
+            {editing.module_name && <Field label="Module Name"><input disabled value={editing.module_name} /></Field>}
             <Field label="CR Number/EPIC Number">
               <input
                 disabled={!isAdmin}
@@ -1286,6 +1287,7 @@ export function FunctionalDetail({
                 </span>
               )}
             </DetailField>
+            {req.module_name && <DetailField label="Module Name">{req.module_name}</DetailField>}
             <DetailField label="CR Number/EPIC Number">
               {req.cr_number || req.epic_number || "—"}
             </DetailField>
@@ -2247,6 +2249,7 @@ export default function Functional() {
               header: "Application",
               render: (r) => r.application_name || "—",
             },
+            { key: "module_name", header: "Module", render: (r) => r.module_name || "—" },
             {
               key: "department",
               header: "Department Scope",
