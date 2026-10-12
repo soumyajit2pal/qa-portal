@@ -33,7 +33,7 @@ export default function EmailCompletionPrompt() {
       <p className="muted small" style={{ marginTop: -4, marginBottom: 16 }}>
         {suppliedEmail
           ? 'Check the email address below. If it is correct, confirm it. If it is wrong, replace it with your correct email address before continuing.'
-          : 'No email address was received for your LDAP account. Add the address where QA Portal should send your workflow notifications.'}
+          : 'No email address was received for your LDAP account. Add the address where QualityOps should send your workflow notifications.'}
       </p>
       <form onSubmit={save}>
         <label className="form-field email-confirmation-field">

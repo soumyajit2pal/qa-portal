@@ -784,13 +784,13 @@ add these values to the deployment `.env` and restart the backend:
 SMTP_ENABLED=true
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
-SMTP_USERNAME=qa-portal@example.com
+SMTP_USERNAME=qualityops@example.com
 SMTP_PASSWORD=your-secret
-SMTP_FROM_ADDRESS=qa-portal@example.com
-SMTP_FROM_NAME=QA Portal
+SMTP_FROM_ADDRESS=qualityops@example.com
+SMTP_FROM_NAME=QualityOps
 SMTP_STARTTLS=true
 SMTP_SSL=false
-PORTAL_BASE_URL=https://qa-portal.example.com
+PORTAL_BASE_URL=https://qualityops.example.com
 ```
 
 Use exactly one TLS mode: STARTTLS (normally port 587) or implicit SSL/TLS
@@ -799,6 +799,29 @@ retries transient failures with bounded backoff and does not roll back a
 business action when a relay is unavailable. The outbox notifies request
 participants, assignees, and role-eligible approvers at their workflow step;
 users without an email address are skipped.
+
+Daily approval reminders use the same outbox and run at **09:00 IST** by default.
+Each eligible approver receives one digest covering their current Pending
+Approvals across accessible workspaces, including SM, Department Head,
+Application Owner, readiness, clearance, and testcase approval checkpoints.
+Empty queues, inactive accounts, incomplete account/email setup and read-only
+profiles are skipped. Maker-checker and workspace rules remain those of the
+Pending Approvals queue. The email includes record links and an Open Pending
+Approvals action; long queues show the first 50 records and the remaining count.
+
+```env
+APPROVAL_REMINDERS_ENABLED=true
+APPROVAL_REMINDER_TIME=09:00
+```
+
+The time is always IST and accepts `HH:MM`. Deploy the updated backend and
+notification worker with SMTP enabled to activate delivery. Embedded development
+mode also schedules reminders. A restart after the scheduled time catches up
+today's unsent digests without backfilling previous days. The transactional
+daily receipt prevents duplicate queueing across workers and restarts, and the
+existing SMTP retry policy applies. Before sending, the worker refreshes the
+digest against current approvals and suppresses resolved, unauthorized or
+previous-day reminders. No database migration is required.
 
 ### Enable HTTPS
 

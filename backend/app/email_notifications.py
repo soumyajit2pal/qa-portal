@@ -51,13 +51,16 @@ def _enabled() -> bool:
 
 
 def _smtp_settings() -> dict:
+    from_name = os.getenv("SMTP_FROM_NAME", "QualityOps").strip() or "QualityOps"
+    if from_name.casefold() in {"qa portal", "qa-portal"}:
+        from_name = "QualityOps"
     return {
         "host": os.getenv("SMTP_HOST", "").strip(),
         "port": int(os.getenv("SMTP_PORT", "587")),
         "username": os.getenv("SMTP_USERNAME", "").strip(),
         "password": os.getenv("SMTP_PASSWORD", ""),
         "from_address": os.getenv("SMTP_FROM_ADDRESS", "").strip(),
-        "from_name": os.getenv("SMTP_FROM_NAME", "QA Portal").strip() or "QA Portal",
+        "from_name": from_name,
         "starttls": os.getenv("SMTP_STARTTLS", "true").strip().lower() in {"1", "true", "yes", "on"},
         "ssl": os.getenv("SMTP_SSL", "false").strip().lower() in {"1", "true", "yes", "on"},
         "timeout": int(os.getenv("SMTP_TIMEOUT_SECONDS", "15")),
@@ -100,7 +103,7 @@ def _html_email(title: str, subtitle: str, instruction: str, *,
                 status: str | None, panel_title: str, panel_html: str,
                 action_label: str, action_url: str,
                 footer: str | None = None) -> str:
-    """Render the one approved QA Portal mail design.
+    """Render the one approved QualityOps mail design.
 
     This is deliberately the exact Test Case digest structure: teal header,
     title, instruction, status line, one pale detail panel and one teal
@@ -108,7 +111,7 @@ def _html_email(title: str, subtitle: str, instruction: str, *,
     allowed to introduce a separate table/card/layout. ``panel_html`` is
     built from escaped values at each call site.
     """
-    footer = footer or "This is an automated QA Portal workflow notification."
+    footer = footer or "This is an automated QualityOps workflow notification."
     status_html = ""
     if status:
         status_html = (
@@ -120,7 +123,7 @@ def _html_email(title: str, subtitle: str, instruction: str, *,
     # areas (header, title, instruction, status, detail panel and CTA).
     return f"""<!doctype html><!-- {_EMAIL_TEMPLATE_MARKER} --><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,Helvetica,sans-serif;color:#19333b\">
 <div style=\"max-width:704px;margin:16px auto;background:#ffffff;border:1px solid #d7e5e8;border-radius:12px;overflow:hidden\">
-  <div style=\"padding:20px 30px;background:#116b7d;color:#ffffff\"><strong style=\"font-size:19px;letter-spacing:.1px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;line-height:1.25\">{escape(subtitle)}</div></div>
+  <div style=\"padding:20px 30px;background:#116b7d;color:#ffffff\"><strong style=\"font-size:19px;letter-spacing:.1px\">QualityOps</strong><div style=\"margin-top:5px;font-size:12px;line-height:1.25\">{escape(subtitle)}</div></div>
   <div style=\"padding:28px 30px 26px\"><h1 style=\"margin:0 0 12px;font-size:24px;line-height:1.2;color:#193d49\">{escape(title)}</h1>
     <p style=\"margin:0 0 21px;font-size:16px;line-height:1.45;color:#203a43\">{escape(instruction)}</p>
     {status_html}
@@ -141,26 +144,26 @@ def send_test_email(recipient: str, requested_by: str) -> None:
     portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/") or "/"
     sent_at = models.now().strftime("%d %b %Y, %I:%M %p IST")
     message = EmailMessage()
-    message["Subject"] = "[QA Portal] SMTP test email"
+    message["Subject"] = "[QualityOps] SMTP test email"
     message["From"] = f'{settings["from_name"]} <{settings["from_address"]}>'
     message["To"] = recipient.strip()
     message.set_content(
-        "QA Portal SMTP test completed successfully.\n"
+        "QualityOps SMTP test completed successfully.\n"
         f"Requested by: {requested_by}\nSent at: {sent_at}"
     )
     message.add_alternative(_html_email(
         "SMTP test successful",
         "Administration · Email delivery check",
-        "This message confirms that QA Portal can connect to the configured SMTP service and deliver email.",
+        "This message confirms that QualityOps can connect to the configured SMTP service and deliver email.",
         status="Delivered",
         panel_title="Test details",
         panel_html=(
             f'<p style="margin:8px 0 0">Requested by: {escape(requested_by)}</p>'
             f'<p style="margin:4px 0 0">Sent at: {escape(sent_at)}</p>'
         ),
-        action_label="Open QA Portal",
+        action_label="Open QualityOps",
         action_url=portal_url,
-        footer="This test was initiated manually from QA Portal Administration.",
+        footer="This test was initiated manually from QualityOps Administration.",
     ), subtype="html")
     _send_message(message, settings)
 
@@ -172,7 +175,7 @@ def _legacy_html_email(notification: models.EmailNotification) -> str:
     no HTML body or an older visual design; retaining that stored HTML would
     make the notification system look inconsistent after the shared template
     is introduced.  Plain text remains the source of truth for those rows
-    and is presented in the same single-panel QA Portal design.
+    and is presented in the same single-panel QualityOps design.
     """
     body = (notification.body or "No additional details were recorded.").strip()
     action_url = ""
@@ -190,11 +193,11 @@ def _legacy_html_email(notification: models.EmailNotification) -> str:
         action_url = portal_url or "/"
     detail_html = escape("\n".join(detail_lines)).replace("\n", "<br>")
     return _html_email(
-        "QA Portal notification", "Workflow update",
+        "QualityOps notification", "Workflow update",
         "Open the portal to review this notification and take any required action.",
         status=None, panel_title="Notification details",
         panel_html=f"<p style=\"margin:8px 0 0\">{detail_html}</p>",
-        action_label="Open in QA Portal", action_url=action_url,
+        action_label="Open in QualityOps", action_url=action_url,
     )
 
 
@@ -326,7 +329,7 @@ def queue_access_review_notifications(db: SASession, user: models.User, *, revie
     reason_text = f"Reason: {review_reason}\n\n" if review_reason else ""
     reason_html = f"<p>Reason: {escape(review_reason)}</p>" if review_reason else ""
     body = (
-        "QA PORTAL ACCESS REVIEW REQUIRED\n\n"
+        "QualityOps ACCESS REVIEW REQUIRED\n\n"
         "A newly provisioned LDAP account requires access review.\n\n"
         f"User: {user.full_name}\nUsername: {user.username}\n"
         f"Department: {department}\n"
@@ -344,8 +347,8 @@ def queue_access_review_notifications(db: SASession, user: models.User, *, revie
             f"<li>Username: {escape(user.username)}</li><li>Department: {escape(department)}</li>"
             f"<li>Current role(s): {escape(format_role_labels(user.roles) or 'No portal role assigned')}</li></ul>{reason_html}"
         ),
-        action_label="Review in QA Portal", action_url=url,
-        footer="This is an automated QA Portal access-management notification.",
+        action_label="Review in QualityOps", action_url=url,
+        footer="This is an automated QualityOps access-management notification.",
     )
     action = models.ApprovalAction(
         entity_type="USER_ACCESS",
@@ -415,11 +418,11 @@ def queue_department_access_review_notifications(db: SASession, user: models.Use
     db.add(action)
     url = os.getenv('PORTAL_BASE_URL', '').rstrip('/') + '/department-admin'
     name = user.full_name or user.username
-    instruction = f'{name} ({user.username}) needs approval to access the QA Portal. Please review the request and provide the necessary access in the respective workspace.'
+    instruction = f'{name} ({user.username}) needs approval to access the QualityOps. Please review the request and provide the necessary access in the respective workspace.'
     count = 0
     for email in sorted(recipients):
         body = (
-            f'QA PORTAL ACCESS APPROVAL REQUIRED\n\n{instruction}\n\n'
+            f'QualityOps ACCESS APPROVAL REQUIRED\n\n{instruction}\n\n'
             f'Department: {department}\n'
             'Review Pending role reviews in Department Admin.\n'
             f'Review access: {url}\n'
@@ -503,7 +506,7 @@ def queue_test_cycle_assignment_notification(
     if remaining:
         item_lines += f"\n• and {remaining} more"
     body = (
-        "QA PORTAL ACTION REQUIRED\n\n"
+        "QualityOps ACTION REQUIRED\n\n"
         f"You have been assigned {len(references)} {type_label.lower()} in {cycle.cycle_key} — {cycle.name}. "
         "Open the test cycle to record execution results.\n\n"
         "Current status: Assigned to you\n\n"
@@ -924,7 +927,7 @@ def _role_label(roles: set[str]) -> str:
     for role in roles:
         if role in labels:
             return labels[role]
-    return "QA Portal user"
+    return "QualityOps user"
 
 
 def _workflow_departments(target) -> list[str]:
@@ -1303,7 +1306,7 @@ def _queue_notification_route(db, action, target, route):
     type_label = action.entity_type.replace("_", " ").title()
     subject = f"{'Action required' if route.action_required else 'Workflow update'}: {reference} — {route.recipient_label}"
     body = (
-        f"QA PORTAL {'ACTION REQUIRED' if route.action_required else 'WORKFLOW UPDATE'}\n\n"
+        f"QualityOps {'ACTION REQUIRED' if route.action_required else 'WORKFLOW UPDATE'}\n\n"
         f"{route.instruction}\n\n"
         f"Record: {reference}\nType: {type_label}\nCurrent status: {status}\n"
         f"Latest action: {action.step_name or 'Workflow'} — {action.decision or 'Updated'}\n"
@@ -1318,7 +1321,7 @@ def _queue_notification_route(db, action, target, route):
             f"<li>Latest action: {escape(action.step_name or 'Workflow')} — {escape(action.decision or 'Updated')}</li>"
             f"<li>Comments: {escape(action.comments or 'No comments provided.').replace(chr(10), '<br>')}</li></ul>"
         ),
-        action_label="Open in QA Portal", action_url=url,
+        action_label="Open in QualityOps", action_url=url,
     )
     queued_count = 0
     deliverable_recipient_count = 0
@@ -1402,7 +1405,7 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
         if remaining:
             item_lines += f"\n• and {remaining} more"
         body = (
-            f"QA PORTAL {'ACTION REQUIRED' if action_required else 'WORKFLOW UPDATE'}\n\n"
+            f"QualityOps {'ACTION REQUIRED' if action_required else 'WORKFLOW UPDATE'}\n\n"
             f"{route.instruction}\n\n"
             f"{len(references)} {type_label.lower()} are now at: {status}\n\n"
             f"Items:\n{item_lines}\n\n"
@@ -1620,6 +1623,17 @@ def start_outbox_poller() -> None:
 
     threading.Thread(target=_poll, name="email-outbox-poller", daemon=True).start()
 
+    def _reminders() -> None:
+        from .approval_reminders import queue_due_reminders
+        while _enabled():
+            try:
+                queue_due_reminders()
+            except Exception:
+                logger.exception('Daily approval reminder scheduler failed; the next pass will retry')
+            time.sleep(60)
+
+    threading.Thread(target=_reminders, name="approval-reminder-scheduler", daemon=True).start()
+
 
 def notification_worker_mode() -> str:
     from .config import settings
@@ -1668,6 +1682,15 @@ def _send(notification: models.EmailNotification) -> None:
             notification.id, notification.recipient_email, exc.retry_after_seconds,
         )
         raise
+    # Durable messages may have been queued before the product was renamed.
+    # Replace display copy only; hyphenated URLs and template markers stay valid.
+    def current_brand(value):
+        return value.replace("QA Portal", "QualityOps").replace("QA PORTAL", "QualityOps")
+
+    notification.subject = current_brand(notification.subject)
+    notification.body = current_brand(notification.body)
+    if notification.html_body:
+        notification.html_body = current_brand(notification.html_body)
     logger.info("SMTP notification sending id=%s recipient=%s approval_action_id=%s subject=%s", notification.id, notification.recipient_email, notification.approval_action_id, notification.subject)
     message = EmailMessage()
     message["Subject"] = notification.subject
@@ -1739,6 +1762,13 @@ def _deliver_one(notification_id: int, now: datetime.datetime) -> bool:
 
         notification = db.get(models.EmailNotification, notification_id)
         try:
+            from .approval_reminders import refresh_before_delivery
+            if not refresh_before_delivery(db, notification):
+                notification.status = 'CANCELLED'
+                notification.last_error = 'Daily reminder no longer applies: resolved, stale or recipient no longer eligible.'
+                db.commit()
+                logger.info('Daily approval reminder suppressed id=%s', notification.id)
+                return False
             _send(notification)
             notification.status = "SENT"
             notification.sent_at = models.now()

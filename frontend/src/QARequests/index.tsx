@@ -5,18 +5,18 @@ import {useLocation} from "react-router-dom"
 import { api, HttpError, subscribeToApiMutations } from "../api";
 import { formatDateTimeIST } from "../time";
 import {
-  Badge,
   Card,
   ErrorText,
   PageHeader,
   Table,
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
-import { GATEWAY_PENDING_WITH } from "../constants";
 import { QARequestListOut, QARequestOut, UserOption, QAWorkspaceOut } from "../types";
 import { classificationSummary, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
 import { RequestDetail } from "./RequestDetail";
+import CurrentStageStatus from "./CurrentStageStatus";
+import { qaRequestCurrentStage, qaRequestStatusMutation } from "./currentStage";
 import ClearableSearchInput from "../components/ClearableSearchInput";
 import RaisedHistoryFilter from "../components/RaisedHistoryFilter";
 import { IconPlus } from "../components/Icons";
@@ -135,9 +135,8 @@ export default function QARequests() {
       if (!document.hidden) reload();
     };
     const unsubscribe = subscribeToApiMutations((event) => {
-      // Application approval actions can advance the parent QA Request as
-      // well, so they need the same immediate list refresh.
-      if (event.path.startsWith("/api/qa-requests") || event.path.startsWith("/api/applications")) {
+      // Child workflow and clearance actions also change the displayed stage.
+      if (qaRequestStatusMutation(event.path)) {
         refreshIfVisible();
       }
     });
@@ -437,13 +436,14 @@ export default function QARequests() {
             {
               key: "status",
               header: "Status",
-              render: (r) => <WorkflowStatusBadge record={r} status={r.status} />,
+              render: (r) => <CurrentStageStatus record={r} onOpenLinked={openLinkedRequest} />,
+              filterValue: (r) => qaRequestCurrentStage(r).label,
             },
             {
               key: "pending_with",
               header: "Pending With",
-              render: (r) => GATEWAY_PENDING_WITH[r.status] || "—",
-              filterValue: (r) => GATEWAY_PENDING_WITH[r.status] || "",
+              render: (r) => qaRequestCurrentStage(r).pendingWith,
+              filterValue: (r) => qaRequestCurrentStage(r).pendingWith,
             },
             { key: "target_release_date", header: "Target Release" },
             {

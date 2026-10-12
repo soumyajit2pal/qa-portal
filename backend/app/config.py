@@ -164,6 +164,8 @@ class Settings(BaseSettings):
     background_job_max_attempts: int = Field(default=3, ge=1, le=20)
     background_job_retention_seconds: int = Field(default=7 * 86400, ge=60)
     notification_worker_mode: Literal["embedded", "dedicated"] = "embedded"
+    approval_reminders_enabled: bool = True
+    approval_reminder_time: str = Field(default="09:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     login_rate_limit_backend: Literal["database", "redis"] = "database"
     cors_allowed_origins: str = ""
     trusted_hosts: str = "localhost,127.0.0.1,backend,document_portal"

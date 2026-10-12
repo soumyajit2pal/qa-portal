@@ -1423,6 +1423,20 @@ interface TableProps<T> {
 
 const SERVER_PAGE_SIZE_OPTIONS = [5, 10, 25, 50, 100];
 
+function statusColumnSecond<T>(columns: TableColumn<T>[]): TableColumn<T>[] {
+  let statusIndex = columns.findIndex((column) => column.key === "status");
+  if (statusIndex < 0) {
+    statusIndex = columns.findIndex((column) =>
+      /(?:^|_)status$/.test(column.key) ||
+      (typeof column.header === "string" && /\bstatus\b/i.test(column.header))
+    );
+  }
+  if (statusIndex < 0 || statusIndex === 1 || columns.length < 2) return columns;
+  const ordered = columns.filter((_, index) => index !== statusIndex);
+  ordered.splice(1, 0, columns[statusIndex]);
+  return ordered;
+}
+
 export function Table<T extends Record<string, any>>({
   columns,
   rows,
@@ -1467,7 +1481,7 @@ export function Table<T extends Record<string, any>>({
   // Only columns deliberately configured by each screen belong in its table.
   // Raw API response fields are intentionally not auto-discovered: doing so
   // exposed internal IDs/metadata and made everyday tables unnecessarily wide.
-  const availableColumns = columns;
+  const availableColumns = useMemo(() => statusColumnSecond(columns), [columns]);
   const preferenceKey = useMemo(() => {
     const route = typeof window === "undefined" ? "table" : window.location.pathname;
     return `qap-visible-columns:v2:${tableId || `${route}:${columns.map((c) => c.key).join("|")}`}`;
@@ -1495,7 +1509,8 @@ export function Table<T extends Record<string, any>>({
       (hasColumnPreference ? hiddenColumnKeys : defaultHidden).filter((key) => available.has(key))
     );
     const selected = availableColumns.filter((column) => !hidden.has(column.key));
-    return selected.length > 0 ? selected : availableColumns.slice(0, 1);
+    // Keep Status second even when the first column has been hidden.
+    return selected.length > 0 ? statusColumnSecond(selected) : availableColumns.slice(0, 1);
   }, [availableColumns, hasColumnPreference, hiddenColumnKeys]);
 
   function setColumnVisible(key: string, visible: boolean) {

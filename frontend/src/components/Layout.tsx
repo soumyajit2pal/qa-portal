@@ -477,6 +477,10 @@ export default function Layout({ children }: { children?: ReactNode }) {
                     <div className="topbar-user-popover-name">{user.full_name}</div>
                     <div className="topbar-user-popover-email">{user.username}</div>
                     <div className="topbar-user-popover-row">
+                      <span className="label">Email</span>
+                      <span className="topbar-user-popover-email-address">{user.email?.trim() || 'Not provided'}</span>
+                    </div>
+                    <div className="topbar-user-popover-row">
                       <span className="label">Department</span>
                       <span>{(user.departments && user.departments.length ? user.departments.join(', ') : user.department) || 'No department set'}</span>
                     </div>

@@ -44,12 +44,11 @@ export default function RequestTypeConfig() {
       <Card>
         <ErrorText error={error} />
         <table className="simple-table">
-          <thead><tr><th>Order</th><th>Request Type</th><th>Status</th></tr></thead>
+          <thead><tr><th>Order</th><th>Status</th><th>Request Type</th></tr></thead>
           <tbody>
             {rows.map((row, index) => (
               <tr key={row.id} style={{ opacity: row.is_active ? 1 : 0.6 }}>
                 <td>{index + 1}</td>
-                <td><strong>{row.request_type}</strong></td>
                 <td>
                   <button
                     type="button"
@@ -60,6 +59,7 @@ export default function RequestTypeConfig() {
                     {row.is_active ? 'Active' : 'Disabled'}
                   </button>
                 </td>
+                <td><strong>{row.request_type}</strong></td>
               </tr>
             ))}
             {rows.length === 0 && <tr><td colSpan={3} className="muted small">Loading request types…</td></tr>}

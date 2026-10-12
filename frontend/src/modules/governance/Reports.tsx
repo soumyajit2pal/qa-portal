@@ -5,6 +5,7 @@ import { Card, ErrorText, PageHeader, Table } from '../../components/Common'
 import { REPORTS, hasWorkflowRole } from '../../constants'
 import { useAuth } from '../../context/AuthContext'
 import { PageOut, TestCycleOut, TestProjectOut } from '../../types'
+import { toISTISOString } from '../../time'
 
 const GROUPS = ['Operational', 'Security', 'Management', 'Documents']
 const IST_OFFSET = '+05:30'
@@ -39,12 +40,20 @@ function asIstDateTime(date: string, time: string): string {
   return date ? `${date}T${time}${IST_OFFSET}` : ''
 }
 
+function last7DaysReportingPeriod() {
+  const now = new Date()
+  return {
+    from: toISTISOString(new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000)).slice(0, 10),
+    to: toISTISOString(now).slice(0, 10),
+  }
+}
+
 export default function Reports() {
   const { user } = useAuth()
   const [error, setError] = useState<unknown>(null)
   const [busyKey, setBusyKey] = useState<string | null>(null)
-  const [dateFrom, setDateFrom] = useState('')
-  const [dateTo, setDateTo] = useState('')
+  const [period, setPeriod] = useState(last7DaysReportingPeriod)
+  const { from: dateFrom, to: dateTo } = period
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [cycles, setCycles] = useState<TestCycleOut[]>([])
   const [projectId, setProjectId] = useState('')
@@ -157,16 +166,16 @@ export default function Reports() {
         <div className="report-period-controls">
           <label className="report-period-field">
             <span>From date</span>
-            <input aria-label="Report date range from" type="date" value={dateFrom} max={dateTo || undefined} onChange={(event) => setDateFrom(event.target.value)} />
+            <input aria-label="Report date range from" type="date" value={dateFrom} max={dateTo || undefined} onChange={(event) => setPeriod(current => ({ ...current, from: event.target.value }))} />
           </label>
           <span className="report-period-arrow" aria-hidden="true">→</span>
           <label className="report-period-field">
             <span>To date</span>
-            <input aria-label="Report date range to" type="date" value={dateTo} min={dateFrom || undefined} onChange={(event) => setDateTo(event.target.value)} />
+            <input aria-label="Report date range to" type="date" value={dateTo} min={dateFrom || undefined} onChange={(event) => setPeriod(current => ({ ...current, to: event.target.value }))} />
           </label>
-          {(dateFrom || dateTo) && <button className="btn btn-sm report-period-clear" onClick={() => { setDateFrom(''); setDateTo('') }}>Reset period</button>}
+          {(dateFrom || dateTo) && <button className="btn btn-sm report-period-clear" onClick={() => setPeriod({ from: '', to: '' })}>All history</button>}
         </div>
-        <p className="report-period-note">Leave both dates empty for all available records in the catalogue reports. Project workbooks and source documents use their own scope.</p>
+        <p className="report-period-note">Defaults to Last 7 days (IST). Choose All history or leave both dates empty for all available records in the catalogue reports. Project workbooks and source documents use their own scope.</p>
       </Card>
       <Card className="all-data-report-card">
         <div className="all-data-report-heading">

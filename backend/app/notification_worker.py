@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from . import email_notifications as mail
-from . import sla_notifications
+from . import sla_notifications, approval_reminders
 from .redis_runtime import acquire_lease, coordination_key, get_client, release_lease, renew_lease
 
 logger = logging.getLogger('qa_portal.notification_worker')
@@ -132,6 +132,15 @@ class NotificationWorker:
                 self.stop_event.wait(OUTBOX_POLL_SECONDS)
 
         scheduler = threading.Thread(target=schedule_sla, name='sla-scheduler', daemon=True)
+        def schedule_reminders():
+            while not self.stop_event.is_set():
+                try:
+                    approval_reminders.queue_due_reminders(continue_running=lambda: not self.stop_event.is_set())
+                except Exception:
+                    logger.exception('Daily approval reminder scheduler failed; the next pass will retry')
+                self.stop_event.wait(OUTBOX_POLL_SECONDS)
+
+        reminder_scheduler = threading.Thread(target=schedule_reminders, name='approval-reminder-scheduler', daemon=True)
         def heartbeat():
             while not self.stop_event.is_set():
                 try:
@@ -143,6 +152,7 @@ class NotificationWorker:
         heartbeater = threading.Thread(target=heartbeat, name='notification-heartbeat', daemon=True)
         heartbeater.start()
         scheduler.start()
+        reminder_scheduler.start()
         try:
             while not self.stop_event.is_set():
                 try:
@@ -152,6 +162,7 @@ class NotificationWorker:
                 self.stop_event.wait(1)
         finally:
             scheduler.join(timeout=2)
+            reminder_scheduler.join(timeout=2)
             heartbeater.join(timeout=1)
 
 

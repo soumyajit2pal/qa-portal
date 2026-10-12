@@ -1,6 +1,6 @@
 """Authenticated, filesystem-backed Document Portal.
 
-This is the QA Portal integration of the supplied Upload Document application.
+This is the QualityOps integration of the supplied Upload Document application.
 Deletion is restricted to the Document Portal Manager role; every write goes
 through the existing authenticated ``/api`` middleware/audit trail.
 Set ``DOCUMENT_PORTAL_STORAGE_HOST_PATH`` to a persistent shared volume in

@@ -644,7 +644,7 @@ export default function Help() {
             <ManualSection {...topic('find-report')}>
               <div className="help-card-grid three">
                 <article><IconSearch /><h3>Global search</h3><p>Search a full TQA ID from the top bar. Short test-case input such as TC-02 is normalized to TQA-TC-02 automatically. A CR or EPIC number (e.g. CR-1042) jumps to the QA Requests list showing every request raised under that exact CR, with its linked Functional/SAST/DAST/Performance/Clearance requests alongside each row.</p></article>
-                <article><IconChart /><h3>Dashboard</h3><p>The Dashboard opens to the last 30 days and provides Last 7 days, Last 30 days, Last 3 months, Last 6 months, and a custom From/To range. Use Reports & Export Centre for unrestricted historical exports. Attention cards explain their source and open consolidated, server-paginated records for the selected metric.</p></article>
+                <article><IconChart /><h3>Dashboard</h3><p>The Dashboard opens to the last 7 days and provides Last 7 days, Last 30 days, Last 3 months, Last 6 months, and a custom From/To range. Use Reports & Export Centre for historical exports. Attention cards explain their source and open consolidated, server-paginated records for the selected metric.</p></article>
                 <article><IconApprove /><h3>Approval queues</h3><p>Pending Approvals groups pending child requests under their parent request or Test Project, supports category filters, and provides server-side page-size and next/previous controls. Approval Workflow Log supports server-side search and entity filtering.</p></article>
               </div>
               <Callout title="Historical completed requests">
@@ -701,7 +701,7 @@ export default function Help() {
               <ul className="help-check-list">
                 <li><IconCheckCircle />Use the filter icon in a table column to narrow its visible results; QA Requests does not duplicate this with a separate page-level status selector.</li>
                 <li><IconCheckCircle />Use Reports & Export Centre for the QA Request Register, Functional Request Register, cycle execution summary, defect/retest register, performance and security registers, testcase approval backlog, application scorecard, QA Clearance register, and approval audit evidence.</li>
-                <li><IconCheckCircle />The Reporting period panel applies an IST From/To range to every export. Leave both dates empty to include all historical data available to your access scope.</li>
+                <li><IconCheckCircle />The Reporting period panel defaults to Last 7 days and applies an IST From/To range to catalogue exports. Choose All history or leave both dates empty to include all historical data available to your access scope.</li>
                 <li><IconCheckCircle />Use Repository and Test Execution exports for detailed test assets and run results.</li>
                 <li><IconCheckCircle />Inactive projects remain discoverable through the project status filter but cannot accept new repository or execution changes until reactivated.</li>
                 <li><IconCheckCircle />QA Certificate Section E remarks and Conditional Clearance Section F observations support rich text, lists, and tables; exported PDFs preserve the formatted content.</li>

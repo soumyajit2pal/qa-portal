@@ -140,6 +140,16 @@ function ChecklistItemRow({ item, detailLabel, departments, isFirst, isLast, onS
         <button type="button" className="btn btn-sm" disabled={busy || moveBusy || isFirst} onClick={() => onMove(item, 'up')} title="Move up">&uarr;</button>{' '}
         <button type="button" className="btn btn-sm" disabled={busy || moveBusy || isLast} onClick={() => onMove(item, 'down')} title="Move down">&darr;</button>
       </td>
+      <td>
+        <button
+          type="button"
+          className={`btn btn-sm ${item.active ? '' : 'btn-danger'}`}
+          disabled={busy}
+          onClick={() => patch({ active: !item.active })}
+        >
+          {item.active ? 'Active' : 'Inactive'}
+        </button>
+      </td>
       <td style={{ minWidth: 260 }}>
         <input
           style={{ width: '100%' }}
@@ -170,16 +180,6 @@ function ChecklistItemRow({ item, detailLabel, departments, isFirst, isLast, onS
           searchPlaceholder="Search departments..."
           style={{ minWidth: 190 }}
         />
-      </td>
-      <td>
-        <button
-          type="button"
-          className={`btn btn-sm ${item.active ? '' : 'btn-danger'}`}
-          disabled={busy}
-          onClick={() => patch({ active: !item.active })}
-        >
-          {item.active ? 'Active' : 'Inactive'}
-        </button>
       </td>
       <td>
         <button type="button" className="btn btn-sm btn-danger" disabled={busy} onClick={() => setConfirmDelete(true)}>
@@ -292,10 +292,10 @@ function ChecklistModulePanel({ module, detailLabel, departments }: { module: st
           <thead>
             <tr>
               <th>Order</th>
+              <th>Status</th>
               <th>Item</th>
               <th>{detailLabel}</th>
               <th>Mandatory for departments</th>
-              <th>Status</th>
               <th></th>
             </tr>
           </thead>

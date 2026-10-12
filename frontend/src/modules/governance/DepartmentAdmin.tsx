@@ -288,7 +288,7 @@ function EmailEditor({ userRow, busy, onClose, onSave }: {
         <Field label="Email address">
           <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" autoFocus />
         </Field>
-        <p className="muted small">This address receives QA Portal workflow notifications for this user.</p>
+        <p className="muted small">This address receives QualityOps workflow notifications for this user.</p>
         <ErrorText error={formError} />
         <div className="modal-actions"><button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save email'}</button></div>
       </form>

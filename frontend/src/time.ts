@@ -1,4 +1,4 @@
-/** The QA Portal has one business timezone, independent of a user's browser. */
+/** The QualityOps has one business timezone, independent of a user's browser. */
 export const PORTAL_TIME_ZONE = 'Asia/Kolkata'
 const IST_OFFSET = '+05:30'
 const NAIVE_DATETIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/

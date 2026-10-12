@@ -39,7 +39,7 @@
 body { margin: 0; background: var(--bg); color: var(--text); }
 a { color: inherit; }
 
-/* Authenticated Document Portal — a native QA Portal surface rather than a
+/* Authenticated Document Portal — a native QualityOps surface rather than a
    separate anonymous application. */
 .document-portal-page { max-width: 1480px; }
 .document-portal-card { overflow: visible; }
@@ -3664,6 +3664,7 @@ tbody tr:hover { background: #f8f9fc; }
 .topbar-user-popover-name { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
 .topbar-user-popover-row { display: flex; flex-direction: column; gap: 1px; font-size: 12px; color: var(--text); margin-bottom: 7px; }
 .topbar-user-popover-row .label { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #9aa1b1; }
+.topbar-user-popover-email-address { overflow-wrap: anywhere; }
 
 @media (max-width: 980px) {
   .navigation-v2 .sidebar,

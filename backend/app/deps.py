@@ -415,7 +415,7 @@ def _require_ldap_notification_email(current_user: models.User) -> None:
     if ldap_email_completion_required(current_user):
         raise HTTPException(
             status_code=403,
-            detail="Confirm or add your notification email address before using QA Portal.",
+            detail="Confirm or add your notification email address before using QualityOps.",
         )
 
 

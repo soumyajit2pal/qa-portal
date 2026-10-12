@@ -109,10 +109,10 @@ interface RaisedRange {
   from: string
   to: string
 }
-// A rolling 30-day view is the operational default. Historical data remains
+// A rolling 7-day view is the operational default. Historical data remains
 // available in Reports & Export Centre, where it does not burden every
 // dashboard visit.
-const DEFAULT_RAISED_RANGE: RaisedRange = { preset: '30d', from: '', to: '' }
+const DEFAULT_RAISED_RANGE: RaisedRange = { preset: '7d', from: '', to: '' }
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
 
 /** Format an instant for API filters without converting it to UTC/GMT. */
@@ -124,7 +124,7 @@ function toIstDateInputValue(date: Date): string {
   return new Date(date.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10)
 }
 
-/** Date-only inputs represent calendar dates in the QA Portal's IST timezone. */
+/** Date-only inputs represent calendar dates in the QualityOps's IST timezone. */
 function istDateAt(date: string, time: string): Date {
   return new Date(`${date}T${time}+05:30`)
 }
@@ -1891,7 +1891,7 @@ export default function Dashboard() {
                     onClick={() => setRange((current) => preset === 'custom'
                       ? {
                           preset,
-                          from: current.from || toIstDateInputValue(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)),
+                          from: current.from || toIstDateInputValue(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000)),
                           to: current.to || toIstDateInputValue(new Date()),
                         }
                       : { ...current, preset })}>{label}</button>

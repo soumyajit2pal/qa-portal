@@ -763,14 +763,14 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
                 </header>
                 <div className="tm-completion-table-wrap">
                   <table>
-                    <thead><tr><th>Defect</th><th>Severity</th><th>Defect status</th><th>Execution impact</th><th>Target Release</th><th>Required action</th><th><span className="sr-only">Open</span></th></tr></thead>
+                    <thead><tr><th>Defect</th><th>Defect status</th><th>Severity</th><th>Execution impact</th><th>Target Release</th><th>Required action</th><th><span className="sr-only">Open</span></th></tr></thead>
                     <tbody>
                       {visibleCompletionDefects.map((defect) => {
                         const impact = defectExecutionImpact(defect)
                         return <tr key={defect.id}>
                           <td><strong>{defect.defect_key}</strong><small>{defect.title}</small></td>
-                          <td><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span></td>
                           <td><Badge status={defect.status} /></td>
+                          <td><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span></td>
                           <td className="tm-execution-impact" title={impact.details}><strong>{impact.count} testcase{impact.count === 1 ? '' : 's'}</strong><small>{impact.summary}</small></td>
                           <td className={!defect.target_release && missingTargetDefects.has(defect.id) ? 'missing' : ''}>{defect.target_release || (missingTargetDefects.has(defect.id) ? 'Not set' : '—')}</td>
                           <td>{requiredDefectAction(defect)}</td>

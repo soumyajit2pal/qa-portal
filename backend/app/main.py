@@ -508,7 +508,7 @@ async def ldap_email_completion_api_guard(request, call_next):
     return JSONResponse(
         status_code=403,
         content={
-            "detail": "Confirm or add your notification email address before using QA Portal.",
+            "detail": "Confirm or add your notification email address before using QualityOps.",
             "status_code": 403,
         },
     )

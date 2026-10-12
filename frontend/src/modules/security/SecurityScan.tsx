@@ -214,20 +214,20 @@ function SecurityTargetProgress({ kind, states, results, allClear, canStart, can
     <header><div><strong>{isSAST ? 'Repository progress' : 'Target progress'}</strong><p>Each {noun} moves independently. Unselected {plural} retain their findings and pending work.</p></div><span className={allClear ? 'complete' : ''}>{clearCount} / {states.length} clear</span></header>
     <div className="sast-repository-progress-scroll" role="region" aria-label={isSAST ? 'Repository progress table' : 'Target progress table'} tabIndex={0}><table>
       <colgroup>
-        {canValidate && <col className="sast-progress-validation-column" />}
         <col className="sast-progress-target-column" />
         <col className="sast-progress-state-column" />
+        {canValidate && <col className="sast-progress-validation-column" />}
         <col className="sast-progress-source-column" />
         <col className="sast-progress-import-column" />
         <col className="sast-progress-findings-column" />
       </colgroup>
-      <thead><tr>{canValidate && <th scope="col">Validate</th>}<th scope="col">{isSAST ? 'Repository' : 'Application URL'}</th><th scope="col">Progress</th><th scope="col">{isSAST ? 'Branch / current commit' : 'Deployed code / artifact hash'}</th><th scope="col">Latest import</th><th scope="col">Active findings<small>Security Auditor View → Current Result</small></th></tr></thead>
+      <thead><tr><th scope="col">{isSAST ? 'Repository' : 'Application URL'}</th><th scope="col">Progress</th>{canValidate && <th scope="col">Validate</th>}<th scope="col">{isSAST ? 'Branch / current commit' : 'Deployed code / artifact hash'}</th><th scope="col">Latest import</th><th scope="col">Active findings<small>Security Auditor View → Current Result</small></th></tr></thead>
       <tbody>{states.map(row => {
         const scan = results.find(result => result.id === row.latest_scan_id)
         return <tr key={row.target_id}>
-          {canValidate && <td>{row.state === 'AWAITING_VALIDATION' ? <input type="checkbox" aria-label={`Validate ${row.label}`} checked={selectedIds.includes(row.target_id)} disabled={busy} onChange={event => setSelected(current => event.target.checked ? [...current.filter(id => id !== row.target_id), row.target_id] : current.filter(id => id !== row.target_id))} /> : '—'}</td>}
           <th scope="row">{row.label}</th>
           <td><span className={`sast-repository-state state-${row.state.toLowerCase()}`}>{REPOSITORY_STATE_LABELS[row.state]}</span>{row.fix_submitted_at && row.state === 'READY_FOR_RESCAN' && <small>Fix submitted {formatDateTimeIST(row.fix_submitted_at)}</small>}</td>
+          {canValidate && <td>{row.state === 'AWAITING_VALIDATION' ? <input type="checkbox" aria-label={`Validate ${row.label}`} checked={selectedIds.includes(row.target_id)} disabled={busy} onChange={event => setSelected(current => event.target.checked ? [...current.filter(id => id !== row.target_id), row.target_id] : current.filter(id => id !== row.target_id))} /> : '—'}</td>}
           <td>{isSAST ? <>{row.git_branch || '—'}<small>{row.commit_id || 'Commit not recorded'}</small></> : row.commit_id || 'Hash not recorded'}</td>
           <td>{scan ? formatDateTimeIST(scan.imported_at) : row.latest_scan_id ? 'Import recorded' : 'Not imported'}</td>
           <td>{row.state === 'NOT_SCANNED' ? '—' : securityAuditorCurrentFindings(scan) ?? '—'}</td>
