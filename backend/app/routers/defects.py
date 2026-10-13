@@ -1,6 +1,7 @@
 import os
 import json
 from ..defect_workflow import policy
+from ..application_modules import save_defect_module
 from collections import Counter
 from typing import List, Optional
 
@@ -83,7 +84,7 @@ CREATE_ROLES = (
 # (GET /{id}, GET /by-key/{key} -- e.g. from a direct link) was already
 # open to any authenticated user regardless, unchanged here.
 _DOC_MODULE = "DEFECT"
-_REQUESTER_DISPOSITION_STATUSES = {"Rejected", "Duplicate"}
+_REQUESTER_DISPOSITION_STATUSES = {"Duplicate"}
 _QA_DEFECT_ROLES = {
     Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
 }
@@ -158,7 +159,7 @@ def _can_touch_defect(db: Session, obj: models.Defect, user: models.User) -> boo
     actor. True for anyone with a real stake in this specific defect: the
     reporter, current assignee, the assignee's Department Head, retest
     tester, or a manager. Department Heads need this access because they can
-    now decide or reopen Rejected/Not a Defect outcomes and may need to provide
+    reopen Rejected/Not a Defect outcomes and may need to provide
     the supporting evidence required by those decisions."""
     from ..defect_assignment import current_defect_responsibility
     responsibility = current_defect_responsibility(obj)
@@ -192,6 +193,11 @@ def _can_assign(db: Session, obj: models.Defect, user: models.User) -> bool:
     return user.has_role(Role.QA_ENGINEER) or _is_manager(db, obj, user)
 
 
+def _can_reject(user: models.User) -> bool:
+    """Rejection requires an explicit QA role, never resolver or admin authority."""
+    return bool(set(user.roles or []) & _QA_DEFECT_ROLES)
+
+
 def _is_assignee(obj: models.Defect, user: models.User) -> bool:
     return obj.assignee_id == user.id
 
@@ -201,7 +207,7 @@ def _qa_disposition_blocked_for_requester_assignment(
     user: models.User,
     requested: str,
 ) -> bool:
-    """Requester ownership prevents QA from closing the investigation path."""
+    """Requester ownership retains the existing restriction on marking duplicates."""
     roles = set(user.roles or [])
     is_qa_user = bool(roles & _QA_DEFECT_ROLES) and Role.ADMIN not in roles
     return bool(
@@ -558,7 +564,7 @@ def list_defects(severity: Optional[str] = None,
         q = q.filter(models.Defect.status.in_(_TERMINAL_STATUSES))
     q = pagination.apply_search(
         q, params, models.Defect.defect_key, models.Defect.title, models.Defect.application_name,
-        models.Defect.module_feature,
+        models.Defect.module_feature, models.Defect.module_name,
     )
     q = pagination.apply_status_filter(q, params, models.Defect.status)
     q = pagination.apply_sort(
@@ -667,8 +673,8 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
         ],
     )
     headers = [
-        "Defect ID", "Title", "QA Request", "Test Cycle", "Test Case", "Application",
-        "Project", "Module", "Status", "Severity", "Priority", "Environment", "Assignee",
+        "Defect ID", "Title", "QA Request", "Test Cycle", "Test Case", "Application", "Module Name",
+        "Project", "Module / Feature", "Status", "Severity", "Priority", "Environment", "Assignee",
         "Reporter", "Created", "Target Release", "Expected Resolution", "Ageing (Days)",
         "Reopen Count", "External Defect ID", "Resolution Type", "Resolution Summary",
         "Workflow Version", "Production Impact", "Affected Environments", "Verified Environments / Evidence Builds", "CC",
@@ -678,7 +684,7 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
     for item in defects:
         rows.append([
             item.defect_key, item.title, item.qa_request_key, item.cycle_key, item.test_case_key,
-            item.application_name, item.cycle.project.project_key if item.cycle and item.cycle.project else None,
+            item.application_name, item.module_name, item.cycle.project.project_key if item.cycle and item.cycle.project else None,
             item.module_feature, item.status, item.severity, item.priority, item.environment,
             item.assignee_name, item.reporter_name, item.reported_at, item.target_release,
             item.expected_resolution_date, max(0, (today - item.reported_at.date()).days),
@@ -789,13 +795,19 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
     linked_cases = db.query(models.TestCase).filter(models.TestCase.id.in_(case_ids)).all() if case_ids else []
     if cycle and (len(linked_cases) != len(case_ids) or any(case.project_id != cycle.project_id for case in linked_cases)):
         raise HTTPException(400, "Every linked Test Case must belong to the Test Cycle's project")
+    module_name = payload.module_name
+    if "module_name" not in payload.model_fields_set:
+        case_definition = (execution.pinned_version or test_case) if execution else test_case
+        module_name = (request.module_name if request else None) or (case_definition.module_name if case_definition else None)
+    module_name = save_defect_module(db, workspace_id=workspace_id, application_name=application_name, name=module_name)
     obj = models.Defect(
         defect_key=models.gen_defect_id(db), title=_required(payload.title, "Defect Title"),
         description=_required(payload.description, "Description"), qa_request_id=request.id if request else None,
         qa_workspace_id=workspace_id, department=department,
         cycle_id=cycle.id if cycle else None, primary_test_case_id=test_case.id if test_case else None,
         execution_id=execution.id if execution else None,
-        application_name=application_name, module_feature=_required(payload.module_feature, "Module/Feature"),
+        application_name=application_name, module_name=module_name,
+        module_feature=_required(payload.module_feature, "Module/Feature"),
         environment=_required(payload.environment, "Environment"), severity=payload.severity,
         priority=payload.priority, steps_to_reproduce=_required(payload.steps_to_reproduce, "Steps to Reproduce"),
         expected_result=_required(payload.expected_result, "Expected Result"),
@@ -870,6 +882,9 @@ def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = D
         raise HTTPException(400, "Select a valid environment")
     if obj.workflow_json and "environment" in data and data["environment"] != obj.environment:
         raise HTTPException(400, "Reported environment is preserved; record another occurrence instead")
+    if "module_name" in data:
+        data["module_name"] = save_defect_module(db, workspace_id=obj.qa_workspace_id or (obj.qa_request.qa_workspace_id if obj.qa_request else None),
+                                               application_name=obj.application_name, name=data["module_name"])
     previous_cc = ', '.join(user.full_name for user in obj.cc_users) if cc_ids is not None else ''
     cc_changed = defect_cc.replace(db, obj, cc_ids, current_user) if cc_ids is not None else False
     changes = []
@@ -919,7 +934,7 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     if _qa_disposition_blocked_for_requester_assignment(obj, current_user, requested):
         raise HTTPException(
             403,
-            "Rejected and Duplicate are controlled by the requester side while the defect is assigned to a Requester.",
+            "Duplicate is controlled by the requester side while the defect is assigned to a Requester.",
         )
     # Triage now includes selecting the working owner. Assignment is an
     # attribute of the defect rather than a separate lifecycle state, so
@@ -928,7 +943,9 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         raise HTTPException(403, "Only a QA Engineer, QA Lead group member, or Administrator can triage and assign a defect")
     if requested == "Assigned" and not _can_assign(db, obj, current_user):
         raise HTTPException(403, "Only a QA Engineer, QA Lead group member, or Administrator can assign a defect")
-    if requested in {"Rejected", "Duplicate"} and not (
+    if requested == "Rejected" and not _can_reject(current_user):
+        raise HTTPException(403, "Only QA can reject a defect; developers/resolvers must propose Not a Defect for QA review")
+    if requested == "Duplicate" and not (
         manager or obj.reporter_id == current_user.id or assignee
         or _is_assignee_department_head(db, obj, current_user)
     ):
@@ -1081,10 +1098,15 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         obj.expected_resolution_date = _required(payload.expected_resolution_date, "Expected Resolution Date")
         details = obj.deferral_reason
     elif requested == "Rejected":
-        obj.rejection_reason = _required(payload.rejection_reason, "Rejection Reason")
-        if not doc_store.list_documents(db, _DOC_MODULE, obj.id):
-            raise HTTPException(400, "Supporting evidence must be attached before rejecting a defect")
-        details = obj.rejection_reason
+        reason = _required(payload.rejection_reason, "Rejection Reason")
+        evidence_reference = (payload.reference or "").strip()
+        if not evidence_reference:
+            documents = doc_store.list_documents(db, _DOC_MODULE, obj.id)
+            if not documents:
+                raise HTTPException(400, "Supporting evidence or an evidence reference is required before rejecting a defect")
+            evidence_reference = "Attached evidence: " + ", ".join(doc.file_name for doc in documents)
+        obj.rejection_reason = reason
+        details = f"{reason}\nEvidence: {evidence_reference}"
     elif requested == "Duplicate":
         duplicate_id = _required(payload.duplicate_defect_id, "Original Defect ID")
         original = _scoped_defects(db, current_user).filter(models.Defect.id == duplicate_id).first()
@@ -1335,6 +1357,8 @@ def link_defect_request(defect_id: int, payload: schemas.DefectLinkRequest,
             if child and child.qa_request_id and child.qa_request_id != request.id:
                 raise HTTPException(400, 'A linked execution belongs to a different QA request')
     obj.qa_request_id = request.id
+    if not obj.module_name:
+        obj.module_name = request.module_name
     obj.workflow_revision += 1
     _audit(db, obj, current_user, 'Request Linked', f'Linked {request.request_id}. Workspace workflow version retained.')
     db.commit()

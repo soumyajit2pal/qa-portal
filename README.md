@@ -657,6 +657,47 @@ and lease reads, so use application hit counters when judging response reuse. No
 credentials or task payloads are exposed. Baseline endpoint p95 latency and Oracle pool/SQL load
 alongside these metrics before increasing memory, pool limits or TTLs. Liveness does not issue INFO.
 
+### Defect application modules
+
+Defects capture an optional **Module Name** next to **Application**, using the
+same application/workspace module picker as QA requests. It defaults from a
+linked QA request or the failing testcase and remains a snapshot of the reported
+issue. The register has an **Application / Module** column; module names are also
+searchable and included in defect details and Excel reports. **Feature / Area**
+retains the existing free-text `module_feature` field for the specific affected
+feature. New module names are reusable without an approval step. Apply migration
+`e8b3d7c2a610` with `alembic upgrade head` before restarting the updated backend;
+it adds a nullable field and fills historical linked defects from matching QA
+requests, preserving existing feature descriptions and explicitly saved modules.
+
+### Defect rejection and Not a Defect review
+
+Developers/resolvers propose **Not a Defect** to an independent QA reviewer;
+the proposal remains open until QA confirms it, reopens the investigation, or
+converts it to a Change Request. Only explicit `QA_ENGINEER`, `QA_LEAD`,
+`CHIEF_MANAGER_QA`, or `AGM_QA` roles can **Reject defect**, including when a
+requester owns the investigation. Resolver, reporter, department-head, and
+administrator access alone do not grant rejection authority. Both current and
+legacy workflow APIs require a rejection reason and supporting evidence (an
+attachment or evidence reference), recorded in the audit trail. Current workflow
+attachments must be explicitly linked to the rejection action. No migration is
+needed; deploy the backend and frontend together.
+
+Workflow menus use explicit operational roles, including for accounts that also
+hold Administrator access. The blocker creator or QA Lead Group can clear a
+defect blocker after reassignment. Execution defect unlinking has a separate
+permission from recording a result: the original QA linker or QA Lead Group can
+unlink within a writable, active project and open cycle, preserving attempt
+history. Independent Not a Defect reviewers exclude the proposer/resolver. The
+clearance approval queue excludes the previous QA approver from final Executive
+approval for every account.
+
+For an Oracle-enforced read-only check of live records, workflow owners and
+pending approval coverage, run `venv/bin/python -m scripts.check_system_workflow_readonly`
+from `backend/` with the intended database profile. Handler regression coverage
+is in `backend/tests/test_system_workflow_paths.py`; missing live sample records
+are reported as zero counts and are not evidence of a tested live flow.
+
 ### Defect CC followers
 
 Defects have an optional searchable CC multi-select covering active, selectable

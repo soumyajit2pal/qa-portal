@@ -15,6 +15,7 @@ import {
   SAST_DAST_STATUS_LABELS,
   SUPPRESSION_STATUS_LABELS,
   PERFORMANCE_STATUS_LABELS,
+  canDeleteWorkflowDocument,
 } from "../constants";
 import { IconFolder, IconFilter, IconEdit, IconWarning } from "./Icons";
 import MultiSelect from "./MultiSelect";
@@ -2000,7 +2001,6 @@ export function RequestDocuments({
   canManage?: boolean;
 }) {
   const { user } = useAuth();
-  const isAdmin = !!user?.roles?.includes("ADMIN");
   const [documents, setDocuments] = useState<RequestDocumentOut[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
@@ -2089,7 +2089,7 @@ export function RequestDocuments({
                 >
                   Download
                 </button>
-                {(isAdmin || (canManage && d.uploaded_by_id === user?.id)) && (
+                {canDeleteWorkflowDocument(user, d.uploaded_by_id, canManage) && (
                   <button
                     className="btn btn-sm btn-danger"
                     onClick={() => setPendingDelete(d)}
@@ -2407,7 +2407,6 @@ export function ChecklistEvidence({
   checked?: boolean;
 }) {
   const { user } = useAuth();
-  const isAdmin = !!user?.roles?.includes("ADMIN");
   const inputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -2493,7 +2492,7 @@ export function ChecklistEvidence({
               fileName={document.file_name}
               onDownload={() => api.downloadFile(`${endpoint}/${document.id}/download`, document.file_name)}
               onDelete={
-                canManage && (isAdmin || document.uploaded_by_id === user?.id)
+                canDeleteWorkflowDocument(user, document.uploaded_by_id, canManage)
                   ? () => setPendingDelete(document)
                   : undefined
               }

@@ -2424,6 +2424,7 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
         .filter(models.TestExecution.status.in_(("Fail", "Blocked")))
         .options(
             joinedload(models.TestExecution.cycle).joinedload(models.TestCycle.project),
+            joinedload(models.TestExecution.pinned_version),
             *_LIST_EXECUTION_EAGER_LOADS,
         )
     )
@@ -2436,7 +2437,8 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
         if not execution.cycle.folder_id or can_view_cycle_folder(execution.cycle.folder, current_user)
     ]
     return [
-        {"project": execution.cycle.project, "cycle": execution.cycle, "execution": execution}
+        {"project": execution.cycle.project, "cycle": execution.cycle, "execution": execution,
+         "module_name": (execution.pinned_version or execution.test_case).module_name}
         for execution in executions
     ]
 

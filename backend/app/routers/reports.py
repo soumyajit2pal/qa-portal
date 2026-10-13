@@ -297,7 +297,7 @@ def defect_retest_register(date_from: str | None = None, date_to: str | None = N
         "Project": (f"{item.cycle.project.project_key} — {item.cycle.project.name}"
                     if item.cycle and item.cycle.project else None),
         "Cycle": item.cycle_key, "Test Case": item.test_case_key,
-        "Application": item.application_name, "Module / Feature": item.module_feature,
+        "Application": item.application_name, "Module Name": item.module_name, "Module / Feature": item.module_feature,
         "Environment": item.environment, "Severity": item.severity,
         "Priority": item.priority, "Status": item.status,
         "Reporter": item.reporter_name, "Assignee": item.assignee_name,
@@ -1222,7 +1222,7 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
         )
         add(workspace_id, "Defect", row.defect_key, row.status,
             parent=row.cycle.cycle_key if row.cycle else row.qa_request_key,
-            description=row.title, context=row.application_name,
+            description=row.title, context=row.application_name, module_name=row.module_name,
             department=row.department or (row.qa_request.department if row.qa_request else ""),
             metrics=f"Severity {row.severity or 'Unknown'}", severity=row.severity,
             created=row.reported_at)

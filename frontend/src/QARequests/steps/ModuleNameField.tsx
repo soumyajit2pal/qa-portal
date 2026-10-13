@@ -9,9 +9,12 @@ interface Props {
   applicationName: string
   value: string
   onChange: (value: string) => void
+  disabled?: boolean
+  workspaceId?: number | null
+  recordLabel?: string
 }
 
-export function ModuleNameField({ applicationName, value, onChange }: Props) {
+export function ModuleNameField({ applicationName, value, onChange, disabled = false, workspaceId, recordLabel = 'request' }: Props) {
   const [modules, setModules] = useState<string[]>([])
   const [creating, setCreating] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
@@ -19,18 +22,21 @@ export function ModuleNameField({ applicationName, value, onChange }: Props) {
   const hasApplication = !!applicationName.trim()
 
   useEffect(() => {
-    if (!hasApplication) return
+    setModules([])
+    setLoadFailed(false)
+    if (!hasApplication) { setLoading(false); return }
     let cancelled = false
     setLoading(true)
     const timer = window.setTimeout(() => {
       const params = new URLSearchParams({ application_name: applicationName.trim() })
+      if (workspaceId) params.set('workspace_id', String(workspaceId))
       api.get<string[]>(`/api/qa-requests/module-options?${params}`)
         .then((rows) => { if (!cancelled) { setModules(rows); setLoadFailed(false) } })
         .catch(() => { if (!cancelled) setLoadFailed(true) })
         .finally(() => { if (!cancelled) setLoading(false) })
     }, 250)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [applicationName, hasApplication])
+  }, [applicationName, hasApplication, workspaceId])
 
   const showInput = creating || (!!value && !modules.includes(value))
   return (
@@ -38,7 +44,7 @@ export function ModuleNameField({ applicationName, value, onChange }: Props) {
       <SearchableSelect
         ariaLabel="Module Name"
         value={showInput ? NEW_MODULE : value}
-        disabled={!hasApplication}
+        disabled={disabled || !hasApplication}
         placeholder={hasApplication ? 'Select Module Name' : 'Select an application first'}
         options={[
           { value: '', label: 'Whole application (no module)' },
@@ -55,6 +61,7 @@ export function ModuleNameField({ applicationName, value, onChange }: Props) {
           aria-label="New Module Name"
           placeholder="Type the new module name"
           maxLength={150}
+          disabled={disabled}
           value={value}
           onChange={(event) => onChange(event.target.value.toUpperCase())}
           style={{ marginTop: 6 }}
@@ -63,7 +70,7 @@ export function ModuleNameField({ applicationName, value, onChange }: Props) {
       <p className="muted small" style={{ margin: '4px 0 0' }}>
         {loadFailed ? 'Modules could not be loaded. You can still enter a new module name. '
           : loading ? 'Loading saved modules. ' : ''}
-        New modules are saved with this request and are available for this application in this workspace. No approval is needed.
+        New modules are saved with this {recordLabel} and are available for this application in this workspace. No approval is needed.
       </p>
     </Field>
   )

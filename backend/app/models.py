@@ -4125,6 +4125,8 @@ class Defect(Base):
     execution_id = Column(Integer, ForeignKey("qap_test_executions.id"), nullable=True, index=True)
     application_name = Column(String(150), nullable=False)
     module_feature = Column(String(150), nullable=False)
+    # Application module captured at reporting time, separate from feature detail.
+    module_name = Column(String(150), nullable=True)
     environment = Column(String(60), nullable=False)
     severity = Column(String(20), nullable=False, index=True)
     priority = Column(String(20), nullable=False, index=True)

@@ -72,6 +72,10 @@ export function formatRoleLabels(
 // identifiable in user profiles, reports, and audit records.
 export const REQUESTER_EQUIVALENT_ROLES = ['REQUESTER', 'DEVELOPER'] as const
 export const QA_REQUEST_CREATOR_ROLES = [...REQUESTER_EQUIVALENT_ROLES, 'BUSINESS_ANALYST'] as const
+export const WORKFLOW_ROLES = [
+  ...QA_REQUEST_CREATOR_ROLES, 'APPLICATION_OWNER', 'SM', 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM',
+  'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA', 'SECURITY_ANALYST',
+] as const
 
 // Selection-aware wording for actions that share the same backend endpoint
 // for one or many records. The UI should call an operation "Bulk" only when
@@ -230,8 +234,8 @@ export function departmentHeadRoles(department?: string | null): string[] {
 }
 
 // Mirrors backend/app/reassignment.py's require_can_reassign exactly: the
-// current assignee, the Department Head of the current assignee's OWN
-// department, or an Admin. Takes the assignee's department directly rather
+// current assignee or the Department Head of the current assignee's OWN
+// department. Takes the assignee's department directly rather
 // than looking it up, since callers generally already have that user's
 // record on hand (e.g. from a users list already loaded for a picker).
 // `currentAssigneeDepartment` may also be an array (the previous assignee's
@@ -240,14 +244,17 @@ export function departmentHeadRoles(department?: string | null): string[] {
 // that department's Department Head role qualifies, same any-of logic as
 // the backend's now list-accepting `department` param.
 export function canReassign(user: RoleBearer | null | undefined, currentAssigneeId?: number | null, currentAssigneeDepartment?: string | string[] | null): boolean {
-  if (!user) return false
-  if ((user.roles || []).includes('ADMIN')) return true
+  if (!user || isViewOnly(user) || !hasWorkflowRole(user, ...WORKFLOW_ROLES)) return false
   if (currentAssigneeId != null && user.id === currentAssigneeId) return true
   const candidateDepartments = Array.isArray(currentAssigneeDepartment)
     ? currentAssigneeDepartment
     : (currentAssigneeDepartment ? [currentAssigneeDepartment] : [])
   return candidateDepartments.some((dept) => dept && hasDepartment(user, dept)
-    && hasRole(user, ...departmentHeadRoles(dept)))
+    && hasWorkflowRole(user, ...departmentHeadRoles(dept)))
+}
+
+export function canDeleteWorkflowDocument(user: RoleBearer | null | undefined, uploaderId: number | null | undefined, canManage: boolean): boolean {
+  return canManage && !!user && !isViewOnly(user) && uploaderId === user.id
 }
 
 // Mirrors backend/app/constants.py's APPLICATION_MASTER_STATUS_LABELS
@@ -290,6 +297,10 @@ export function hasRole(user: RoleBearer | null | undefined, ...roles: string[])
 /** Workflow authority requires an explicit operational role; ADMIN grants none. */
 export function hasWorkflowRole(user: RoleBearer | null | undefined, ...roles: string[]): boolean {
   return roles.some(role => role !== 'ADMIN' && (user?.roles || []).includes(role))
+}
+
+export function canRejectDefect(user: RoleBearer | null | undefined): boolean {
+  return hasWorkflowRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
 }
 
 // Departments are now DB-backed (see backend app/models.py Department,

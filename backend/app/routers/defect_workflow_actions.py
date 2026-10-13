@@ -229,7 +229,14 @@ def apply_action(db, obj, payload, user):
             obj.closed_at = models.now()
             event.update(to='Closed', resolution='Accepted Risk', reference=payload.reference)
             target = 'Closed'
-        elif target in ('Deferred', 'Rejected', 'Duplicate'):
+        elif target == 'Rejected':
+            if not d._can_reject(user):
+                raise HTTPException(403, 'Only QA can reject a defect; developers/resolvers must propose Not a Defect for QA review')
+            reason = required(payload.remarks, 'Rejection reason')
+            evidence_reference = required(payload.reference, 'Rejection evidence or evidence reference')
+            obj.rejection_reason = reason
+            event.update(remarks=reason, reference=evidence_reference)
+        elif target in ('Deferred', 'Duplicate'):
             if d._qa_disposition_blocked_for_requester_assignment(obj, user, target):
                 raise HTTPException(403, 'This disposition is controlled by the requester side')
             allowed(d._can_defer(db, obj, user) if target == 'Deferred' else
@@ -247,8 +254,6 @@ def apply_action(db, obj, payload, user):
                 if original.id == obj.id or original.status == 'Duplicate':
                     raise HTTPException(400, 'Select a different canonical defect')
                 obj.duplicate_of_id = original.id
-            else:
-                obj.rejection_reason = reason
         else:
             # Leaving verification records a passed result before release/closure.
             allowed(manager or (previous == 'QA Testing' and qa)

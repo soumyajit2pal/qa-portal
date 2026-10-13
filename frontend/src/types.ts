@@ -2008,6 +2008,7 @@ export interface MyExecutionOut {
 // interface can simply become an alias for this instead of a separately
 // re-derived type.
 export interface DefectLinkableExecutionOut {
+  module_name?: string | null
   project: TestProjectOut
   cycle: TestCycleOut
   execution: TestExecutionOut
@@ -2183,7 +2184,7 @@ export interface DefectOut {
   cc_user_ids?: number[]
   cc_users?: UserOption[]
   workflow?: DefectWorkflowPolicy | null
-  workflow_state?: { production_impact?: string; qa_owner_id?: number; qa_owner_reassigned_at?: string; business_owner_id?: number; release_owner_id?: number; deployed_build?: string; blocked?: { reason: string; review_date: string }; occurrences?: Record<string, any>[]; history?: Record<string, any>[] }
+  workflow_state?: { production_impact?: string; qa_owner_id?: number; qa_owner_reassigned_at?: string; business_owner_id?: number; release_owner_id?: number; deployed_build?: string; blocked?: { reason: string; review_date: string; owner_id?: number }; occurrences?: Record<string, any>[]; history?: Record<string, any>[] }
   workflow_revision?: number
   workflow_stages?: string[]
   workflow_transitions?: string[]
@@ -2218,6 +2219,7 @@ export interface DefectOut {
   // picker (TestExecution.tsx), widened to offer already-linked defects too.
   execution_links: DefectExecutionLinkOut[]
   application_name: string
+  module_name?: string | null
   module_feature: string
   environment: string
   severity: string
@@ -2300,6 +2302,7 @@ export interface DefectListOut {
   execution_status?: string | null
   execution_links: DefectExecutionLinkOut[]
   application_name: string
+  module_name?: string | null
   module_feature: string
   environment: string
   severity: string

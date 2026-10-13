@@ -1,5 +1,9 @@
 import type { DefectOut, UserOption } from './types'
 
+export function independentDefectReviewers(users: UserOption[], proposerId?: number, resolverId?: number | null): UserOption[] {
+  return users.filter(candidate => candidate.id !== proposerId && candidate.id !== resolverId)
+}
+
 const TERMINAL_STATUSES = new Set(['Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'])
 const QA_STAGES = new Set(['Ready for QA', 'QA Testing', 'Resolved', 'Retest', 'Not a Defect Review'])
 

@@ -22,10 +22,11 @@ import { resolvePreferredProjectId } from '../../projectPreferences'
 import { lazyModule } from '../../lazyModule'
 import ModuleBoundary from '../../components/ModuleBoundary'
 import { cycleCompletionRequestGate, REQUIRED_LINKED_REQUEST_COMPLETION_STATUS } from '../../cycleCompletion'
+import { canChangeCycleOwner, canUnlinkExecutionDefect, executionRemovalEligibility } from '../../executionPermissions'
 
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
-// added to it. QA Engineer + QA Lead both execute (Admin bypasses).
+// added to it. Execution requires an explicit QA role and project access.
 const CAN_EXEC_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']
 // 2026-08 -- reported directly: "'Remove from cycle' should be available
 // only for QA lead ... Same for Test Cycle ... Administration can supersede
@@ -86,16 +87,14 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
   const [busy, setBusy] = useState(false)
   const { user } = useAuth()
   // 2026-08 Reassignment Requirement -- changing an already-set cycle owner
-  // is a reassignment: only the current owner, a workspace QA Executive, or
-  // an Admin may pick a different one, and a reason becomes mandatory.
+  // is a reassignment: only the current owner or a workspace QA Executive
+  // may pick a different one, and a reason becomes mandatory.
   // Setting an owner for the first time (creating a cycle, or editing one
   // that never had an owner) stays open to anyone who can edit the cycle at
   // all -- same broad gate this whole modal already runs under.
-  const isAdmin = Boolean(user?.roles.includes('ADMIN'))
-  const isQADepartmentHead = isAdmin || (hasWorkspaceRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA'))
   const hasExistingOwner = !!editing?.owner_id
-  const isCurrentOwner = !!editing && editing.owner_id === user?.id
-  const canChangeOwner = !hasExistingOwner || isAdmin || isCurrentOwner || isQADepartmentHead
+  const previousOwner = users.find(candidate => candidate.id === editing?.owner_id)
+  const canChangeOwner = canChangeCycleOwner(user, editing?.owner_id, previousOwner?.departments || (previousOwner?.department ? [previousOwner.department] : []))
   const requestLinkLocked = !!editing?.linked_request_key && editing.linked_request_change_allowed === false
   const isOwnerReassignment = hasExistingOwner && (ownerId || null) !== editing?.owner_id
   const [ownerReassignReason, setOwnerReassignReason] = useState('')
@@ -1388,7 +1387,7 @@ function ImageGallery({ basePath, readOnly, emptyText }: { basePath: string; rea
             <button type="button" className="jira-comment-image" title={`Open ${document.file_name}`} onClick={() => window.open(urls[document.id], '_blank', 'noopener,noreferrer')}>
               <img src={urls[document.id]} alt={document.file_name} /><span>{document.file_name}</span>
             </button>
-            {!readOnly && (user?.roles.includes('ADMIN') || document.uploaded_by_id === user?.id) && <button type="button" className="execution-result-image-remove" title="Delete screenshot" onClick={() => remove(document)}>×</button>}
+            {!readOnly && document.uploaded_by_id === user?.id && <button type="button" className="execution-result-image-remove" title="Delete screenshot" onClick={() => remove(document)}>×</button>}
           </div>
         ))}
       </div>
@@ -1401,10 +1400,11 @@ function ImageGallery({ basePath, readOnly, emptyText }: { basePath: string; rea
 // the last one -- so a Fail logged with evidence stays on the record even
 // after a later run comes back Pass. This lists every attempt (newest
 // first), each expandable to its own actual result and its own screenshots.
-function DefectLinks({ executionId, run, readOnly, onChanged, onExecutionChanged }: {
+function DefectLinks({ executionId, run, readOnly, canUnlinkDefects, onChanged, onExecutionChanged }: {
   executionId: number
   run: TestExecutionRunOut
   readOnly: boolean
+  canUnlinkDefects: boolean
   onChanged: (defects: TestRunDefectOut[]) => void
   onExecutionChanged: (execution: TestExecutionOut) => void
 }) {
@@ -1491,10 +1491,7 @@ function DefectLinks({ executionId, run, readOnly, onChanged, onExecutionChanged
   }
 
   function canUnlink(defect: TestRunDefectOut) {
-    return !readOnly && !!user && (
-      defect.linked_by_id === user.id
-      || user.roles.some((role) => ['ADMIN', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA'].includes(role))
-    )
+    return canUnlinkExecutionDefect(user, defect.linked_by_id, canUnlinkDefects)
   }
 
   return (
@@ -1558,9 +1555,10 @@ function DefectLinks({ executionId, run, readOnly, onChanged, onExecutionChanged
   )
 }
 
-function AttemptHistory({ executionId, readOnly, onExecutionChanged }: {
+function AttemptHistory({ executionId, readOnly, canUnlinkDefects, onExecutionChanged }: {
   executionId: number
   readOnly: boolean
+  canUnlinkDefects: boolean
   onExecutionChanged: (execution: TestExecutionOut) => void
 }) {
   const [runs, setRuns] = useState<TestExecutionRunOut[]>([])
@@ -1603,7 +1601,7 @@ function AttemptHistory({ executionId, readOnly, onExecutionChanged }: {
             <div style={{ padding: '0 12px 12px' }}>
               {run.actual_result ? <AuthenticatedMarkdown value={run.actual_result} basePath={`/api/test-execution/executions/${executionId}/runs/${run.id}/images`} /> : <p className="muted small">No actual result recorded.</p>}
               {run.test_run_artifacts && <p className="small"><strong>Test Run Artifacts:</strong> {run.test_run_artifacts}</p>}
-              <DefectLinks executionId={executionId} run={run} readOnly={readOnly || run.id !== runs[runs.length - 1].id || !['Fail', 'Blocked'].includes(run.status)} onChanged={(defects) => setRuns((current) => current.map((item) => item.id === run.id ? { ...item, defects } : item))} onExecutionChanged={(updated) => {
+              <DefectLinks executionId={executionId} run={run} readOnly={readOnly || run.id !== runs[runs.length - 1].id || !['Fail', 'Blocked'].includes(run.status)} canUnlinkDefects={canUnlinkDefects} onChanged={(defects) => setRuns((current) => current.map((item) => item.id === run.id ? { ...item, defects } : item))} onExecutionChanged={(updated) => {
                 setRuns(updated.runs || [])
                 onExecutionChanged(updated)
               }} />
@@ -1654,9 +1652,10 @@ function VersionUpgradeAction({ execution, onUpgraded }: {
   )
 }
 
-function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRemove, removeBlockedReason, runnerCandidates, onAssigned, onExecutionChanged, onClose, onSaved, onRemoved }: {
+function RecordResultModal({ execution, readOnly, canUnlinkDefects, canAssign, canReassign, canRemove, removeBlockedReason, runnerCandidates, onAssigned, onExecutionChanged, onClose, onSaved, onRemoved }: {
   execution: TestExecutionOut
   readOnly: boolean
+  canUnlinkDefects: boolean
   canAssign: boolean
   canReassign: boolean
   canRemove: boolean
@@ -1872,7 +1871,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
         <Badge status={execution.status} />
         {execution.executed_at && <span className="muted small">as of {formatDateTimeIST(execution.executed_at)}</span>}
       </div>
-      <AttemptHistory executionId={execution.id} readOnly={readOnly} onExecutionChanged={onExecutionChanged} />
+      <AttemptHistory executionId={execution.id} readOnly={readOnly} canUnlinkDefects={canUnlinkDefects} onExecutionChanged={onExecutionChanged} />
       {!readOnly && (
         <form onSubmit={submit} style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #e2e2e2' }}>
           <h4>Log New Attempt</h4>
@@ -2276,7 +2275,6 @@ export default function TestExecution() {
   // TestRepository.tsx's own `myAccess`. Defaults permissive while loading.
   const [myAccess, setMyAccess] = useState<TestProjectMyAccessOut | null>(null)
   const canExec = hasRole(user, ...CAN_EXEC_ROLES) && (myAccess?.can_execute ?? true)
-  const isAdmin = Boolean(user?.roles.includes('ADMIN'))
   // 2026-08 -- reported directly: role gate shared by Delete Cycle and
   // Remove-from-cycle (single + bulk) now, both QA Lead Group only. Was
   // previously `hasRole(user, ...CAN_EXEC_ROLES)` for canDeleteCycle, which
@@ -2309,17 +2307,11 @@ export default function TestExecution() {
   // added_by_id) may remove their own addition themselves, but only while
   // it still has zero execution history -- self-correcting a same-person,
   // zero-consequence mistake without needing a QA Lead. Once a specific
-  // slot has recorded history, even a QA Lead can no longer remove IT
-  // (other still-untouched slots in the same cycle stay removable) -- only
-  // an Administrator may. Mirrors the backend's
-  // _execution_removal_block_reason exactly, in the same priority order.
+  // slot has recorded history it must be retained. Other untouched slots
+  // in the same cycle stay removable under their ownership/QA Lead gate.
   const removeFromCycleEligibility = useCallback((execution: TestExecutionOut): { eligible: boolean; reason?: string } => {
-    if (isAdmin) return { eligible: true }
-    if (execution.run_count) return { eligible: false, reason: 'This testcase already has recorded execution history in this cycle -- only an Administrator can remove it now.' }
-    if (canManageExecutionGovernance) return { eligible: true }
-    if (execution.added_by_id && execution.added_by_id === user?.id) return { eligible: true }
-    return { eligible: false, reason: 'This testcase was not added to this cycle by you -- only the QA Lead Group, an Administrator, or whoever added it can remove it before it has been executed.' }
-  }, [isAdmin, canManageExecutionGovernance, user])
+    return executionRemovalEligibility(user, execution, canManageExecutionGovernance)
+  }, [canManageExecutionGovernance, user])
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [projectId, setProjectId] = useState<number | ''>('')
   const [cycles, setCycles] = useState<TestCycleOut[]>([])
@@ -3225,7 +3217,8 @@ export default function TestExecution() {
       {editingExecution && (
         <RecordResultModal
           execution={editingExecution}
-          readOnly={!canEditSelectedCycle || !projectIsActive || cycleIsLocked || (!user?.roles.includes('ADMIN') && editingExecution.assigned_to_id !== user?.id)}
+          readOnly={!canEditSelectedCycle || !projectIsActive || cycleIsLocked || editingExecution.assigned_to_id !== user?.id}
+          canUnlinkDefects={canExec && !!selectedCycle?.workspace_writable && projectIsActive && !cycleIsLocked}
           canAssign={canManageRunners && !!selectedCycle?.workspace_writable && projectIsActive && !cycleIsLocked}
           canReassign={!!selectedCycle?.workspace_writable && projectIsActive && !cycleIsLocked && canReassignExecution(editingExecution)}
           canRemove={!!selectedCycle?.workspace_writable && projectIsActive && !cycleIsLocked && removeFromCycleEligibility(editingExecution).eligible}
@@ -3275,9 +3268,7 @@ export default function TestExecution() {
           message={<div>
             <p>Delete <strong>{cycleToDelete.name}</strong>?</p>
             <p className="muted small">
-              {isAdmin
-                ? 'As an Administrator, this deletes the cycle even if it still contains testcase slots -- their recorded execution history and evidence will be permanently removed with it.'
-                : 'Only an empty cycle can be deleted. Remove every testcase from the cycle first -- recorded execution evidence is never removed automatically. Only an Administrator can delete a cycle that still has execution history.'}
+              Only an empty cycle can be deleted. Remove unexecuted testcases first. Recorded execution history and evidence must remain in the cycle.
             </p>
           </div>}
           confirmLabel="Delete cycle" cancelLabel="Keep cycle" destructive busy={deletingCycle}

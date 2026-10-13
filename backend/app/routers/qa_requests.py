@@ -648,8 +648,16 @@ def list_requests(params: pagination.PageParams = Depends(),
 
 @router.get("/module-options", response_model=list[str])
 def module_options(application_name: str = Query(..., min_length=1, max_length=150),
-                   db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return list_module_names(db, workspace_id=require_active_workspace(current_user), application_name=application_name)
+                   db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
+                   workspace_id: Optional[int] = None):
+    from ..workspace_service import selectable_workspace_ids
+    active_workspace = require_active_workspace(current_user)
+    target_workspace = workspace_id or active_workspace
+    if target_workspace != active_workspace and (
+            target_workspace not in (active_qa_workspace_scope_ids(current_user) or (active_workspace,))
+            or target_workspace not in selectable_workspace_ids(db, current_user)):
+        raise HTTPException(403, "Select an accessible workspace to view its application modules")
+    return list_module_names(db, workspace_id=target_workspace, application_name=application_name)
 
 
 @router.get("/bug-fix-source-options")

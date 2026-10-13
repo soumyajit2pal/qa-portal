@@ -2135,6 +2135,11 @@ class CommentCreate(BaseModel):
 class DefectCreate(BaseModel):
     cc_user_ids: List[int] = Field(default_factory=list, max_length=200)
     application_name: Optional[str] = Field(default=None, max_length=150)
+    module_name: Optional[str] = Field(default=None, max_length=150)
+
+    _normalize_module_name = field_validator("module_name", mode="before")(
+        QARequestCreate.normalize_module_name.__func__
+    )
     department: Optional[str] = Field(default=None, max_length=150)
     title: str
     description: str
@@ -2187,6 +2192,11 @@ class DefectUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     module_feature: Optional[str] = None
+    module_name: Optional[str] = Field(default=None, max_length=150)
+
+    _normalize_module_name = field_validator("module_name", mode="before")(
+        QARequestCreate.normalize_module_name.__func__
+    )
     environment: Optional[str] = None
     severity: Optional[str] = None
     priority: Optional[str] = None
@@ -2293,6 +2303,7 @@ class DefectOut(ORMModel):
     # to, beyond its primary one above -- see models.Defect.execution_links.
     execution_links: List[DefectExecutionLinkOut] = []
     application_name: str
+    module_name: Optional[str] = None
     module_feature: str
     environment: str
     severity: str
@@ -2376,6 +2387,7 @@ class DefectListOut(ORMModel):
     execution_status: Optional[str] = None
     execution_links: List[DefectExecutionLinkOut] = []
     application_name: str
+    module_name: Optional[str] = None
     module_feature: str
     environment: str
     severity: str
@@ -4072,6 +4084,7 @@ class DefectLinkableExecutionOut(ORMModel):
     mirrors the frontend's own pre-existing `ExecutionContext` shape
     (project + cycle + execution) exactly, so Defects.tsx's own dropdown/
     picker code needs no logic changes, only its data source."""
+    module_name: Optional[str] = None
     project: TestProjectOut
     cycle: TestCycleOut
     execution: TestExecutionOut

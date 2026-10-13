@@ -918,8 +918,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
   const canEditDetails = !viewOnly && isRequester && SUPPRESSION_REQUESTER_CONTROLLED_STATUSES.includes(status)
   // Evidence changes belong to the requester. Reviewers must return the
   // request with remarks instead of mutating the version they are deciding.
-  // Preserve the existing System Admin maintenance exception.
-  const canManageDocuments = user?.roles?.includes('ADMIN') || (
+  const canManageDocuments = (
     !viewOnly && sup.created_by_id === user?.id && SUPPRESSION_REQUESTER_CONTROLLED_STATUSES.includes(status)
   )
 

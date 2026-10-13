@@ -536,8 +536,7 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
             ))
     if user.has_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         q = _query("DEPT_HEAD_QA_APPROVAL_PENDING")
-        if not is_system_admin(user):
-            q = q.filter(or_(models.QASignOff.reviewed_by_id.is_(None), models.QASignOff.reviewed_by_id != user.id))
+        q = q.filter(or_(models.QASignOff.reviewed_by_id.is_(None), models.QASignOff.reviewed_by_id != user.id))
         for obj in q.order_by(models.QASignOff.created_at).all():
             results.append(_item(
                 "QA Clearance -- Executive Approval", "SIGNOFF", obj.id, obj.certificate_id,
