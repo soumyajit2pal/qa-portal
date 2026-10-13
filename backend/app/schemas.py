@@ -3286,6 +3286,41 @@ class TestCaseBulkDelete(BaseModel):
     ids: List[int]
 
 
+class TestCaseMoveTarget(BaseModel):
+    target_project_id: int = Field(gt=0)
+    folder_id: Optional[int] = Field(default=None, gt=0)
+
+
+class TestCaseMoveIn(TestCaseMoveTarget):
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def require_move_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("A reason is required to move test cases")
+        return value.strip()
+
+
+class TestCaseBulkMovePreviewIn(TestCaseMoveTarget):
+    ids: List[int] = Field(min_length=1, max_length=500)
+
+
+class TestCaseBulkMoveIn(TestCaseMoveIn):
+    ids: List[int] = Field(min_length=1, max_length=500)
+
+
+class TestCaseMoveBlocked(BaseModel):
+    id: int
+    test_case_key: str
+    reasons: List[str]
+
+
+class TestCaseMovePreviewOut(BaseModel):
+    eligible_ids: List[int]
+    blocked: List[TestCaseMoveBlocked]
+
+
 class TestCaseBulkApprove(BaseModel):
     """QA-Lead-tier bulk FINAL decision -- acts only on rows whose draft is
     "Review Completed" (see bulk_recommend_test_cases below for the
@@ -3970,6 +4005,19 @@ class TestRunDefectOut(ORMModel):
     linked_by_id: Optional[int] = None
     linked_by_name: Optional[str] = None
     created_at: datetime.datetime
+
+
+class TestRunDefectStatusUpdate(BaseModel):
+    defect_status: Literal['Open', 'In Progress', 'Resolved', 'Closed', 'Reopened']
+    expected_status: Optional[str] = None
+    reason: str = Field(min_length=1, max_length=2000)
+
+    @field_validator('reason')
+    @classmethod
+    def require_status_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError('A reason is required to update external defect status')
+        return value.strip()
 
 
 class LinkedGovernedDefectRef(ORMModel):

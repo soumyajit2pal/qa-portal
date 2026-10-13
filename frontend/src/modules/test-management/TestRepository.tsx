@@ -29,6 +29,7 @@ import { testCaseStepErrors } from '../../testCaseSteps'
 import { canRecycleTestCase, canPurgeTestCase, requiresTestCaseArchive } from '../../testCaseRecycleEligibility'
 import { createLatestRequestGate } from '../../latestRequest'
 import { resolvePreferredProjectId } from '../../projectPreferences'
+import TestCaseMoveModal from './TestCaseMoveModal'
 
 // Test Repository module -- folder tree + test case authoring/import, under
 // a selected Test Project. QA Engineer + QA Lead both author (create/edit/
@@ -435,8 +436,9 @@ function RenameFolderModal({ folder, onClose, onRenamed }: {
   )
 }
 
-function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
+function ImportModal({ projectId, projectName, folders, folderId, onClose, onImported }: {
   projectId: number
+  projectName: string
   folders: TestFolderOut[]
   folderId: number | ''
   onClose: () => void
@@ -559,6 +561,10 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
       preventBackdropClose={importActive}
       closeDisabled={importActive}
     >
+      <div className="tm-project-move-route" role="status">
+        <span>Import destination project</span><strong>{projectName}</strong>
+        <small>Folder: {folders.find(folder => folder.id === targetFolder)?.name || 'Unfiled'}</small>
+      </div>
       {!result ? (
         stage === 'importing' ? (
           <div className="tm-operation-state" aria-live="polite">
@@ -1670,7 +1676,7 @@ function TestCaseArchiveModal({ testCase, onClose, onArchived }: {
   )
 }
 
-function TestCaseModal({ projectId, currentProject, allProjects, folders, folderId, existing, users, onClose, onSaved, onDeleted, onReviewed, onCheckoutChange, canAuthor, canReview, canGiveFinalApproval }: {
+function TestCaseModal({ projectId, currentProject, allProjects, folders, folderId, existing, users, onClose, onSaved, onDeleted, onMoved, onReviewed, onCheckoutChange, canAuthor, canReview, canGiveFinalApproval }: {
   projectId: number
   currentProject: TestProjectOut
   allProjects: TestProjectOut[]
@@ -1681,6 +1687,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
   onClose: () => void
   onSaved: (tc: TestCaseOut) => void
   onDeleted: (id: number) => void
+  onMoved: () => void
   onReviewed: (tc: TestCaseOut) => void
   onCheckoutChange: (tc: TestCaseOut) => void
   canAuthor: boolean
@@ -1729,6 +1736,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
   const [showSubmit, setShowSubmit] = useState(false)
   const [showOverride, setShowOverride] = useState(false)
   const [showClone, setShowClone] = useState(false)
+  const [showMove, setShowMove] = useState(false)
   const [showArchive, setShowArchive] = useState(false)
   const [confirmFinishEditing, setConfirmFinishEditing] = useState(false)
   const [archiveBusy, setArchiveBusy] = useState(false)
@@ -2158,6 +2166,8 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
         <div className="tm-review-actions">
           <div><strong>More actions</strong><span>Clone a testcase, move rejected or never-approved cases to the Recycle Bin, or archive an approved baseline.</span></div>
           <button className="btn" onClick={() => setShowClone(true)}>Clone…</button>
+          <button type="button" className="btn" onClick={() => setShowMove(true)} disabled={busy || hasUnsavedChanges}
+            title={hasUnsavedChanges ? 'Save or discard your changes before moving this test case' : undefined}>Move to another project…</button>
           {canRecycleTestCase(existing, user?.id, isAdministrator) && <button type="button" className="btn btn-danger" onClick={() => setConfirmDelete(true)} disabled={busy}>Move to Recycle Bin</button>}
           {canManageRepoGovernance && existing.current_approved_version_id && existing.status !== 'Archived' && (
             <button className="btn btn-danger" onClick={() => setShowArchive(true)}>Archive</button>
@@ -2265,6 +2275,10 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
           onClose={() => setShowOverride(false)}
           onOverridden={(tc) => { onCheckoutChange(tc); setShowOverride(false) }}
         />
+      )}
+      {showMove && existing && (
+        <TestCaseMoveModal sourceProject={currentProject} projects={allProjects} cases={[existing]}
+          onClose={() => setShowMove(false)} onMoved={() => { setShowMove(false); onMoved() }} />
       )}
       {showClone && existing && (
         <TestCaseCloneModal
@@ -2758,6 +2772,7 @@ export default function TestRepository() {
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set())
   const [visibleCaseIds, setVisibleCaseIds] = useState<Set<number>>(new Set())
   const [showBulkUpdate, setShowBulkUpdate] = useState(false)
+  const [showBulkMove, setShowBulkMove] = useState(false)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [showBulkApprove, setShowBulkApprove] = useState(false)
   const [showBulkRecommend, setShowBulkRecommend] = useState(false)
@@ -3473,6 +3488,7 @@ export default function TestRepository() {
                 {returnRejectSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkReturn(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Return For Correction')} ({returnRejectSelectedIds.length})</button>}
                 {returnRejectSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkReject(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Reject')} ({returnRejectSelectedIds.length})</button>}
                 {canOpenBulkUpdate && <button className="btn btn-sm" onClick={() => setShowBulkUpdate(true)}>{selectionActionLabel(selectedCount, 'update')}</button>}
+                {canAuthor && projectCanContribute && <button type="button" className="btn btn-sm" onClick={() => setShowBulkMove(true)}>Move to another project…</button>}
                 {/* Recycling includes rejected cases while preserving approved/archived history. */}
                 {canAuthor && deletableSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkDelete(true)}>Move to Recycle Bin ({deletableSelectedIds.length})</button>}
                 {archivableSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkArchive(true)}>Archive selected ({archivableSelectedIds.length})</button>}
@@ -3665,11 +3681,18 @@ export default function TestRepository() {
       {showImport && projectId && projectCanContribute && (
         <ImportModal
           projectId={projectId}
+          projectName={`${selectedProject?.project_key} — ${selectedProject?.name}`}
           folders={folders}
           folderId={typeof selectedFolder === 'number' ? selectedFolder : ''}
           onClose={() => setShowImport(false)}
           onImported={() => refreshCases()}
         />
+      )}
+      {showBulkMove && selectedProject && projectCanContribute && (
+        <TestCaseMoveModal sourceProject={selectedProject} projects={projects} cases={selectedCases}
+          onClose={() => setShowBulkMove(false)} onMoved={() => {
+            setShowBulkMove(false); setSelectedCaseIds(new Set()); refreshCases()
+          }} />
       )}
       {showBulkUpdate && projectId && projectIsActive && (
         <BulkUpdateModal
@@ -3805,6 +3828,7 @@ export default function TestRepository() {
             setEditingCase(saved)
           }}
           onDeleted={() => { refreshCases(); setEditingCase(null) }}
+          onMoved={() => { refreshCases(); setEditingCase(null); setSelectedCaseIds(new Set()) }}
           onReviewed={() => {
             refreshCases()
             setEditingCase(null)

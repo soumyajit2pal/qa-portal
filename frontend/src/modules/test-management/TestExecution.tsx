@@ -8,7 +8,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge, WarningNotice } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import ProjectSelect from '../../components/ProjectSelect'
-import { ENVIRONMENTS, defectBlocksExecution, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, QA_STATUS_LABELS, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
+import { ENVIRONMENTS, defectBlocksExecution, activeExternalExecutionDefects, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, QA_STATUS_LABELS, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
 import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOption, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
@@ -18,6 +18,7 @@ import LinkedDefects from '../../components/LinkedDefects'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconFolder, IconGrid, IconInbox, IconLock, IconPlus, IconTrash, IconWorkflow } from '../../components/Icons'
 import { defectEvidenceError, DEFECT_EVIDENCE_EXTENSIONS } from '../../defectEvidence'
+import ExternalDefectStatusModal from './ExternalDefectStatusModal'
 import { resolvePreferredProjectId } from '../../projectPreferences'
 import { lazyModule } from '../../lazyModule'
 import ModuleBoundary from '../../components/ModuleBoundary'
@@ -1177,14 +1178,8 @@ function InlineExecutionActions({ execution, canExecute, executionContextError, 
   const runPanelRef = useRef<HTMLDivElement>(null)
   const [runPanelPosition, setRunPanelPosition] = useState<{ top: number; left: number; width: number } | null>(null)
   const latestRun = execution.runs?.[execution.runs.length - 1]
-  // Reported directly: "testcase already failed, and defect also linked,
-  // then why again allowing to marked failed" -- clarified to mean a second,
-  // separate defect shouldn't be linkable to the same already-linked
-  // attempt (recording a fresh Fail on retest is still fine -- that's a new
-  // attempt/run, not this one). Backend enforces this regardless (see
-  // test_execution.py's _link_defect / defects.py's _link_to_execution) --
-  // this just keeps the buttons from being offered once already linked.
-  const latestCanLinkDefect = !!latestRun && ['Fail', 'Blocked'].includes(latestRun.status) && !(latestRun.defects?.length)
+  // All distinct findings from the same attempt remain attached to that attempt.
+  const latestCanLinkDefect = !!latestRun && ['Fail', 'Blocked'].includes(latestRun.status)
 
   function toggleRunPanel() {
     if (open) { setOpen(false); return }
@@ -1302,20 +1297,23 @@ function LinkExistingDefectModal({ execution, onClose, onLinked }: {
     // Load every page so an older governed defect does not disappear merely
     // because more than 100 open records exist. Triaged is actionable and
     // must be included as well.
-    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'Deferred']
+    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Not a Defect Review', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'Deferred']
     const qs = new URLSearchParams({ page_size: '100' })
     openStatuses.forEach((s) => qs.append('status', s))
     let active = true
     async function loadCandidates() {
       const candidates = await api.getAll<DefectListOut>(`/api/defects?${qs.toString()}`)
       if (active) {
-        setDefects(candidates)
+        const latestRun = execution.runs?.[execution.runs.length - 1]
+        const alreadyLinked = new Set((latestRun?.defects || [])
+          .filter(link => link.defect_url?.startsWith('/defects')).map(link => link.defect_key))
+        setDefects(candidates.filter(defect => !alreadyLinked.has(defect.defect_key)))
         setError(null)
       }
     }
     loadCandidates().catch((reason) => { if (active) setError(reason) })
     return () => { active = false }
-  }, [])
+  }, [execution.id, execution.runs])
   async function submit(event: React.FormEvent) {
     event.preventDefault()
     if (!defectId) return
@@ -1400,11 +1398,12 @@ function ImageGallery({ basePath, readOnly, emptyText }: { basePath: string; rea
 // the last one -- so a Fail logged with evidence stays on the record even
 // after a later run comes back Pass. This lists every attempt (newest
 // first), each expandable to its own actual result and its own screenshots.
-function DefectLinks({ executionId, run, readOnly, canUnlinkDefects, onChanged, onExecutionChanged }: {
+function DefectLinks({ executionId, run, readOnly, canUnlinkDefects, canUpdateExternalDefects, onChanged, onExecutionChanged }: {
   executionId: number
   run: TestExecutionRunOut
   readOnly: boolean
   canUnlinkDefects: boolean
+  canUpdateExternalDefects: boolean
   onChanged: (defects: TestRunDefectOut[]) => void
   onExecutionChanged: (execution: TestExecutionOut) => void
 }) {
@@ -1423,10 +1422,11 @@ function DefectLinks({ executionId, run, readOnly, canUnlinkDefects, onChanged, 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [pendingRemove, setPendingRemove] = useState<TestRunDefectOut | null>(null)
+  const [editingExternal, setEditingExternal] = useState<TestRunDefectOut | null>(null)
 
   useEffect(() => {
-    if (!adding || linkMode !== 'internal' || internalDefects.length) return
-    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'Deferred']
+    if (!adding || linkMode !== 'internal') return
+    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Not a Defect Review', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'Deferred']
     const qs = new URLSearchParams({ page_size: '100' })
     openStatuses.forEach((status) => qs.append('status', status))
     let active = true
@@ -1434,14 +1434,14 @@ function DefectLinks({ executionId, run, readOnly, canUnlinkDefects, onChanged, 
     async function loadInternalDefects() {
       const defects = await api.getAll<DefectListOut>(`/api/defects?${qs.toString()}`)
       if (active) {
-        const alreadyLinked = new Set((run.defects || []).map((defect) => defect.defect_key))
+        const alreadyLinked = new Set((run.defects || []).filter(defect => defect.defect_url?.startsWith('/defects')).map((defect) => defect.defect_key))
         setInternalDefects(defects.filter((defect) => !alreadyLinked.has(defect.defect_key)))
         setError(null)
       }
     }
     loadInternalDefects().catch((reason) => { if (active) setError(reason) }).finally(() => { if (active) setLoadingInternal(false) })
     return () => { active = false }
-  }, [adding, internalDefects.length, linkMode, run.defects])
+  }, [adding, linkMode, run.defects])
 
   async function link(e: React.FormEvent) {
     e.preventDefault()
@@ -1520,6 +1520,8 @@ function DefectLinks({ executionId, run, readOnly, canUnlinkDefects, onChanged, 
             {defect.notes && <small>{defect.notes}</small>}
           </div>
           {defect.defect_status && <Badge status={defect.defect_status} />}
+          {canUpdateExternalDefects && !defect.defect_url?.startsWith('/defects') && <button type="button"
+            className="btn btn-sm" disabled={busy} onClick={() => setEditingExternal(defect)}>Update status</button>}
           {canUnlink(defect) && <button type="button" className="tm-defect-unlink" title="Unlink defect" aria-label={`Unlink ${defect.defect_key}`} onClick={() => setPendingRemove(defect)}>×</button>}
         </div>
       ))}
@@ -1547,6 +1549,11 @@ function DefectLinks({ executionId, run, readOnly, canUnlinkDefects, onChanged, 
         <div className="tm-defect-form-actions"><button className="btn btn-primary btn-sm" disabled={busy}>{busy ? 'Linking…' : 'Link external reference'}</button><button type="button" className="btn btn-sm" onClick={closeLinker}>Cancel</button></div>
       </form>}
       <ErrorText error={error} title="Defect linking failed" />
+      {editingExternal && <ExternalDefectStatusModal executionId={executionId} link={editingExternal}
+        onClose={() => setEditingExternal(null)} onSaved={updated => {
+          onChanged(updated.runs?.find(item => item.id === run.id)?.defects || [])
+          onExecutionChanged(updated); setEditingExternal(null)
+        }} />}
       {pendingRemove && <ConfirmModal title="Unlink defect?" message={pendingRemove.defect_url?.startsWith('/defects')
         ? <p>Unlink governed defect <strong>{pendingRemove.defect_key}</strong> from this testcase execution? The defect and failed attempt remain in history. This testcase has a previous failed or blocked attempt. A successful retry must be recorded as <strong>Retest Passed</strong>.</p>
         : <p>Remove external defect reference <strong>{pendingRemove.defect_key}</strong> from Attempt #{run.attempt_no}? The external defect itself will not be deleted.</p>}
@@ -1601,7 +1608,7 @@ function AttemptHistory({ executionId, readOnly, canUnlinkDefects, onExecutionCh
             <div style={{ padding: '0 12px 12px' }}>
               {run.actual_result ? <AuthenticatedMarkdown value={run.actual_result} basePath={`/api/test-execution/executions/${executionId}/runs/${run.id}/images`} /> : <p className="muted small">No actual result recorded.</p>}
               {run.test_run_artifacts && <p className="small"><strong>Test Run Artifacts:</strong> {run.test_run_artifacts}</p>}
-              <DefectLinks executionId={executionId} run={run} readOnly={readOnly || run.id !== runs[runs.length - 1].id || !['Fail', 'Blocked'].includes(run.status)} canUnlinkDefects={canUnlinkDefects} onChanged={(defects) => setRuns((current) => current.map((item) => item.id === run.id ? { ...item, defects } : item))} onExecutionChanged={(updated) => {
+              <DefectLinks executionId={executionId} run={run} readOnly={readOnly || run.id !== runs[runs.length - 1].id || !['Fail', 'Blocked'].includes(run.status)} canUnlinkDefects={canUnlinkDefects} canUpdateExternalDefects={!readOnly} onChanged={(defects) => setRuns((current) => current.map((item) => item.id === run.id ? { ...item, defects } : item))} onExecutionChanged={(updated) => {
                 setRuns(updated.runs || [])
                 onExecutionChanged(updated)
               }} />
@@ -1761,6 +1768,7 @@ function RecordResultModal({ execution, readOnly, canUnlinkDefects, canAssign, c
   // constants.ts's executionStatusGate / backend's matching
   // _execution_status_gate for where this is actually enforced.
   const activeLinkedDefects = (execution.linked_defects || []).filter((defect) => defectBlocksExecution(defect, execution.id))
+  const activeExternalDefects = activeExternalExecutionDefects(execution.runs)
   const hasPriorFailedOrBlocked = hasRetestEligibleHistory(execution.runs, execution.status)
   const validChangeRequestDisposition = (execution.linked_defects || []).some((defect) => defect.status === 'Change Request Raised' && !!defect.related_cr_number?.trim())
   return (
@@ -1861,7 +1869,11 @@ function RecordResultModal({ execution, readOnly, canUnlinkDefects, canAssign, c
           status cannot be changed until verification requirements are met. Check the environment in Edit Cycle. Build numbers remain visible as audit evidence, but do not need to match the cycle build.
         </WarningNotice>
       )}
-      {activeLinkedDefects.length === 0 && hasPriorFailedOrBlocked && (
+      {activeExternalDefects.length > 0 && <div className="info-banner warning">
+        External defects still need resolution: {activeExternalDefects.map(defect => `${defect.defect_key} · ${defect.defect_status || 'Open'}`).join(', ')}.
+        Confirm their status in the external tracker, then use Update status in Attempt History to record Resolved or Closed before retesting.
+      </div>}
+      {activeLinkedDefects.length === 0 && activeExternalDefects.length === 0 && hasPriorFailedOrBlocked && (
         <div className="info-banner">
           {validChangeRequestDisposition ? <>The finding was converted to a referenced Change Request. Preserve the original failed attempt and select <strong>NA</strong> for the current scope.</> : <>The linked defect verification requirements are satisfied. Please retest the test case and select <strong>Retest Passed</strong> if it passes, or <strong>Fail</strong> if it fails again.</>}
         </div>

@@ -851,19 +851,18 @@ def _defect_notification_route(db: SASession, target: models.Defect) -> Notifica
     Defect status labels do not consistently contain generic workflow verbs
     (for example ``Triaged``, ``In Progress`` and ``Retest``), so they need an
     explicit contract instead of the generic keyword-based routing used by
-    the other request workflows. Outcome messages go to both the defect
-    reporter and the linked QA Request's requester; the commit listener
-    removes the actor so users never receive mail for their own action.
+    the other request workflows. Newly raised defects notify their reporter
+    and named assignee; selected CC users are queued separately. Outcome
+    messages go to both the defect reporter and the linked QA Request's requester. Subsequent workflow
+    messages exclude the actor; creation also confirms receipt to the reporter.
     """
     status = str(getattr(target, "status", "") or "").upper()
     if status in _DEFECT_QA_ROUTING_STATUSES:
-        roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
-        workspace = _target_workspace_id(target)
-        recipients = _workspace_role_user_ids(db, workspace, roles) if workspace else set()
+        recipients = _user_ids(target.reporter_id) | _user_ids(target.assignee_id)
         if recipients:
             return NotificationRoute(
-                recipients, "QA Defect Team", True,
-                "This defect requires triage or assignment before the workflow can continue.",
+                recipients, "Defect Participants", False,
+                "A defect has been raised. Open the record to view its details and assignment.",
             )
         return None
     if status in _DEFECT_OWNER_STATUSES:
@@ -1279,23 +1278,26 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> int:
         getattr(target, "status", None) if target else "<target_not_found>",
     )
     route = _notification_route(db, action, target)
-    queued_count = _queue_notification_route(db, action, target, route) if route else 0
+    defect_creation = isinstance(target, models.Defect) and action.decision == 'Created'
+    queued_count = _queue_notification_route(db, action, target, route, include_actor=defect_creation) if route else 0
     if isinstance(target, models.Defect) and (_is_workflow_transition(action) or action.decision in {'CC Updated', 'Updated', 'Commented'}):
         from .defect_cc import notification_ids
         cc_route = NotificationRoute(notification_ids(db, target), 'CC', False,
                                      'You are following this defect in CC. This update is for your information.')
-        queued_count += _queue_notification_route(db, action, target, cc_route)
+        queued_count += _queue_notification_route(db, action, target, cc_route, include_actor=defect_creation)
     return queued_count
 
 
-def _queue_notification_route(db, action, target, route):
+def _queue_notification_route(db, action, target, route, *, include_actor=False):
     """Queue the working owner first, then passive CC; outbox deduplicates both."""
     reference = _portal_reference(action, target)
-    recipient_ids = route.recipient_ids - {action.actor_id}
+    # Raising a defect must also confirm receipt to its requester/reporter.
+    # Other workflow notifications continue to exclude the acting user.
+    recipient_ids = route.recipient_ids if include_actor else route.recipient_ids - {action.actor_id}
     if not recipient_ids:
         logger.info(
-            "SMTP workflow notification skipped reference=%s reason=no_eligible_recipient_other_than_actor actor_id=%s",
-            reference, action.actor_id,
+            "SMTP workflow notification skipped reference=%s reason=%s actor_id=%s",
+            reference, "no_eligible_recipient" if include_actor else "no_eligible_recipient_other_than_actor", action.actor_id,
         )
         return 0
     users = db.query(models.User).filter(models.User.id.in_(recipient_ids), models.User.is_active == True).all()  # noqa: E712
@@ -1726,6 +1728,30 @@ def _candidate_notification_ids(now: datetime.datetime, limit: int) -> list[int]
         db.close()
 
 
+def _defect_creation_notification_allowed(db: SASession, notification: models.EmailNotification) -> bool:
+    """Suppress old broadcast outbox rows and revoked recipients before SMTP.
+
+    Only creation messages use this policy; later workflow ownership and
+    explicit Activity mentions retain their existing routing rules.
+    """
+    action = notification.approval_action
+    if not action or action.entity_type != 'DEFECT' or action.decision != 'Created':
+        return True
+    target = _target(action, db)
+    if not isinstance(target, models.Defect):
+        return False
+    from .defect_cc import notification_ids
+    from .workspace_service import selectable_workspace_ids
+    recipient_ids = _user_ids(target.reporter_id) | _user_ids(target.assignee_id) | notification_ids(db, target)
+    workspace = _target_workspace_id(target)
+    recipient_email = notification.recipient_email.strip().casefold()
+    for user in db.query(models.User).filter(models.User.id.in_(recipient_ids), models.User.is_active == True).all():  # noqa: E712
+        if ((user.email or '').strip().casefold() == recipient_email
+                and (not workspace or workspace in selectable_workspace_ids(db, user))):
+            return True
+    return False
+
+
 def _deliver_one(notification_id: int, now: datetime.datetime) -> bool:
     """Deliver one outbox row in its own database session/transaction.
 
@@ -1762,6 +1788,12 @@ def _deliver_one(notification_id: int, now: datetime.datetime) -> bool:
 
         notification = db.get(models.EmailNotification, notification_id)
         try:
+            if not _defect_creation_notification_allowed(db, notification):
+                notification.status = 'CANCELLED'
+                notification.last_error = 'Defect creation email is limited to the requester, assigned user and selected CC users.'
+                db.commit()
+                logger.info('Defect creation email suppressed id=%s reason=recipient_not_selected', notification.id)
+                return False
             from .approval_reminders import refresh_before_delivery
             if not refresh_before_delivery(db, notification):
                 notification.status = 'CANCELLED'

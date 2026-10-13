@@ -22,6 +22,7 @@ from ..constants import (
 )
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 from ..testcase_imports import TEST_CASE_IMPORT_CONTENT_FIELDS, build_test_case_import_fingerprint
+from ..testcase_moves import move_test_cases, preview_test_case_move
 from . import jobs
 from ..job_tasks import make_spec
 
@@ -1701,6 +1702,28 @@ def bulk_restore_test_cases(project_id: int, payload: schemas.TestCaseBulkRestor
     for row in rows:
         db.refresh(row)
     return rows
+
+
+@router.post("/projects/{project_id}/test-cases/move-preview", response_model=schemas.TestCaseMovePreviewOut)
+def preview_move_test_cases(project_id: int, payload: schemas.TestCaseBulkMovePreviewIn,
+                            db: Session = Depends(get_db),
+                            current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    return preview_test_case_move(db, project_id, payload, current_user)
+
+
+@router.post("/projects/{project_id}/test-cases/bulk-move", response_model=List[schemas.TestCaseOut])
+def bulk_move_test_cases(project_id: int, payload: schemas.TestCaseBulkMoveIn,
+                         db: Session = Depends(get_db),
+                         current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    return move_test_cases(db, project_id, payload.ids, payload, current_user)
+
+
+@router.post("/test-cases/{case_id}/move", response_model=schemas.TestCaseOut)
+def move_test_case(case_id: int, payload: schemas.TestCaseMoveIn,
+                   db: Session = Depends(get_db),
+                   current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    case = get_or_404(db, models.TestCase, case_id, "Test Case")
+    return move_test_cases(db, case.project_id, [case_id], payload, current_user)[0]
 
 
 @router.post("/test-cases/{case_id}/clone", response_model=schemas.TestCaseOut)

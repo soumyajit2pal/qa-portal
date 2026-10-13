@@ -1,4 +1,5 @@
 """Workspace ownership for collaborative project content (independent of user roles)."""
+from contextlib import contextmanager
 from fastapi import HTTPException
 from sqlalchemy import event, inspect
 from sqlalchemy.orm import Session
@@ -104,6 +105,37 @@ def assert_project_owned(db, project, user):
         raise HTTPException(403, 'This project belongs to another workspace and is read-only.')
 
 
+@contextmanager
+def validated_case_project_moves(db, cases, source_project, target_project, folder_id, user):
+    """Allow only the exact case relocations validated by the move operation.
+
+    The exception expires after its explicit flush. All other container and
+    permanent workspace ownership changes still use the normal guard.
+    """
+    from . import models
+    workspace_id = getattr(user, 'active_qa_workspace_id', None)
+    if (source_project.qa_workspace_id != workspace_id
+            or target_project.qa_workspace_id != workspace_id
+            or source_project.id == target_project.id):
+        raise HTTPException(403, 'Test cases can only move between projects in the current workspace')
+    for case in cases:
+        assert_owned(db, case, user)
+    if not workspace_can_contribute(db, target_project.id, user):
+        raise HTTPException(403, 'The destination project is read-only')
+    previous = db.info.get('validated_case_project_moves')
+    db.info['validated_case_project_moves'] = {
+        case.id: (source_project.id, target_project.id, folder_id) for case in cases
+        if isinstance(case, models.TestCase)
+    }
+    try:
+        yield
+    finally:
+        if previous is None:
+            db.info.pop('validated_case_project_moves', None)
+        else:
+            db.info['validated_case_project_moves'] = previous
+
+
 @event.listens_for(Session, 'before_flush')
 def enforce_workspace_ownership(db, flush_context, instances):
     user = db.info.get('project_workspace_actor')
@@ -130,6 +162,11 @@ def enforce_workspace_ownership(db, flush_context, instances):
                 if key in inspect(obj).attrs and obj not in db.new and inspect(obj).attrs[key].history.has_changes():
                     old = inspect(obj).attrs[key].history.deleted
                     if old and key not in ('folder_id',):
+                        from .models import TestCase
+                        allowed = db.info.get('validated_case_project_moves', {}).get(getattr(obj, 'id', None))
+                        if (key == 'project_id' and isinstance(obj, TestCase) and allowed
+                                and (old[0], obj.project_id, obj.folder_id) == allowed):
+                            continue
                         raise HTTPException(403, 'Content cannot be moved between ownership containers')
             assert_owned(db, root, user)
 

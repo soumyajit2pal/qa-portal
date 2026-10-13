@@ -335,6 +335,9 @@ def _execution_context(db: Session, execution_id: int, request: Optional[models.
     if not execution or not execution.cycle or not execution.test_case:
         raise HTTPException(404, "Test Execution, Test Cycle, or Test Case was not found")
     cycle, test_case = execution.cycle, execution.test_case
+    from .test_execution import _require_active_project, _require_open_cycle
+    _require_active_project(db, cycle.project_id)
+    _require_open_cycle(cycle)
     if execution.status not in {"Fail", "Blocked"}:
         raise HTTPException(400, "A defect can be linked only to a Failed or Blocked Test Execution")
     linked_request = cycle.child_request_link
@@ -398,34 +401,24 @@ def _ensure_execution_link(db: Session, defect_id: int, execution_id: int) -> No
 
 
 def _link_run_defect(db: Session, obj: models.Defect, execution: models.TestExecution, user: models.User) -> None:
-    """Attaches obj's defect_key to `execution`'s latest attempt
-    (TestRunDefect) -- shared by both _link_to_execution (primary link) and
-    _link_additional_execution below, so the attempt-level traceability rule
-    (at most one defect per attempt; a fresh retest attempt can carry a
-    different one) applies uniformly regardless of which kind of link this
-    is. TestRunDefect's own uniqueness is per (run_id, defect_key), not per
-    defect globally, so the same defect_key linking to a DIFFERENT
-    execution's run here was already unproblematic at this layer -- the
-    only thing that used to block it was Defect.execution_id's own single-
-    primary-execution guard in the two callers below."""
+    """Link a distinct governed defect to the latest Failed/Blocked attempt.
+
+    Execution row locking serializes callers. Each attempt may retain many
+    different defects, with one row per key. An explicit governed selection
+    may convert an existing external reference with that same key.
+    """
     latest_run = execution.runs[-1] if execution.runs else None
     if not latest_run:
         raise HTTPException(400, "The Failed or Blocked execution has no recorded attempt to link")
-    # Reported directly: "testcase already failed, and defect also linked,
-    # then why again allowing to marked failed" -- clarified to mean linking
-    # a SECOND, separate defect to the same already-linked attempt (a fresh
-    # 'Fail' attempt after retesting is still fine and expected). Was
-    # previously only checked per (run_id, defect_key), which allowed a
-    # different defect to be linked to the same attempt without limit -- see
-    # test_execution.py::_link_defect's matching fix for the free-text/
-    # "Link existing"/"Link external" paths.
-    existing_run_link = db.query(models.TestRunDefect).filter_by(run_id=latest_run.id).first()
-    if existing_run_link and existing_run_link.defect_key != obj.defect_key:
-        raise HTTPException(
-            400,
-            f"Attempt #{latest_run.attempt_no} already has defect '{existing_run_link.defect_key}' linked -- "
-            "record a new attempt (retest) instead of linking a second defect to the same one.",
-        )
+    if latest_run.status not in {'Fail', 'Blocked'}:
+        raise HTTPException(400, 'Defects can only be linked to the latest Failed or Blocked attempt')
+    existing_run_link = next((link for link in db.new if isinstance(link, models.TestRunDefect)
+                             and link.run_id == latest_run.id and link.defect_key == obj.defect_key), None)
+    if existing_run_link is None:
+        existing_run_link = db.query(models.TestRunDefect).filter_by(
+            run_id=latest_run.id, defect_key=obj.defect_key).first()
+    if existing_run_link and (existing_run_link.defect_url or '').startswith('/defects'):
+        raise HTTPException(409, f"Defect '{obj.defect_key}' is already linked to attempt #{latest_run.attempt_no}")
     if not existing_run_link:
         db.add(models.TestRunDefect(
             run_id=latest_run.id, defect_key=obj.defect_key,
@@ -443,6 +436,13 @@ def _link_run_defect(db: Session, obj: models.Defect, execution: models.TestExec
         existing_run_link.defect_status = obj.status
         existing_run_link.notes = "Governed portal defect"
         existing_run_link.linked_by_id = user.id
+    db.add(models.ApprovalAction(
+        entity_type='TEST_CASE', entity_id=execution.test_case_id,
+        step_name=f'Attempt #{latest_run.attempt_no} Defect', actor_id=user.id, actor_role=user.roles_csv,
+        decision='Defect Link Converted' if existing_run_link else 'Defect Linked',
+        comments=f'{"Converted external reference to" if existing_run_link else "Linked"} governed defect '
+                 f'{obj.defect_key} on execution #{execution.id}, attempt #{latest_run.attempt_no}.',
+    ))
 
 
 def _link_to_execution(db: Session, obj: models.Defect, execution: models.TestExecution,
@@ -450,7 +450,7 @@ def _link_to_execution(db: Session, obj: models.Defect, execution: models.TestEx
                        user: models.User) -> None:
     """Sets `execution` as obj's PRIMARY execution -- only ever called when
     obj has no primary execution yet, or `execution` already IS its primary
-    (idempotent re-link); see link_defect_execution's own branch below for
+    and a later attempt records another occurrence; see link_defect_execution's branch below for
     the "already primary-linked elsewhere" case, which goes to
     _link_additional_execution instead rather than raising 400 as this used
     to unconditionally."""
@@ -838,9 +838,10 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
                           db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
     obj = _get_mutable(defect_id, db, current_user)
+    execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request)
+    obj = db.query(models.Defect).filter_by(id=obj.id).populate_existing().with_for_update().one()
     if obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised"}:
         raise HTTPException(400, f"A {obj.status} defect cannot be linked to a new execution")
-    execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request)
     if obj.qa_workspace_id and (cycle.origin_workspace_id or cycle.project.qa_workspace_id) != obj.qa_workspace_id:
         raise HTTPException(400, "Test execution must belong to the defect workspace")
     if cycle.project.application_master and cycle.project.application_master.name.casefold() != obj.application_name.casefold():
@@ -1164,6 +1165,7 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     obj.status = requested
     db.query(models.TestRunDefect).filter(
         models.TestRunDefect.defect_key == obj.defect_key,
+        models.TestRunDefect.defect_url.startswith('/defects'),
     ).update({models.TestRunDefect.defect_status: requested}, synchronize_session=False)
     _audit(db, obj, current_user, requested, details, previous, requested)
     db.commit(); db.refresh(obj)

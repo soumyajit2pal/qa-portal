@@ -1066,6 +1066,14 @@ export function defectBlocksExecution(defect: ExecutionLinkedDefect, executionId
   return !!defect.modern_workflow || !DEFECT_RETEST_CLEAR_STATUSES.includes(defect.status)
 }
 
+type AttemptDefectReference = { defect_key: string; defect_url?: string | null; defect_status?: string | null }
+
+export function activeExternalExecutionDefects(runs: { defects?: AttemptDefectReference[] }[] | undefined): AttemptDefectReference[] {
+  return (runs || []).flatMap(run => run.defects || []).filter(defect =>
+    !defect.defect_url?.startsWith('/defects')
+    && !['RESOLVED', 'CLOSED'].includes((defect.defect_status || 'Open').trim().toUpperCase()))
+}
+
 // Mirrors the backend's own _execution_status_gate (test_execution.py)
 // exactly -- see that function's docstring for the full reasoning. Purely
 // for disabling the blocked option and explaining why before the user even
@@ -1086,7 +1094,7 @@ export function defectBlocksExecution(defect: ExecutionLinkedDefect, executionId
 //    client-side check can't do without a round trip.
 export function executionStatusGate(
   linkedDefects: ExecutionLinkedDefect[] | undefined,
-  runs: { status: string }[] | undefined,
+  runs: { status: string; defects?: AttemptDefectReference[] }[] | undefined,
   status: string,
   defectKeyInput?: string,
   currentStatus?: string,
@@ -1097,6 +1105,11 @@ export function executionStatusGate(
   if (activeDefects.length) {
     const names = activeDefects.map((d) => `${d.defect_key} (${d.status})`).join(', ')
     return `Linked defect verification does not cover this execution (${names}). Check the environment in Edit Cycle. Build numbers remain visible as audit evidence, but do not need to match the cycle build.`
+  }
+  const externalDefects = activeExternalExecutionDefects(runs)
+  if (externalDefects.length) {
+    const names = externalDefects.map(defect => `${defect.defect_key} (${defect.defect_status || 'Open'})`).join(', ')
+    return `External defects are still unresolved (${names}). Confirm the fix in the external tracker and update each recorded status to Resolved or Closed before retesting.`
   }
   // currentStatus is a compatibility fallback for executions recorded
   // before immutable attempt history existed. A genuinely new slot is

@@ -296,7 +296,8 @@ def apply_action(db, obj, payload, user):
     s.setdefault('history', []).append(event)
     obj.workflow_state_json = json.dumps(s)
     obj.workflow_revision += 1
-    db.query(models.TestRunDefect).filter(models.TestRunDefect.defect_key == obj.defect_key).update(
+    db.query(models.TestRunDefect).filter(models.TestRunDefect.defect_key == obj.defect_key,
+        models.TestRunDefect.defect_url.startswith('/defects')).update(
         {models.TestRunDefect.defect_status: obj.status}, synchronize_session=False)
     comments = '\n'.join(str(x) for x in [event.get('remarks'), event.get('environment'),
                            event.get('build'), event.get('result'), event.get('reference')] if x)

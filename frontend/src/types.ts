@@ -1600,6 +1600,11 @@ export interface TestStepIn {
 
 export type TestStepOut = TestStepIn & { id: number }
 
+export interface TestCaseMovePreviewOut {
+  eligible_ids: number[]
+  blocked: { id: number; test_case_key: string; reasons: string[] }[]
+}
+
 export interface TestCaseOut {
   current_draft_qa_lead_decided_by_id?: number | null
   current_draft_qa_lead_decided_by_name?: string | null

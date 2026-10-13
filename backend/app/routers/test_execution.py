@@ -920,6 +920,17 @@ def _require_assigned_runner(obj: models.TestExecution, current_user: models.Use
 _DEFECT_RETEST_CLEAR_STATUSES = (
     "Deferred", "Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised",
 )
+
+_EXTERNAL_DEFECT_RETEST_CLEAR_STATUSES = {'RESOLVED', 'CLOSED'}
+
+
+def _active_external_defects(db: Session, execution_id: int):
+    links = db.query(models.TestRunDefect).join(models.TestExecutionRun).filter(
+        models.TestExecutionRun.execution_id == execution_id,
+        or_(models.TestRunDefect.defect_url.is_(None), ~models.TestRunDefect.defect_url.startswith('/defects')),
+    ).all()
+    return [link for link in links if (link.defect_status or 'Open').strip().upper()
+            not in _EXTERNAL_DEFECT_RETEST_CLEAR_STATUSES]
 # These dispositions do not represent a delivered fix and therefore do not
 # need environment verification, including for modern workflows.
 # ``Closed`` is deliberately absent: a modern Closed defect clears only when
@@ -1051,6 +1062,11 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
             "Check the environment in Edit Cycle. A Closed workflow defect needs verification in that same "
             "environment, regardless of build number."
         )
+    external_defects = _active_external_defects(db, execution_id)
+    if external_defects:
+        names = ', '.join(f'{link.defect_key} ({link.defect_status or "Open"})' for link in external_defects)
+        return (f'External defects are still unresolved ({names}). Confirm the fix in the external tracker '
+                'and update each recorded status to Resolved or Closed before retesting.')
     if status_value == "Retest Passed" and not has_prior_failed_or_blocked:
         return (
             "'Retest Passed' is available only after this testcase has a previous Failed or "
@@ -1159,23 +1175,14 @@ def _link_defect(db: Session, run: models.TestExecutionRun, payload: schemas.Tes
         raise HTTPException(400, "Defect status cannot exceed 40 characters")
     if len((payload.notes or "").strip()) > 5000:
         raise HTTPException(400, "Defect notes cannot exceed 5,000 characters")
-    # Reported directly: "testcase already failed, and defect also linked,
-    # then why again allowing to marked failed" -- clarified to mean linking
-    # a SECOND, separate defect to the same already-linked attempt (a fresh
-    # 'Fail' attempt after retesting is still fine and expected -- see
-    # _execution_status_gate, which governs that separately). Was previously
-    # only checked per (run_id, defect_key), which blocked re-linking the
-    # exact same key but let a different defect key be linked to the same
-    # attempt without limit. Now checks the whole attempt.
-    existing = db.query(models.TestRunDefect).filter_by(run_id=run.id).first()
+    # One row per key, with all distinct defects retained on the same attempt.
+    # Include pending rows because production sessions use autoflush=False.
+    existing = next((link for link in db.new if isinstance(link, models.TestRunDefect)
+                     and link.run_id == run.id and link.defect_key == key), None)
+    if existing is None:
+        existing = db.query(models.TestRunDefect).filter_by(run_id=run.id, defect_key=key).first()
     if existing:
-        if existing.defect_key == key:
-            raise HTTPException(400, f"Defect '{key}' is already linked to this attempt")
-        raise HTTPException(
-            400,
-            f"Attempt #{run.attempt_no} already has defect '{existing.defect_key}' linked -- record a new "
-            "attempt (retest) instead of linking a second defect to the same one.",
-        )
+        raise HTTPException(409, f"Defect '{key}' is already linked to this attempt")
     defect = models.TestRunDefect(
         run_id=run.id,
         defect_key=key,
@@ -1190,7 +1197,7 @@ def _link_defect(db: Session, run: models.TestExecutionRun, payload: schemas.Tes
         entity_type="TEST_CASE", entity_id=run.execution.test_case_id,
         step_name=f"Attempt #{run.attempt_no} Defect",
         actor_id=current_user.id, actor_role=current_user.roles_csv,
-        decision="Defect Linked", comments=f"Linked defect {key} to execution attempt #{run.attempt_no}.",
+        decision="Defect Linked", comments=f"Linked defect {key} to execution #{run.execution_id}, attempt #{run.attempt_no}.",
     ))
     return defect
 
@@ -3645,7 +3652,14 @@ def _unlink_attempt_defect(
         if internal_reference else None
     )
     if governed:
-        _detach_governed_defect_execution(db, governed, execution, current_user)
+        remaining_internal_link = db.query(models.TestRunDefect.id).join(models.TestExecutionRun).filter(
+            models.TestExecutionRun.execution_id == execution.id,
+            models.TestRunDefect.id != attempt_defect.id,
+            models.TestRunDefect.defect_key == attempt_defect.defect_key,
+            models.TestRunDefect.defect_url.startswith('/defects'),
+        ).first()
+        if not remaining_internal_link:
+            _detach_governed_defect_execution(db, governed, execution, current_user)
 
     # ``defect_id`` predates structured TestRunDefect rows and mirrors only
     # a free-text key.  Keep it in sync when it represents the selected link.
@@ -3687,6 +3701,39 @@ def _reload_execution_for_response(db: Session, execution_id: int) -> models.Tes
         .populate_existing()
         .one()
     )
+
+
+@router.patch('/executions/{execution_id}/runs/{run_id}/defects/{defect_id}', response_model=schemas.TestExecutionOut)
+def update_external_run_defect(execution_id: int, run_id: int, defect_id: int,
+                               payload: schemas.TestRunDefectStatusUpdate,
+                               db: Session = Depends(get_db),
+                               current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    obj = _execution_or_404(db, execution_id, lock=True)
+    cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
+    _require_active_project(db, cycle.project_id)
+    require_can_execute_project(db, cycle.project_id, current_user)
+    _require_open_cycle(cycle)
+    _require_assigned_runner(obj, current_user)
+    _run_or_404(db, obj, run_id)
+    link = db.query(models.TestRunDefect).filter_by(id=defect_id, run_id=run_id).populate_existing().one_or_none()
+    if not link:
+        raise HTTPException(404, 'Defect link not found on this attempt')
+    if (link.defect_url or '').startswith('/defects'):
+        raise HTTPException(400, 'Update governed defect status through Defect Management')
+    if 'expected_status' in payload.model_fields_set and link.defect_status != payload.expected_status:
+        raise HTTPException(409, 'This external defect status changed. Refresh before updating it')
+    if link.defect_status != payload.defect_status:
+        previous = link.defect_status or 'Open'
+        link.defect_status = payload.defect_status
+        db.add(models.ApprovalAction(
+            entity_type='TEST_CASE', entity_id=obj.test_case_id, step_name='External Defect Status',
+            actor_id=current_user.id, actor_role=current_user.roles_csv, decision='External Defect Status Updated',
+            comments=f'{link.defect_key} on execution #{obj.id}, attempt #{link.run.attempt_no}: '
+                     f'{previous} → {payload.defect_status}. Reason: {payload.reason}',
+        ))
+        db.commit()
+    return _reload_execution_for_response(db, obj.id)
 
 
 @router.delete(

@@ -230,6 +230,30 @@ The migration adds a nullable application-name reference, foreign key, and index
 approval history. Existing history is not rewritten, and interrupted upgrades can be
 retried. Rollback retains the history references.
 
+## Moving test cases between projects
+
+The Test Repository supports **Move to another project…** from an individual
+testcase's More actions and from the selected-testcase toolbar. Select an active,
+writable project in the same workspace, choose a destination folder or Unfiled,
+and provide a reason. Review shows eligible cases and per-case blocking reasons;
+users may explicitly select only eligible cases and review that reduced selection.
+Confirmation validates the complete selection again and moves it in one transaction.
+
+Only Draft cases that have never entered review and have no test-cycle, execution,
+or defect links can move. QA authors can move their own cases; QA Lead Group and
+Administrators with an eligible QA workflow role can move other authors' cases
+within their existing workspace and department permissions. Another user's checkout,
+inactive projects, foreign workspace content/folders, and duplicate definitions
+(including destination Recycle Bin entries and duplicates within the selection)
+block the move. Each operation accepts up to 500 cases. Reviewed or historical
+cases should use Clone to create a new Draft in the destination project.
+
+Moves preserve testcase IDs, definitions, versions, tags, creators, attachments,
+and prior Activity, and append an Activity record with source, destination, actor,
+timestamp and reason. Excel import prominently displays its destination project
+key/name and folder throughout the upload. Deploy backend and frontend together;
+this change uses existing schema and requires no new database migration.
+
 ## QA request module names
 
 The Application & Change Details step includes an optional searchable Module Name
@@ -698,6 +722,32 @@ from `backend/` with the intended database profile. Handler regression coverage
 is in `backend/tests/test_system_workflow_paths.py`; missing live sample records
 are reported as zero counts and are not evidence of a tested live flow.
 
+### Multiple defects per execution attempt
+
+An execution's latest **Fail** or **Blocked** attempt can retain multiple distinct
+defects through **Raise defect**, **Link existing**, or **Link external**. Adding
+another finding does not create a new test attempt or replace earlier defect links.
+The existing link table enforces one reference per defect key per attempt; duplicate
+requests are rejected. An explicit governed selection may convert a matching external
+reference into a governed link, retaining that link's identity and auditing the change.
+
+Retest checks evaluate every governed defect linked to the execution, including
+additional execution traces. Each must satisfy its existing disposition or environment
+verification rules. Every retained external reference must be marked **Resolved** or
+**Closed** before another attempt is recorded. In Attempt History, the assigned QA
+runner can use **Update status** to record an external tracker's confirmed status with
+a mandatory reason/reference; the status update is audited and leaves result/evidence
+history intact. Missing or unknown external statuses remain blocking. Updating an
+external reference does not update the external tracker itself.
+
+Linking and external status changes require an active project and an open cycle,
+with existing workspace, department and execution permissions. Individual unlinking
+preserves other defects and attempts; a governed execution trace remains while that
+defect still has another attempt link on the same execution. Links, conversions,
+status changes and removals appear in Activity. Existing reports/export sheets retain
+all references. Deploy backend and frontend together; no new schema migration is
+required for multiple linking.
+
 ### Defect CC followers
 
 Defects have an optional searchable CC multi-select covering active, selectable
@@ -705,6 +755,17 @@ members of the defect's exact workspace across all departments and roles. CC can
 be set when creating or editing a New defect, and managed through **Manage CC**
 throughout the lifecycle by the reporter, responsible users, and authorized QA staff.
 CC changes are audited, retained on reopen, and included in the defect register export.
+
+When a defect is raised, email goes only to its requester (the defect reporter),
+its named assignee when set, and selected CC users. The reporter receives the
+creation confirmation even when they raised the defect themselves. No QA-group
+broadcast or automatic notification to the linked QA Request's requester is sent.
+Recipients still need an active account, notification email and workspace access;
+overlapping selections receive one email per creation action. Before delivery,
+pending/retry creation messages are checked against this list, so old broadcasts
+and recipients who lose access or are removed from CC are suppressed. Deploy the
+backend API and notification worker together; no new schema migration is needed
+for this recipient-rule change.
 
 CC members can read and comment on the followed defect within their workspace;
 they receive informational emails for creation, workflow changes, field edits,
@@ -915,30 +976,32 @@ audited Client IP will correctly be the load balancer address rather than an unt
 
 ### Verification status
 
-The module regression run on 10 October 2026 completed all checked-in backend
-unittest cases (44 passed) and the complete frontend Node suite (438 passed,
-zero failures or skips). The initial two frontend failures referred to the
-intentionally removed application merge dialog and static-IP Compose overlay.
-The obsolete dialog suite was removed and the proxy-trust check now validates
-the active `docker-compose.yml`; those failures are resolved.
+The full local regression run on 13 October 2026 passed all 157 checked-in backend
+unittest cases and all 484 frontend Node tests, with zero failures or skips.
+Coverage includes single and bulk testcase moves, recipient filtering for newly
+raised defects, multiple defects on an execution attempt, duplicate prevention,
+retest checks across all linked defects, external status updates and audit history.
+This run added six ASGI API tests for execution defect linking and three component
+tests that keep the import destination visible before, during and after imports,
+including failed imports.
 
-Backend compilation, the isolated full-app OpenAPI import, frontend TypeScript,
-the Vite production build, and the production bundle audit passed. The backend
-cases exercise real request routers against isolated SQLite fixtures, including
-workspace isolation, readiness and Application Owner gates, certificate snapshot
-revisions, seven request PDF exporters, and 27 report exports across XLSX, CSV,
-and PDF. Test dependencies supply the actor and database; these are not end-to-end
-tests of production authentication or external services.
+All 187 Python source files compiled, TypeScript passed, and the Vite production
+build and production bundle security audit passed (52 files, 29 reviewed API
+families). The existing main JavaScript chunk exceeds Vite's 500 KB advisory limit.
+Isolated OpenAPI generation validated all schema references and unique operation
+IDs for both the core API and dedicated Document Portal. The offline 1,000-record
+handler benchmark retained the documented query-count bounds. Backend fixtures
+use isolated SQLite and supplied identities; SMTP delivery is mocked or disabled.
 
-The local Python environment passed `pip check`, but 12 installed package versions
-differ from `backend/requirements.txt` and Redis is absent. This run does not
-verify the pinned deployment environment. The live Oracle module column and
-catalogue constraints were checked; live record serialization and the migration
-version query remain incomplete. Browser acceptance checks were deferred at the
-user's request. A pinned-dependency run, signed-in browser acceptance, and a real
-Oracle-backed deployment smoke test remain required before promotion. The
-structured results are in
-`regression-results/module-regression-2026-10-10.json`.
+Deployment validation remains incomplete. The configured Oracle listener refused
+connections, so fresh live workflow/schema audits and signed-in browser acceptance
+could not complete. Container inspection was declined. The local Python environment
+passed `pip check`, but 12 installed versions differ from `backend/requirements.txt`
+and Redis is absent. Pinned deployment dependencies, Oracle concurrency and real
+SMTP, LDAP and Fortify integrations still require validation. This run did not
+deploy or restart services. Results and evidence are in
+`validation/full-regression-validation-2026-10-13.json`; the historical module
+regression remains in `regression-results/module-regression-2026-10-10.json`.
 
 ## Authentication & the Admin section
 
@@ -1204,8 +1267,9 @@ browser-identified cross-site mutations are rejected.
 - Disabling a user or changing live role assignments takes effect through the database-backed
   identity checks. Expired and revoked sessions require another sign-in.
 
-Cookie/CSRF browser regression checks are in `frontend/tests/token-renewal.cjs`; backend session
-coverage is in `backend/tests/test_session_security.py`.
+Cookie/CSRF frontend regression checks are in `frontend/tests/token-renewal.cjs`.
+Backend session handling is implemented in `backend/app/session_security.py`;
+a dedicated backend session-security test suite remains a coverage gap.
 
 
 ### Login payload encryption
@@ -1254,8 +1318,9 @@ python3 scripts/benchmark_interactive_reads.py --records 10000 --samples 3
 
 This script creates an in-memory SQLite database and disables SMTP in its own
 process. It does not connect to the configured database, LDAP or mail servers.
-Query-count regressions are covered in `backend/tests/test_interactive_query_cost.py`;
-existing privacy, workspace, delegation and navigation tests remain in place.
+Current query-count evidence comes from this offline benchmark. A dedicated
+backend query-count regression test suite remains a coverage gap; the checked-in
+frontend suite includes privacy, workspace, delegation and navigation checks.
 
 The historical local application logs also contain slow dashboard/request-list
 and export calls, including a dashboard requests call lasting 23.5 seconds and a

@@ -18,6 +18,10 @@ export function mutationSuccessCopy({ path, method }: ApiMutationEvent): Mutatio
   // Login/logout feedback belongs to the destination screen and would flash
   // during navigation. All authenticated business mutations are covered.
   if (value === '/api/auth/login' || value === '/api/auth/logout') return null
+  if (value.startsWith('/api/test-repository/') && action === 'move-preview') return null
+  if (value.startsWith('/api/test-repository/') && (action === 'move' || action === 'bulk-move')) {
+    return { title: 'Test cases moved', message: 'The selected test cases are now in the destination project.' }
+  }
 
   // Document Portal uploads are a batch operation in the UI even though the
   // browser sends one request per file. The upload dialog already owns the
