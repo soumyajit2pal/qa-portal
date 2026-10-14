@@ -19,6 +19,7 @@ from ..database import get_db
 from ..deps import get_workflow_user as get_current_user, dashboard_department_scope, viewable_project_ids, active_qa_workspace_scope_ids
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 from .. import reassignment
+from ..defect_action_evidence import selected_evidence
 
 router = APIRouter(prefix="/api/defects", tags=["defect-management"])
 
@@ -797,9 +798,11 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
         raise HTTPException(400, "Every linked Test Case must belong to the Test Cycle's project")
     module_name = payload.module_name
     if "module_name" not in payload.model_fields_set:
-        case_definition = (execution.pinned_version or test_case) if execution else test_case
-        module_name = (request.module_name if request else None) or (case_definition.module_name if case_definition else None)
+        module_name = request.module_name if request else None
     module_name = save_defect_module(db, workspace_id=workspace_id, application_name=application_name, name=module_name)
+    feature_area = payload.module_feature
+    if 'module_feature' not in payload.model_fields_set and execution and execution.pinned_version:
+        feature_area = execution.pinned_version.module_name
     obj = models.Defect(
         defect_key=models.gen_defect_id(db), title=_required(payload.title, "Defect Title"),
         description=_required(payload.description, "Description"), qa_request_id=request.id if request else None,
@@ -807,7 +810,7 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
         cycle_id=cycle.id if cycle else None, primary_test_case_id=test_case.id if test_case else None,
         execution_id=execution.id if execution else None,
         application_name=application_name, module_name=module_name,
-        module_feature=_required(payload.module_feature, "Module/Feature"),
+        module_feature=_required(feature_area, "Feature / Area"),
         environment=_required(payload.environment, "Environment"), severity=payload.severity,
         priority=payload.priority, steps_to_reproduce=_required(payload.steps_to_reproduce, "Steps to Reproduce"),
         expected_result=_required(payload.expected_result, "Expected Result"),
@@ -923,8 +926,11 @@ def update_defect_cc(defect_id: int, payload: schemas.DefectCCUpdate,
 def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Session = Depends(get_db),
                       current_user: models.User = Depends(get_current_user)):
     obj = _get_mutable(defect_id, db, current_user)
+    obj = db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()
     if obj.workflow_json:
         raise HTTPException(400, "Use the versioned workspace workflow actions for this defect")
+    if payload.revision is not None and payload.revision != obj.workflow_revision:
+        raise HTTPException(409, 'Defect changed. Refresh and review before retrying.')
     requested = payload.status
     if requested not in STATUSES or requested not in TRANSITIONS.get(obj.status, set()):
         raise HTTPException(400, f"Invalid status transition. Defect {obj.defect_key} cannot be changed from {obj.status} to {requested}.")
@@ -996,6 +1002,9 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
             )
 
     previous = obj.status
+    evidence_documents, evidence_reference = selected_evidence(db, obj, payload.evidence_document_ids)
+    if evidence_reference and not (payload.reference or '').strip():
+        payload = payload.model_copy(update={'reference': evidence_reference})
     remarks = (payload.remarks or "").strip()
     if requested in {"Triaged", "Assigned"}:
         assignee_id = _required(payload.assignee_id, "Assignee")
@@ -1046,7 +1055,7 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         if payload.resolution_type not in RESOLUTION_TYPES:
             raise HTTPException(400, "Select a valid Resolution Type")
         obj.resolution_type = payload.resolution_type
-        obj.resolution_summary = _required(payload.resolution_summary, "Resolution Summary")
+        obj.resolution_summary = _required(payload.resolution_summary or payload.fix_details, "Fix Details")
         obj.root_cause = _required(payload.root_cause, "Root Cause")
         obj.fix_details = _required(payload.fix_details, "Fix Details")
         obj.fixed_build_version = _required(payload.fixed_build_version, "Fixed Build/Release Version")
@@ -1066,16 +1075,24 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     elif requested == "Retest":
         obj.retest_result = "In Progress"; obj.retest_at = models.now(); details = remarks or "Retesting started."
     elif requested == "Closed":
+        if payload.revision is None:
+            raise HTTPException(409, 'Refresh this defect before confirming fresh retest verification')
+        if not payload.verification_confirmed:
+            raise HTTPException(400, 'Confirm fresh verification of this defect for the tested build')
         obj.tested_build_version = _required(payload.tested_build_version, "Tested Build Version")
-        obj.retest_actual_result = _required(payload.actual_result, "Retest Actual Result")
-        obj.retest_remarks = _required(payload.retest_remarks, "Retest Remarks")
-        obj.closure_remarks = _required(payload.closure_remarks, "Closure Remarks")
-        obj.retest_result = "Passed"; obj.closed_at = models.now(); details = obj.closure_remarks
+        obj.retest_actual_result = (payload.actual_result or '').strip() or None
+        obj.retest_remarks = _required(payload.reference or payload.retest_remarks, "Retest evidence reference")
+        obj.closure_remarks = (payload.closure_remarks or '').strip() or None
+        obj.retest_result = "Passed"; obj.retest_at = models.now(); obj.closed_at = models.now()
+        details = f'Fresh retest confirmed: Passed; build: {obj.tested_build_version}; evidence: {obj.retest_remarks}'
+        for note in (obj.retest_actual_result, obj.closure_remarks):
+            if note:
+                details += f'\n{note}'
     elif requested == "Reopened":
         obj.reopen_reason = _required(payload.reopen_reason, "Reopening Reason")
         if previous == "Not a Defect Review":
             _required(payload.reference, "Additional evidence or triage reference")
-        elif not doc_store.list_documents(db, _DOC_MODULE, obj.id):
+        elif not payload.reference and not doc_store.list_documents(db, _DOC_MODULE, obj.id):
             raise HTTPException(400, "Supporting evidence must be attached before reopening a defect")
         # Reopening from Retest/Closed means a validation failure. Reopening
         # Reopening a Rejected or Not a Defect outcome reverses an
@@ -1097,7 +1114,7 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         obj.deferral_approved_by = _required(payload.deferral_approved_by, "Approved By")
         obj.target_release = _required(payload.target_release, "Target Release")
         obj.expected_resolution_date = _required(payload.expected_resolution_date, "Expected Resolution Date")
-        details = obj.deferral_reason
+        details = f'{obj.deferral_reason}\nTarget release: {obj.target_release}; review date: {obj.expected_resolution_date}; approved by: {obj.deferral_approved_by}'
     elif requested == "Rejected":
         reason = _required(payload.rejection_reason, "Rejection Reason")
         evidence_reference = (payload.reference or "").strip()
@@ -1163,6 +1180,11 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         details = remarks or f"Changed to {requested}."
 
     obj.status = requested
+    obj.workflow_revision += 1
+    if payload.reference and payload.reference not in details:
+        details += f'\nEvidence/reference: {payload.reference}'
+    if evidence_documents:
+        details += '\nSelected evidence: ' + ', '.join(f"#{item['id']} {item['file_name']}" for item in evidence_documents)
     db.query(models.TestRunDefect).filter(
         models.TestRunDefect.defect_key == obj.defect_key,
         models.TestRunDefect.defect_url.startswith('/defects'),
@@ -1359,10 +1381,8 @@ def link_defect_request(defect_id: int, payload: schemas.DefectLinkRequest,
             if child and child.qa_request_id and child.qa_request_id != request.id:
                 raise HTTPException(400, 'A linked execution belongs to a different QA request')
     obj.qa_request_id = request.id
-    if not obj.module_name:
-        obj.module_name = request.module_name
     obj.workflow_revision += 1
-    _audit(db, obj, current_user, 'Request Linked', f'Linked {request.request_id}. Workspace workflow version retained.')
+    _audit(db, obj, current_user, 'Request Linked', f'Linked {request.request_id}. Saved module selection and workspace workflow version retained.')
     db.commit()
     db.refresh(obj)
     return obj

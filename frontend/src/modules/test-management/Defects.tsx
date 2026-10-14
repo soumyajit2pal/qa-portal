@@ -4,6 +4,7 @@ import { useUserOptions } from '../../hooks/useUserOptions'
 import DefectWorkflowDiagram from '../../components/DefectWorkflowDiagram'
 import LinkDefectRequest from '../../components/LinkDefectRequest'
 import DefectCC, { DefectCCField } from '../../components/DefectCC'
+import DefectEvidencePicker from '../../components/DefectEvidencePicker'
 import DefectWorkflowPanel, {
   availableDefectWorkflowActions,
   DEFECT_WORKFLOW_ACTION_DESCRIPTIONS,
@@ -32,7 +33,7 @@ import { createLatestRequestGate } from '../../latestRequest'
 import { defectLinkTarget, resolveDefect } from '../../defectLookup'
 import { defectStageOwnership, independentDefectReviewers } from '../../defectOwnership'
 import { ModuleNameField } from '../../QARequests/steps/ModuleNameField'
-import { defectExecutionModule } from '../../defectModule'
+import { defectExecutionFeatureArea, defectRequestModule } from '../../defectModule'
 
 const STATUSES = ['Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised', 'Closed']
 const SEVERITIES = ['Critical', 'High', 'Medium', 'Low']
@@ -87,7 +88,7 @@ function defectTransitionGuidance(target: string) {
   }
   if (target === 'Closed') return {
     title: 'Retest evidence and closure decision',
-    text: 'Confirm the build that QA tested, record the observed result and retest notes, then add the final closure summary. These values become part of the audit record.',
+    text: 'Confirm fresh verification of the tested build and select relevant evidence or a reference. Additional verification notes and a closure summary are optional.',
   }
   if (target === 'Reopened') return {
     title: 'Reverse the previous decision',
@@ -308,8 +309,9 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
   const [department, setDepartment] = useState(initial?.project.department || user?.department || '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
-  const [moduleFeature, setModuleFeature] = useState(initial?.execution.test_case?.module_name || '')
-  const [moduleName, setModuleName] = useState(linkedRequest?.module_name || defectExecutionModule(initial))
+  const [moduleFeature, setModuleFeature] = useState(defectExecutionFeatureArea(initial))
+  const [moduleName, setModuleName] = useState(defectRequestModule(linkedRequest))
+  const moduleChoiceEdited = useRef(false)
   const [environment, setEnvironment] = useState(ENVIRONMENTS.includes(initial?.cycle.environment || '') ? initial?.cycle.environment || '' : '')
   const [severity, setSeverity] = useState('Medium')
   const [priority, setPriority] = useState('P3 – Medium')
@@ -348,7 +350,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
   useEffect(() => {
     if (!selected) return
     setRelatedCaseIds(new Set())
-    setModuleFeature(selected.execution.test_case?.module_name || '')
+    setModuleFeature(defectExecutionFeatureArea(selected))
     setEnvironment(ENVIRONMENTS.includes(selected.cycle.environment || '') ? selected.cycle.environment || '' : '')
     setExpected(selected.execution.test_case?.description || '')
     setActual(selected.execution.actual_result || '')
@@ -359,7 +361,8 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
     // when the new one had no traceable link at all.
     const nextLinked = findLinkedRequest(selected)
     setRequestId(nextLinked ? String(nextLinked.id) : '')
-    setModuleName(nextLinked?.module_name || defectExecutionModule(selected))
+    moduleChoiceEdited.current = false
+    setModuleName(defectRequestModule(nextLinked))
     setApplicationName(selected.project.application_name || '')
     setOtherApplication(false)
     setDepartment(selected.project.department || user?.department || '')
@@ -414,18 +417,21 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
     ).entries())
     : []
 
-  const workflowWorkspaceId = requests.find(request => String(request.id) === requestId)?.qa_workspace_id
-    || selected?.cycle.origin_workspace_id
+  const executionWorkspaceId = selected?.cycle.origin_workspace_id
     || selected?.project.qa_workspace_id
     || Number(localStorage.getItem('active_workspace_id') || localStorage.getItem('qa_active_workspace_id'))
     || user?.active_workspace_id || user?.preferred_workspace_id || user?.preferred_qa_workspace_id
+  const workflowWorkspaceId = requests.find(request => String(request.id) === requestId)?.qa_workspace_id || executionWorkspaceId
   const workflowWorkspace = workflowWorkspaces.find(workspace => workspace.id === workflowWorkspaceId)
   const effectiveApplication = requests.find(request => String(request.id) === requestId)?.application_name
     || selected?.project.application_name || applicationName
   function changeRequest(value: string) {
     const request = requests.find(request => String(request.id) === value)
-    if (request) setModuleName(request.module_name || defectExecutionModule(selected))
-    else {
+    const nextApplication = request?.application_name || selected?.project.application_name || effectiveApplication
+    const nextWorkspace = request?.qa_workspace_id || executionWorkspaceId
+    if (nextApplication.trim().toLowerCase() !== effectiveApplication.trim().toLowerCase() || nextWorkspace !== workflowWorkspaceId) moduleChoiceEdited.current = false
+    if (!moduleChoiceEdited.current) setModuleName(defectRequestModule(request))
+    if (!request) {
       setApplicationName(effectiveApplication)
       setDepartment(requests.find(request => String(request.id) === requestId)?.department || department)
     }
@@ -456,13 +462,13 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
               <SearchableSelect ariaLabel="Application" disabled={!!createdDefect} value={otherApplication ? '__other_application__' : applicationName}
                 placeholder={applicationsLoading ? 'Loading applications…' : 'Select application…'}
                 options={[...applicationOptions.map(app => ({ value: app.name, label: app.name })), { value: '__other_application__', label: 'Other (enter application name)' }]}
-                onChange={value => { setOtherApplication(value === '__other_application__'); setApplicationName(value === '__other_application__' ? '' : value); setModuleName('') }} />
-              {otherApplication && <input aria-label="Other application name" required maxLength={150} disabled={!!createdDefect} value={applicationName} placeholder="Enter application name" onChange={e => { setApplicationName(e.target.value); setModuleName('') }} style={{ marginTop: 8 }} />}
+                onChange={value => { setOtherApplication(value === '__other_application__'); setApplicationName(value === '__other_application__' ? '' : value); moduleChoiceEdited.current = false; setModuleName('') }} />
+              {otherApplication && <input aria-label="Other application name" required maxLength={150} disabled={!!createdDefect} value={applicationName} placeholder="Enter application name" onChange={e => { setApplicationName(e.target.value); moduleChoiceEdited.current = false; setModuleName('') }} style={{ marginTop: 8 }} />}
               {applicationsError && <p className="muted small" role="status">Application list could not be loaded. <button type="button" className="btn btn-sm" disabled={!!createdDefect || applicationsLoading} onClick={() => setApplicationsReload(value => value + 1)}>Retry</button></p>}
             </>}
         </Field>
         <ModuleNameField key={`${effectiveApplication}-${workflowWorkspaceId}`} applicationName={effectiveApplication} value={moduleName}
-          onChange={setModuleName} disabled={busy || !!createdDefect} workspaceId={workflowWorkspaceId} recordLabel="defect" />
+          onChange={value => { moduleChoiceEdited.current = true; setModuleName(value) }} disabled={busy || !!createdDefect} workspaceId={workflowWorkspaceId} recordLabel="defect" />
         {!requestId && <Field label="Department *"><select required disabled={!!createdDefect || !!selected?.project.department} value={selected?.project.department || department} onChange={e => setDepartment(e.target.value)}><option value="">Select department</option>{availableDepartments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></Field>}
       </div>
       <Field label="Defect Title *"><input required disabled={!!createdDefect} value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
@@ -560,6 +566,7 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
   const setImages = (key: string) => (files: File[]) => setImageValues((current) => ({ ...current, [key]: files }))
   const [evidenceFiles, setEvidenceFiles] = useState<File[]>([])
   const [evidenceUploaded, setEvidenceUploaded] = useState(false)
+  const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<number[]>([])
   const addEvidenceFiles = (files: FileList | null) => {
     if (!files?.length) return
     setEvidenceFiles((current) => [...current, ...Array.from(files)])
@@ -571,7 +578,14 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
   const [savedDefect, setSavedDefect] = useState<DefectOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const set = (key: string, value: any) => setValues((current) => ({ ...current, [key]: value }))
+  const set = (key: string, value: any) => setValues((current) => ({ ...current, [key]: value,
+    ...(key === 'tested_build_version' ? { verification_confirmed: false } : {}) }))
+  useEffect(() => {
+    setValues(current => ({ ...current, verification_confirmed: false }))
+    setSelectedEvidenceIds([])
+  }, [defect.id, defect.workflow_revision, target])
+  const requiresEvidence = ['Closed', 'Rejected', 'Reopened', 'Not a Defect Review'].includes(target)
+    || (target === 'Not a Defect' && values.resolution_type === 'Documentation Updated')
 
   const departmentUsers = values.assigned_team
     ? users.filter((user) => isSelectableUser(user) && hasDepartment(user, values.assigned_team))
@@ -579,13 +593,13 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
 
   function validateRichFields(): string | null {
     const need = (key: string, label: string) => (!values[key] || !String(values[key]).trim()) ? `${label} is required` : null
-    if (target === 'Resolved') return need('resolution_summary', 'Resolution Summary') || need('root_cause', 'Root Cause') || need('fix_details', 'Fix Details')
-    if (target === 'Closed') return need('actual_result', 'Retest Actual Result') || need('retest_remarks', 'Retest Remarks') || need('closure_remarks', 'Closure Remarks')
-    if (target === 'Reopened') return need('reopen_reason', 'Reopening Reason') || (defect.status === 'Not a Defect Review' ? need('reference', 'Additional evidence or triage reference') : null)
+    if (target === 'Resolved') return need('root_cause', 'Root Cause') || need('fix_details', 'Fix Details')
+    if (target === 'Closed') return values.verification_confirmed === true ? null : 'Confirm fresh verification of this defect for the tested build'
+    if (target === 'Reopened') return need('reopen_reason', 'Reopening Reason')
     if (target === 'Deferred') return need('deferral_reason', 'Deferral Reason')
     if (target === 'Rejected') return need('rejection_reason', 'Rejection Reason')
-    if (target === 'Not a Defect Review') return need('not_a_defect_reason', 'Developer rationale') || need('reference', 'Developer evidence or requirements reference')
-    if (target === 'Not a Defect') return need('resolution_type', 'QA classification') || need('closure_remarks', 'QA triage decision') || (values.resolution_type === 'Documentation Updated' ? need('reference', 'Updated requirement or user-guide reference') : null)
+    if (target === 'Not a Defect Review') return need('not_a_defect_reason', 'Developer rationale')
+    if (target === 'Not a Defect') return need('resolution_type', 'QA classification') || need('closure_remarks', 'QA triage decision')
     if (target === 'Change Request Raised') return need('related_cr_number', 'Change Request / enhancement reference') || need('closure_remarks', 'QA enhancement decision')
     return null
   }
@@ -617,10 +631,8 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
     const validationError = validateRichFields()
     if (validationError) { setError(new Error(validationError)); return }
     const stagedFiles = [...Object.values(imageValues).flat(), ...evidenceFiles]
-    const reviewDisagreement = target === 'Reopened' && defect.status === 'Not a Defect Review'
-    if (['Rejected', 'Reopened'].includes(target) && !reviewDisagreement && !hasEvidence && !evidenceUploaded && !stagedFiles.length
-      && !(target === 'Rejected' && (values.reference || '').trim())) {
-      setError(new Error(`Supporting evidence is required before ${target === 'Rejected' ? 'rejecting' : 'reopening'} a defect`))
+    if (requiresEvidence && !(values.reference || values.retest_remarks || '').trim() && !selectedEvidenceIds.length && !stagedFiles.length) {
+      setError(new Error('Select attached evidence, upload supporting evidence or enter an evidence reference'))
       return
     }
     if (!(await confirmDefectSubmission())) return
@@ -630,15 +642,20 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
       // upload staged screenshots and explicitly selected files before
       // requesting the transition. Clear them after upload so retrying a
       // failed transition cannot create duplicate attachments.
-      if (['Rejected', 'Reopened'].includes(target) && stagedFiles.length && !evidenceUploaded) {
+      let evidenceIds = selectedEvidenceIds
+      if (requiresEvidence && stagedFiles.length && !evidenceUploaded) {
         const attached = await api.uploadFormFiles<RequestDocumentOut[]>(`/api/defects/${defect.id}/attachments`, {}, stagedFiles)
         onEvidenceAttached(attached)
         setEvidenceUploaded(true)
+        evidenceIds = [...new Set([...selectedEvidenceIds, ...attached.map(doc => doc.id)])]
+        setSelectedEvidenceIds(evidenceIds)
         setImageValues({})
         setEvidenceFiles([])
       }
-      const saved = await api.post<DefectOut>(`/api/defects/${defect.id}/transition`, { status: target, ...values })
-      if (['Rejected', 'Reopened'].includes(target)) { onChanged(saved); return }
+      const saved = await api.post<DefectOut>(`/api/defects/${defect.id}/transition`, {
+        status: target, ...values, revision: defect.workflow_revision, evidence_document_ids: evidenceIds,
+      })
+      if (requiresEvidence) { onChanged(saved); return }
       setSavedDefect(saved)
       await attachStagedEvidence(saved)
     } catch (err) { setError(err); setBusy(false) }
@@ -650,25 +667,33 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
       {defectTransitionGuidance(target) && <div className="defect-transition-guidance"><strong>{defectTransitionGuidance(target)?.title}</strong><span>{defectTransitionGuidance(target)?.text}</span></div>}
       <fieldset disabled={!!savedDefect} className="defect-transition-fieldset">
       {target === 'Triaged' && <>{defect.assignee_name && <p className="defect-assignment-current">Currently assigned to <strong>{defect.assignee_name}</strong>{defect.assigned_team ? ` (${defect.assigned_team})` : ''}.</p>}<Field label="Responsible Department *"><SearchableSelect value={values.assigned_team || ''} onChange={(value) => { set('assigned_team', value); set('assignee_id', null) }} placeholder="Select department…" options={departments.map((department) => ({ value: department.name, label: department.name }))} /></Field><Field label="Working Owner *"><UserAssignSelect value={values.assignee_id ? String(values.assignee_id) : ''} onChange={(value) => set('assignee_id', value ? Number(value) : null)} users={departmentUsers} placeholder={values.assigned_team ? 'Select responsible user…' : 'Select a department first…'} disabled={!values.assigned_team} showRoles /></Field>{autoDepartment && <p className="defect-assignment-default">Defaulted from {defect.project_department ? 'the linked Failed / Blocked Test Execution\'s project' : 'the linked QA Request'}: <strong>{autoDepartment}</strong></p>}<Field label="Triage Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Triage Remarks" placeholder="Optional routing note for the working owner…" /></Field></>}
-      {target === 'Resolved' && <><Field label="Resolution Type *"><select required value={values.resolution_type || ''} onChange={(e) => set('resolution_type', e.target.value)}><option value="">Select…</option>{RESOLUTION_TYPES.map((value) => <option key={value}>{value}</option>)}</select></Field><Field label="Resolution Summary *"><JiraRichTextField value={values.resolution_summary || ''} onChange={(v) => set('resolution_summary', v)} onImagesChange={setImages('resolution_summary')} disabled={!!savedDefect} ariaLabel="Resolution Summary" placeholder="Summarize the fix…" /></Field><Field label="Root Cause *"><JiraRichTextField value={values.root_cause || ''} onChange={(v) => set('root_cause', v)} onImagesChange={setImages('root_cause')} disabled={!!savedDefect} ariaLabel="Root Cause" placeholder="Describe the root cause…" /></Field><Field label="Fix Details *"><JiraRichTextField value={values.fix_details || ''} onChange={(v) => set('fix_details', v)} onImagesChange={setImages('fix_details')} disabled={!!savedDefect} ariaLabel="Fix Details" placeholder="Describe the fix that was applied…" /></Field><Field label="Fixed Build / Release *"><input required value={values.fixed_build_version || ''} onChange={(e) => set('fixed_build_version', e.target.value)} /></Field><Field label="QA Retest Owner *"><UserAssignSelect value={values.retest_tester_id ? String(values.retest_tester_id) : ''} onChange={(value) => set('retest_tester_id', value ? Number(value) : null)} users={retestUsers} placeholder="Select the QA user responsible for retest…" /></Field></>}
-      {target === 'Not a Defect Review' && <><Field label="QA reviewer *"><UserAssignSelect value={values.retest_tester_id ? String(values.retest_tester_id) : ''} onChange={(value) => set('retest_tester_id', value ? Number(value) : null)} users={retestUsers} placeholder="Select the QA user responsible for triage…" /></Field><Field label="Developer rationale *"><JiraRichTextField value={values.not_a_defect_reason || ''} onChange={(v) => set('not_a_defect_reason', v)} onImagesChange={setImages('not_a_defect_reason')} disabled={!!savedDefect} ariaLabel="Developer rationale" placeholder="Explain why this is expected behavior and summarize the supporting evidence…" /></Field><Field label="Evidence / requirements reference *"><input required value={values.reference || ''} onChange={(e) => set('reference', e.target.value)} placeholder="Requirement, log, screenshot, test evidence, or discussion reference" /></Field></>}
-      {target === 'Closed' && <><Field label="Build validated by QA *"><input required value={values.tested_build_version || ''} onChange={(e) => set('tested_build_version', e.target.value)} placeholder="Build or release containing the fix" /></Field><Field label="Observed retest result *"><JiraRichTextField value={values.actual_result || ''} onChange={(v) => set('actual_result', v)} onImagesChange={setImages('actual_result')} disabled={!!savedDefect} ariaLabel="Observed retest result" placeholder="Describe what QA observed while validating the fix…" /></Field><Field label="Retest evidence and notes *"><JiraRichTextField value={values.retest_remarks || ''} onChange={(v) => set('retest_remarks', v)} onImagesChange={setImages('retest_remarks')} disabled={!!savedDefect} ariaLabel="Retest evidence and notes" placeholder="Record the validation steps, evidence references, or important conditions…" /></Field><Field label="Closure summary *"><JiraRichTextField value={values.closure_remarks || ''} onChange={(v) => set('closure_remarks', v)} onImagesChange={setImages('closure_remarks')} disabled={!!savedDefect} ariaLabel="Closure summary" placeholder="State why this defect can now be closed…" /></Field></>}
-      {target === 'Reopened' && <><Field label="Reason for reopening *"><JiraRichTextField value={values.reopen_reason || ''} onChange={(v) => set('reopen_reason', v)} onImagesChange={setImages('reopen_reason')} disabled={!!savedDefect} ariaLabel="Reason for reopening" placeholder="Explain what failed during retest, or what new evidence changes the earlier decision." /></Field>{defect.status === 'Not a Defect Review' && <Field label="Additional evidence / triage reference *"><input required value={values.reference || ''} onChange={(e) => set('reference', e.target.value)} placeholder="Evidence, acceptance criterion, or triage meeting record" /></Field>}</>}
+      {target === 'Resolved' && <><Field label="Resolution Type *"><select required value={values.resolution_type || ''} onChange={(e) => set('resolution_type', e.target.value)}><option value="">Select…</option>{RESOLUTION_TYPES.map((value) => <option key={value}>{value}</option>)}</select></Field><Field label="Resolution Summary (optional)"><JiraRichTextField value={values.resolution_summary || ''} onChange={(v) => set('resolution_summary', v)} onImagesChange={setImages('resolution_summary')} disabled={!!savedDefect} ariaLabel="Resolution Summary" placeholder="Summarize the fix…" /></Field><Field label="Root Cause *"><JiraRichTextField value={values.root_cause || ''} onChange={(v) => set('root_cause', v)} onImagesChange={setImages('root_cause')} disabled={!!savedDefect} ariaLabel="Root Cause" placeholder="Describe the root cause…" /></Field><Field label="Fix Details *"><JiraRichTextField value={values.fix_details || ''} onChange={(v) => set('fix_details', v)} onImagesChange={setImages('fix_details')} disabled={!!savedDefect} ariaLabel="Fix Details" placeholder="Describe the fix that was applied…" /></Field><Field label="Fixed Build / Release *"><input required value={values.fixed_build_version || ''} onChange={(e) => set('fixed_build_version', e.target.value)} /></Field><Field label="QA Retest Owner *"><UserAssignSelect value={values.retest_tester_id ? String(values.retest_tester_id) : ''} onChange={(value) => set('retest_tester_id', value ? Number(value) : null)} users={retestUsers} placeholder="Select the QA user responsible for retest…" /></Field></>}
+      {target === 'Not a Defect Review' && <><Field label="QA reviewer *"><UserAssignSelect value={values.retest_tester_id ? String(values.retest_tester_id) : ''} onChange={(value) => set('retest_tester_id', value ? Number(value) : null)} users={retestUsers} placeholder="Select the QA user responsible for triage…" /></Field><Field label="Developer rationale *"><JiraRichTextField value={values.not_a_defect_reason || ''} onChange={(v) => set('not_a_defect_reason', v)} onImagesChange={setImages('not_a_defect_reason')} disabled={!!savedDefect} ariaLabel="Developer rationale" placeholder="Explain why this is expected behavior and summarize the supporting evidence…" /></Field></>}
+      {target === 'Closed' && <>
+        <Field label="Build validated by QA *"><input required value={values.tested_build_version || ''} onChange={event => set('tested_build_version', event.target.value)} /></Field>
+        <label className="workflow-verification-check"><input required type="checkbox" checked={values.verification_confirmed === true} onChange={event => set('verification_confirmed', event.target.checked)} /> I verified this defect on the tested build and confirm it passed *</label>
+        <details className="workflow-optional-notes"><summary>Add verification or closure notes (optional)</summary>
+          <Field label="Verification notes"><JiraRichTextField value={values.actual_result || ''} onChange={value => set('actual_result', value)} onImagesChange={setImages('actual_result')} ariaLabel="Verification notes" /></Field>
+          <Field label="Closure summary"><JiraRichTextField value={values.closure_remarks || ''} onChange={value => set('closure_remarks', value)} onImagesChange={setImages('closure_remarks')} ariaLabel="Closure summary" /></Field>
+        </details>
+      </>}
+      {target === 'Reopened' && <><Field label="Reason for reopening *"><JiraRichTextField value={values.reopen_reason || ''} onChange={(v) => set('reopen_reason', v)} onImagesChange={setImages('reopen_reason')} disabled={!!savedDefect} ariaLabel="Reason for reopening" placeholder="Explain what failed during retest, or what new evidence changes the earlier decision." /></Field></>}
       {target === 'Deferred' && <><Field label="Deferral Reason *"><JiraRichTextField value={values.deferral_reason || ''} onChange={(v) => set('deferral_reason', v)} onImagesChange={setImages('deferral_reason')} disabled={!!savedDefect} ariaLabel="Deferral Reason" /></Field><div className="grid grid-2"><Field label="Approved By *"><input required value={values.deferral_approved_by || ''} onChange={(e) => set('deferral_approved_by', e.target.value)} /></Field><Field label="Target Release *"><input required value={values.target_release || ''} onChange={(e) => set('target_release', e.target.value)} /></Field></div><Field label="Expected Resolution Date *"><input required type="date" value={values.expected_resolution_date || ''} onChange={(e) => set('expected_resolution_date', e.target.value)} /></Field></>}
       {target === 'Rejected' && <Field label="Rejection Reason *"><JiraRichTextField value={values.rejection_reason || ''} onChange={(v) => set('rejection_reason', v)} onImagesChange={setImages('rejection_reason')} disabled={!!savedDefect} ariaLabel="Rejection Reason" placeholder="Give a valid rejection reason and paste or upload supporting evidence." /></Field>}
       {target === 'Duplicate' && <Field label="Canonical defect *"><SearchableSelect value={values.duplicate_defect_id ? String(values.duplicate_defect_id) : ''} onChange={(value) => set('duplicate_defect_id', value ? Number(value) : null)} placeholder="Search by defect key, title, status, or application…" options={defects.filter((item) => item.id !== defect.id && item.status !== 'Duplicate').map((item) => ({ value: String(item.id), label: `${item.defect_key} · ${item.title} · ${item.status} · ${item.application_name}` }))} /></Field>}
-      {target === 'Not a Defect' && <><Field label="QA classification *"><select required value={values.resolution_type || ''} onChange={(e) => set('resolution_type', e.target.value)}><option value="">Select…</option>{NAD_QA_OUTCOMES.map((value) => <option key={value}>{value}</option>)}</select></Field>{values.resolution_type === 'Documentation Updated' && <Field label="Updated requirement / user-guide reference *"><input required value={values.reference || ''} onChange={(e) => set('reference', e.target.value)} placeholder="Document ID, URL, version, or approved reference" /></Field>}<Field label="QA triage decision *"><JiraRichTextField value={values.closure_remarks || ''} onChange={(v) => set('closure_remarks', v)} onImagesChange={setImages('closure_remarks')} disabled={!!savedDefect} ariaLabel="QA triage decision" placeholder="Summarize the evidence reviewed, classification, discussion, and closure decision…" /></Field></>}
+      {target === 'Not a Defect' && <><Field label="QA classification *"><select required value={values.resolution_type || ''} onChange={(e) => set('resolution_type', e.target.value)}><option value="">Select…</option>{NAD_QA_OUTCOMES.map((value) => <option key={value}>{value}</option>)}</select></Field><Field label="QA triage decision *"><JiraRichTextField value={values.closure_remarks || ''} onChange={(v) => set('closure_remarks', v)} onImagesChange={setImages('closure_remarks')} disabled={!!savedDefect} ariaLabel="QA triage decision" placeholder="Summarize the evidence reviewed, classification, discussion, and closure decision…" /></Field></>}
       {target === 'Change Request Raised' && <><Field label="Change Request / enhancement reference *"><input required value={values.related_cr_number || ''} onChange={(e) => set('related_cr_number', e.target.value)} placeholder="CR, EPIC, story, or enhancement ID" /></Field><Field label="QA enhancement decision *"><JiraRichTextField value={values.closure_remarks || ''} onChange={(v) => set('closure_remarks', v)} onImagesChange={setImages('closure_remarks')} disabled={!!savedDefect} ariaLabel="QA enhancement decision" placeholder="Explain the requirement gap, triage participants, and why the defect is being converted to an enhancement…" /></Field></>}
       {!['Triaged', 'Assigned', 'Resolved', 'Closed', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised'].includes(target) && <Field label="Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Remarks" /></Field>}
       </fieldset>
-      {['Rejected', 'Reopened'].includes(target) && !(target === 'Reopened' && defect.status === 'Not a Defect Review') && <div className="defect-form-section defect-evidence">
+      {requiresEvidence && <div className="defect-form-section defect-evidence">
         <div>
           <h4>Supporting Evidence <span>{Object.values(imageValues).flat().length + evidenceFiles.length}</span></h4>
           <label className="btn btn-sm">+ Attach evidence<input type="file" multiple hidden accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')} disabled={busy} onChange={(event) => { addEvidenceFiles(event.target.files); event.target.value = '' }} /></label>
         </div>
         {evidenceFiles.length > 0 && <div className="defect-files">{evidenceFiles.map((file, index) => <button type="button" key={`${file.name}-${file.size}-${index}`} disabled={busy} onClick={() => removeEvidenceFile(index)}>{file.name} ✕</button>)}</div>}
-        {target === 'Rejected' && <Field label="Rejection evidence reference (or attach a file)"><input value={values.reference || ''} onChange={(e) => set('reference', e.target.value)} maxLength={500} placeholder="Requirement, test result, log, or screenshot reference supporting rejection" /></Field>}
-        <p className="muted small">{hasEvidence || evidenceUploaded ? 'Existing evidence is already attached. You may add new files for this decision.' : target === 'Rejected' ? 'Supporting evidence is mandatory: attach a file, paste an image, or provide an evidence reference.' : 'Attach at least one file, or paste/upload an image in the reason field above.'}</p>
+        <DefectEvidencePicker defectId={defect.id} selectedIds={selectedEvidenceIds} onChange={setSelectedEvidenceIds} disabled={busy} />
+        <Field label="Evidence / requirements reference (or select attached evidence)"><input value={values.reference || ''} onChange={event => set('reference', event.target.value)} maxLength={500} placeholder="Requirement, test result, log, or deployment reference" /></Field>
+        <p className="muted small">{hasEvidence ? "Select relevant existing evidence or add a reference for this action." : "Attach evidence or provide a reference for this action."}</p>
       </div>}
       <ErrorText error={error} title={savedDefect ? `${savedDefect.defect_key} was updated` : 'Defect workflow action failed'} />
       <div className="modal-actions">

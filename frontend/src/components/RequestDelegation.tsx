@@ -16,6 +16,7 @@ export interface DelegatableRequest {
   status: string
   qa_request?: { id: number; request_id?: string | null } | null
   active_delegation?: QARequestDelegationOut | null
+  obstacles?: { kind: string; status: string }[]
 }
 
 interface RequestDelegationProps<T extends DelegatableRequest> {
@@ -66,10 +67,11 @@ export function requestDelegationCapabilities(
   const parentId = targetType === 'QA_REQUEST' ? request.id : request.qa_request?.id
   const active = request.active_delegation?.status === 'ACTIVE' ? request.active_delegation : null
   const canManage = (!isViewOnly(user) && request.requester_id === user?.id) || hasRole(user, 'ADMIN')
+  const obstacleInput = ['SAST', 'DAST'].includes(targetType) && request.obstacles?.some(row => row.kind === 'REQUESTER' && row.status === 'OPEN')
   return {
     parentId,
     active,
-    canAssign: !!parentId && canManage && !active && (REQUESTER_STATUSES[targetType].has(request.status)
+    canAssign: !!parentId && canManage && !active && (REQUESTER_STATUSES[targetType].has(request.status) || obstacleInput
       || (['SAST', 'DAST'].includes(targetType) && requesterWork && ['CONFIGURATION', 'SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'RESCAN'].includes(request.status))),
     canReturn: !!parentId && active?.assigned_to_id === user?.id,
     canRecall: !!parentId && !!active && canManage,

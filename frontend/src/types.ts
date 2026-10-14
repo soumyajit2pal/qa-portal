@@ -147,6 +147,11 @@ export interface AuditSummary {
 // The server owns notice eligibility. Clients must use `visible` and `phase`
 // from /current instead of calculating the 48-hour window with a browser
 // clock that may be wrong or in a different timezone.
+export interface ApplicationCreationPolicyOut {
+  enabled: boolean
+  revision: number
+}
+
 export type MaintenanceWindowNoticePhase = 'UPCOMING' | 'IN_PROGRESS'
 
 export interface MaintenanceWindowNoticeOut {
@@ -712,7 +717,7 @@ export interface SecurityScanResultOut {
 }
 
 // Backs the "Findings Validation" doc's 4.1 Scan Summary section.
-export type SASTRepositoryState = 'NOT_SCANNED' | 'AWAITING_VALIDATION' | 'WAITING_FOR_FIX' | 'READY_FOR_RESCAN' | 'CLEAR' | 'STALE'
+export type SASTRepositoryState = 'NOT_SCANNED' | 'AWAITING_VALIDATION' | 'WAITING_FOR_FIX' | 'READY_FOR_RESCAN' | 'CLEAR' | 'STALE' | 'REQUESTER_ACTION_REQUIRED' | 'INTERNAL_HOLD' | 'QA_REVIEW_PENDING' | 'SCOPE_APPROVAL_PENDING'
 
 export interface SASTRepositoryStateOut {
   target_id: number
@@ -823,7 +828,33 @@ export interface SASTListOut {
   module_name?: string | null
 }
 
+export interface SecurityObstacleOut {
+  id: number
+  kind: 'REQUESTER' | 'INTERNAL'
+  status: 'OPEN' | 'QA_REVIEW_PENDING' | 'SCOPE_APPROVAL_PENDING' | 'RESOLVED'
+  revision: number
+  target_ids: number[]
+  changed_fields: string[]
+  allow_scope_additions?: boolean
+  added_target_ids?: number[]
+  category: string
+  reason: string
+  requested_correction: string
+  resume_stage: string
+  owner_id?: number | null
+  opened_by_id: number
+  submitted_by_id?: number | null
+  reviewed_by_id?: number | null
+  readiness_required: boolean
+  reapproval_required: boolean
+  resolution?: string | null
+  created_at: string
+  submitted_at?: string | null
+  reviewed_at?: string | null
+}
+
 export interface SASTOut {
+  obstacles?: SecurityObstacleOut[]
   request_types?: string | null
   missing_testing_types?: string[]
   id: number
@@ -931,6 +962,7 @@ export interface DASTListOut {
 }
 
 export interface DASTOut {
+  obstacles?: SecurityObstacleOut[]
   request_types?: string | null
   missing_testing_types?: string[]
   id: number
@@ -2013,6 +2045,9 @@ export interface MyExecutionOut {
 // interface can simply become an alias for this instead of a separately
 // re-derived type.
 export interface DefectLinkableExecutionOut {
+  feature_area?: string | null
+  // Compatibility with older APIs: this was the pinned testcase area,
+  // never an application-module source.
   module_name?: string | null
   project: TestProjectOut
   cycle: TestCycleOut

@@ -10,6 +10,8 @@ import SearchableSelect from './SearchableSelect'
 import JiraRichTextField from './JiraRichTextField'
 import { MarkdownComment } from './JiraActivity'
 import { defectStageOwnership, independentDefectReviewers } from '../defectOwnership'
+import { defectActionRequirements } from '../defectActionRequirements'
+import DefectEvidencePicker from './DefectEvidencePicker'
 
 export const DEFECT_WORKFLOW_ACTION_LABELS: Record<string, string> = {
   Triaged: 'Triage & assign owner', 'In Progress': 'Start work', 'Ready for QA': 'Send fix to QA',
@@ -112,13 +114,14 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
   const [uploadStatus, setUploadStatus] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [fieldImages, setFieldImages] = useState<Record<string, File[]>>({})
+  const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<number[]>([])
+  const [evidenceExpanded, setEvidenceExpanded] = useState(false)
   const uploaded = useRef(new Map<File, RequestDocumentOut>())
   const [editorVersion, setEditorVersion] = useState(0)
   const attachmentsPath = `/api/defects/${defect.id}/attachments`
   const isTransition = !!choice && !['assess', 'occurrence', 'block', 'unblock'].includes(choice)
-  const requiresReference = ['Ready for QA', 'Production Verification', 'occurrence', 'Accept Risk', 'Not a Defect Review', 'Reopened', 'Rejected'].includes(choice)
-    || (choice === 'Not a Defect' && data.resolution_type === 'Documentation Updated')
-    || (isTransition && ['QA Testing', 'Business Acceptance', 'Production Verification'].includes(defect.status))
+  const requirements = defectActionRequirements(defect, choice, data)
+  const { requiresReference, verification, confirmationRequired, notesRequired, notesLabel } = requirements
   const pendingFiles = Array.from(new Set([...files, ...Object.values(fieldImages).flat()]))
   const actionTitle = ({ occurrence: 'Record in another environment', assess: 'Assess production impact', block: 'Mark blocked', unblock: 'Clear blocker' } as Record<string, string>)[choice] || choice
 
@@ -135,17 +138,18 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
   const reporter = defect.reporter_id === user?.id
   const viewOnly = isViewOnly(user)
   const participant = manager || resolver || qa || business || release || reporter
-  const verification = isTransition && ['QA Testing', 'Business Acceptance', 'Production Verification'].includes(defect.status)
   const forward = isTransition && !['Reopened', 'Deferred', 'Duplicate', 'Rejected', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised', 'Accept Risk'].includes(choice)
   const productionImpactLocked = defect.environment === 'Production'
     || state.occurrences?.some(occurrence => occurrence.environment === 'Production')
     || ['Ready for Release', 'Production Verification'].includes(defect.status)
-  const field = (key: string, label: string, required = true, type = 'text') => <Field label={label + (required ? ' *' : '')}><input disabled={busy} type={type} required={required} value={data[key] || ''} onChange={e => setData({ ...data, [key]: e.target.value })} /></Field>
+  const field = (key: string, label: string, required = true, type = 'text') => <Field label={label + (required ? ' *' : '')}><input disabled={busy} type={type} required={required} value={data[key] || ''} onChange={e => setData(current => ({ ...current, [key]: e.target.value, verification_confirmed: key === 'build' ? false : current.verification_confirmed }))} /></Field>
   const [candidates, setCandidates] = useState<Record<string, UserOption[]>>({})
   const [loadingCandidates, setLoadingCandidates] = useState(false)
   const [candidateError, setCandidateError] = useState<unknown>(null)
   useEffect(() => {
-    if (!choice) return
+    if (!['Triaged', 'Ready for QA', 'Not a Defect Review', 'Ready for Release'].includes(choice)) {
+      setLoadingCandidates(false); setCandidateError(null); return
+    }
     let active = true
     setCandidates({}); setLoadingCandidates(true); setCandidateError(null)
     api.get<Record<string, UserOption[]>>(`/api/defects/${defect.id}/workflow-candidates?department=${encodeURIComponent(data.assigned_team || '')}`)
@@ -183,7 +187,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
   }
   function select(value: string) {
     if (busy) return
-    setChoice(value); setError(null); setFiles([]); setFieldImages({}); setEditorVersion(v => v + 1); setUploadStatus('')
+    setChoice(value); setError(null); setFiles([]); setFieldImages({}); setSelectedEvidenceIds([]); setEvidenceExpanded(false); setEditorVersion(v => v + 1); setUploadStatus('')
     setData({ production_impact: productionImpactLocked ? 'Affected' : state.production_impact || 'Unknown', build: state.deployed_build || defect.build_version || '', environment: workflow.qa_environment, assigned_team: defect.assigned_team || defect.project_department || '', release_owner_id: state.release_owner_id, business_owner_id: state.business_owner_id, ...(value === 'Not a Defect' ? { resolution_type: 'Working as Designed' } : {}) })
   }
   function chooseAction(value: string) {
@@ -200,6 +204,10 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
     if (requestedAction) select(requestedAction)
     else setChoice('')
   }, [requestedAction, defect.id])
+  useEffect(() => {
+    setData(current => ({ ...current, verification_confirmed: false }))
+    setSelectedEvidenceIds([])
+  }, [defect.id, defect.workflow_revision])
   const permitted = availableDefectWorkflowActions(defect, user, users)
   const closed = ['Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'].includes(defect.status)
   const impact = state.production_impact || 'Unknown'
@@ -213,7 +221,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
     Triaged: 'The resolver is assigned. Start work when investigation or the fix begins.',
     'In Progress': 'Document the root cause and fix, then hand the tested build to a QA owner.',
     'Ready for QA': 'The fix is ready. The QA owner can start validating the submitted build.',
-    'QA Testing': 'Record the tested build, observed result and evidence before passing. The regression-testing confirmation is optional.',
+    'QA Testing': 'Confirm fresh verification of the tested build and select relevant evidence. Verification notes are optional. The regression-testing confirmation is optional.',
     'Business Acceptance': 'The business owner validates the fixed build against the agreed requirements.',
     'Ready for Release': 'The release owner deploys the approved fix and records the production build and reference.',
     'Production Verification': 'Verify the deployed fix in production and attach evidence before closing.',
@@ -257,10 +265,11 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
     if (['assess', 'Triaged'].includes(choice) && !['Unknown', 'Unaffected', 'Affected'].includes(data.production_impact)) {
       setError(new Error('Select a valid production impact')); return
     }
-    if (!(data.remarks || '').trim()) { setError(new Error(choice === 'Rejected' ? 'Enter the rejection reason' : 'Enter the observed result or decision rationale')); return }
+    if (notesRequired && !(data.remarks || '').trim()) { setError(new Error(`${notesLabel} is required`)); return }
+    if (confirmationRequired && data.verification_confirmed !== true) { setError(new Error('Confirm fresh verification of this defect for the current build and environment')); return }
     if (choice === 'Duplicate' && !data.duplicate_defect_id) { setError(new Error('Select the canonical defect')); return }
     if (choice === 'Ready for QA' && (!(data.root_cause || '').trim() || !(data.fix_details || '').trim())) { setError(new Error('Root cause and fix details are required')); return }
-    if (requiresReference && !(data.reference || '').trim() && !pendingFiles.length) { setError(new Error('Upload supporting evidence or enter an evidence / deployment reference')); return }
+    if (requiresReference && !(data.reference || '').trim() && !pendingFiles.length && !selectedEvidenceIds.length) { setError(new Error('Select attached evidence, upload supporting evidence or enter an evidence / deployment reference')); return }
     if (!(await confirmDefectSubmission())) return
     setBusy(true)
     const action = ['occurrence', 'assess', 'block', 'unblock'].includes(choice) ? choice : 'transition'
@@ -274,7 +283,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
       }
       setUploadStatus('Saving workflow action…')
       const updated = await api.post<DefectOut>(`/api/defects/${defect.id}/workflow-action`, {
-        ...data, evidence_document_ids: pendingFiles.map(file => uploaded.current.get(file)!.id), action, status: action === 'transition' ? choice : undefined, revision: defect.workflow_revision,
+        ...data, evidence_document_ids: [...new Set([...selectedEvidenceIds, ...pendingFiles.map(file => uploaded.current.get(file)!.id)])], action, status: action === 'transition' ? choice : undefined, revision: defect.workflow_revision,
       })
       setChoice(''); onRequestedActionChange?.(''); onChanged(updated)
     } catch (e) { setError(e) } finally { setBusy(false); setUploadStatus('') }
@@ -327,15 +336,18 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
           {richField('fix_details', 'Fix details', 'Describe the changes made and what QA should verify…')}
         </>}
         {choice === 'Not a Defect' && <Field label="QA classification *"><select required value={data.resolution_type || ''} onChange={e => setData({ ...data, resolution_type: e.target.value })}><option value="">Select classification</option>{['Working as Designed', 'Requirement Misunderstanding', 'Environment Issue Resolved', 'Test Data Issue', 'Configuration Issue', 'Documentation Updated'].map(value => <option key={value}>{value}</option>)}</select></Field>}
-        {richField('remarks', choice === 'Rejected' ? 'Rejection reason' : choice === 'Ready for QA' ? 'QA handoff notes' : choice === 'Change Request Raised' ? 'QA enhancement decision' : 'Observed result / decision rationale', choice === 'Rejected' ? 'Explain why QA is rejecting this report and how the supporting evidence justifies the decision…' : choice === 'Ready for QA' ? 'Describe the expected behavior, testing scope, and any important conditions…' : choice === 'Change Request Raised' ? 'Explain the requirement gap, triage participants, and why a Change Request is the correct outcome…' : 'Describe what you observed and why this action is appropriate…')}
+        {notesRequired && richField('remarks', notesLabel, `Explain the ${notesLabel.toLowerCase()}…`)}
       </section>
-      <section className="workflow-evidence-section"><h5>Supporting evidence{choice === 'Rejected' ? ' *' : ''}</h5><p>{choice === 'Rejected' ? 'QA must attach supporting evidence or provide an evidence reference before rejecting this defect.' : 'Upload screenshots, logs or documents. You can also paste screenshots into the editors above.'}</p>
+      {!notesRequired && <details className="workflow-optional-notes"><summary>Add notes (optional)</summary>{richField('remarks', notesLabel, 'Add context only when it helps the next owner…', false)}</details>}
+      <details className="workflow-evidence-section" open={requiresReference || evidenceExpanded} onToggle={event => setEvidenceExpanded(event.currentTarget.open)}><summary>Supporting evidence{requiresReference ? ' *' : ' (optional)'}</summary><p>Select existing evidence, add files or provide a reference. Evidence selection does not confirm a test result.</p>
+        {(requiresReference || evidenceExpanded) && <DefectEvidencePicker defectId={defect.id} selectedIds={selectedEvidenceIds} onChange={setSelectedEvidenceIds} disabled={busy} />}
         <label className="workflow-evidence-upload"><strong>Add evidence files</strong><span>Choose one or more files to attach to this action</span><input aria-label="Upload workflow evidence" type="file" multiple disabled={busy} onChange={e => { const added = Array.from(e.target.files || []); setFiles(current => [...current, ...added]); e.target.value = '' }} /></label>
         {files.length > 0 && <ul className="workflow-evidence-files">{files.map((file, index) => <li key={`${file.name}-${index}`}><span><strong>{file.name}</strong><small>{Math.max(1, Math.round(file.size / 1024))} KB{uploaded.current.has(file) ? ' · Uploaded' : ' · Ready to upload'}</small></span><button type="button" className="btn btn-sm" disabled={busy} aria-label={`Remove ${file.name}`} onClick={() => setFiles(current => current.filter((_, i) => i !== index))}>Remove</button></li>)}</ul>}
         {Object.values(fieldImages).flat().length > 0 && <p className="muted small">{Object.values(fieldImages).flat().length} inline screenshot(s) will also be attached.</p>}
         {requiresReference && richField('reference', choice === 'Rejected' ? 'Rejection evidence reference (or attach a file)' : 'Evidence notes / deployment reference', choice === 'Rejected' ? 'Provide a requirement, test result, log, or screenshot reference supporting the rejection…' : 'Add a change ID, deployment reference, test result link, or explain the attached evidence…', false)}
-        {requiresReference && <p className="muted small">Provide an attachment or an evidence reference before saving.</p>}
-      </section>
+        {requiresReference && <p className="muted small">Select an attached file, upload evidence or provide a reference before saving.</p>}
+      </details>
+      {confirmationRequired && <label className="workflow-verification-check"><input required disabled={busy} type="checkbox" checked={data.verification_confirmed === true} onChange={event => setData(current => ({ ...current, verification_confirmed: event.target.checked }))} /> I verified this defect in {defect.status === 'Production Verification' ? 'Production' : defect.status === 'Business Acceptance' ? workflow.business_environment : workflow.qa_environment} on the tested build and confirm it passed *</label>}
       {defect.status === 'QA Testing' && forward && <label className="workflow-regression-check"><input disabled={busy} type="checkbox" checked={!!data.regression_confirmed} onChange={e => setData({ ...data, regression_confirmed: e.target.checked })} /> Confirmation and applicable regression testing passed <small>(optional)</small></label>}
       <ErrorText error={candidateError || error} /><div className="workflow-action-footer"><span role="status">{uploadStatus || 'Review before submitting. Submitted action details cannot be edited.'}</span><div className="workflow-actions"><button className="btn btn-primary" disabled={busy || loadingCandidates || !!candidateError}>{busy ? 'Saving…' : submitActionLabel}</button><button type="button" className="btn" disabled={busy} onClick={clearAction}>Cancel</button></div></div>
     </form>}

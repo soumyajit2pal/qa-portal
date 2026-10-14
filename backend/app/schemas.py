@@ -1,6 +1,7 @@
 import datetime
 from typing import Optional, List, Dict, Literal
 from pydantic import (
+    StrictBool,
     Field,
     BaseModel,
     ConfigDict,
@@ -418,6 +419,18 @@ def _plain_maintenance_text(value: str, *, label: str) -> str:
     if any(ord(character) < 32 and character not in "\n\r\t" for character in normalized):
         raise ValueError(f"{label} contains unsupported control characters")
     return normalized
+
+
+class ApplicationCreationPolicyOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+    revision: int = Field(ge=0, strict=True)
+
+
+class ApplicationCreationPolicyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+    expected_revision: int = Field(ge=0, strict=True)
 
 
 class MaintenanceWindowUpdate(BaseModel):
@@ -1545,6 +1558,107 @@ class RequestSignoffIn(BaseModel):
 
 
 # ---------------- Module 4/5: SAST / DAST ----------------
+class SecurityObstacleCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    kind: Literal["REQUESTER", "INTERNAL"]
+    target_ids: List[int] = Field(default_factory=list, max_length=100)
+    category: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=2000)
+    requested_correction: str = Field(min_length=1, max_length=2000)
+    owner_id: Optional[int] = None
+    require_dept_head_reapproval: StrictBool = False
+    allow_scope_additions: StrictBool = False
+
+
+class SecurityObstacleScopePermission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    revision: int = Field(ge=1, strict=True)
+    allow_scope_additions: StrictBool
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class SecurityObstacleRouting(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    revision: int = Field(ge=1, strict=True)
+    kind: Literal["REQUESTER", "INTERNAL"]
+    owner_id: Optional[int] = None
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class SecurityNewRepositoryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    repository_url: str = Field(min_length=1, max_length=1000)
+    git_branch: str = Field(min_length=1, max_length=500)
+    commit_id: str = Field(min_length=1, max_length=500)
+    technology_stack: str = Field(min_length=1, max_length=500)
+    build_number: str = Field(min_length=1, max_length=300)
+
+
+class SecurityObstacleCorrection(BaseModel):
+    """Only existing, affected scope rows may be patched; no identity replacement."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    target_id: int
+    repository_url: Optional[str] = Field(default=None, max_length=1000)
+    git_branch: Optional[str] = Field(default=None, max_length=500)
+    commit_id: Optional[str] = Field(default=None, max_length=500)
+    technology_stack: Optional[str] = Field(default=None, max_length=500)
+    build_number: Optional[str] = Field(default=None, max_length=300)
+    application_url: Optional[str] = Field(default=None, max_length=2000)
+    environment: Optional[str] = Field(default=None, max_length=500)
+    authentication_required: Optional[Literal["Yes", "No"]] = None
+    test_credentials: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SecurityObstacleSubmit(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    revision: int = Field(ge=1, strict=True)
+    resolution: Optional[str] = Field(default=None, max_length=2000)
+    corrections: List[SecurityObstacleCorrection] = Field(default_factory=list, max_length=100)
+    new_repositories: List[SecurityNewRepositoryIn] = Field(default_factory=list, max_length=100)
+    scope_change_reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SecurityObstacleReview(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    revision: int = Field(ge=1, strict=True)
+    decision: Literal["Resume", "Return"]
+    verification_confirmed: StrictBool = False
+    readiness_confirmed: StrictBool = False
+    comments: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SecurityObstacleApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    revision: int = Field(ge=1, strict=True)
+    decision: Literal["Approve", "Return"]
+    comments: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SecurityObstacleOut(ORMModel):
+    id: int
+    kind: str
+    status: str
+    revision: int
+    target_ids: List[int]
+    changed_fields: List[str]
+    allow_scope_additions: bool = False
+    added_target_ids: List[int] = Field(default_factory=list)
+    category: str
+    reason: str
+    requested_correction: str
+    resume_stage: str
+    owner_id: Optional[int] = None
+    opened_by_id: int
+    submitted_by_id: Optional[int] = None
+    reviewed_by_id: Optional[int] = None
+    readiness_required: bool
+    reapproval_required: bool
+    resolution: Optional[str] = None
+    created_at: datetime.datetime
+    submitted_at: Optional[datetime.datetime] = None
+    reviewed_at: Optional[datetime.datetime] = None
+
+
 class SASTCreate(BaseModel):
     application_name: str
     epic_number: Optional[str] = None
@@ -1638,6 +1752,7 @@ class SASTListOut(ORMModel):
 
 
 class SASTOut(ORMModel):
+    obstacles: List[SecurityObstacleOut] = Field(default_factory=list)
     missing_testing_types: List[str] = Field(default_factory=list)
     request_types: Optional[str] = None
     id: int
@@ -1757,6 +1872,7 @@ class DASTListOut(ORMModel):
 
 
 class DASTOut(ORMModel):
+    obstacles: List[SecurityObstacleOut] = Field(default_factory=list)
     missing_testing_types: List[str] = Field(default_factory=list)
     request_types: Optional[str] = None
     id: int
@@ -2148,7 +2264,8 @@ class DefectCreate(BaseModel):
     test_case_id: Optional[int] = None
     execution_id: Optional[int] = None
     test_case_ids: List[int] = []
-    module_feature: str
+    module_feature: Optional[str] = Field(default=None, max_length=150,
+        description='Feature / Area. Defaults from the pinned testcase version only when omitted for an execution report; required otherwise.')
     environment: str
     severity: str
     priority: str
@@ -2224,6 +2341,9 @@ class DefectCCUpdate(BaseModel):
 
 class DefectTransition(BaseModel):
     status: str
+    revision: Optional[int] = Field(default=None, ge=0)
+    verification_confirmed: bool = Field(default=False, strict=True)
+    evidence_document_ids: List[int] = Field(default_factory=list, max_length=50)
     assignee_id: Optional[int] = None
     assigned_team: Optional[str] = None
     retest_tester_id: Optional[int] = None
@@ -4132,7 +4252,7 @@ class DefectLinkableExecutionOut(ORMModel):
     mirrors the frontend's own pre-existing `ExecutionContext` shape
     (project + cycle + execution) exactly, so Defects.tsx's own dropdown/
     picker code needs no logic changes, only its data source."""
-    module_name: Optional[str] = None
+    feature_area: Optional[str] = Field(default=None, description='Feature / Area from the execution pinned testcase version, independent of application modules.')
     project: TestProjectOut
     cycle: TestCycleOut
     execution: TestExecutionOut
@@ -4413,6 +4533,7 @@ class DefectWorkflowAction(BaseModel):
     review_date: Optional[datetime.date] = None
     duplicate_defect_id: Optional[int] = None
     regression_confirmed: bool = False
+    verification_confirmed: bool = Field(default=False, strict=True)
     evidence_document_ids: List[int] = Field(default_factory=list, max_length=50)
 
     _limit_rich_text = field_validator("remarks", "root_cause", "fix_details", "reference")(_limited_rich_text)

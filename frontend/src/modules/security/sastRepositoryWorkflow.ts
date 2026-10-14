@@ -4,6 +4,10 @@ export const SAST_ACTIVE_SCAN_STATUSES = ['CONFIGURATION', 'SCANNING', 'FINDING_
 export const SAST_REVERIFICATION_STATUSES = ['CLOSED', 'REPORT_READY', 'SECURITY_COMPLETE']
 
 export const REPOSITORY_STATE_LABELS: Record<SASTRepositoryState, string> = {
+  REQUESTER_ACTION_REQUIRED: 'Awaiting requester action',
+  INTERNAL_HOLD: 'Internal hold',
+  QA_REVIEW_PENDING: 'Ready for QA review',
+  SCOPE_APPROVAL_PENDING: 'Scope reapproval pending',
   NOT_SCANNED: 'Not scanned',
   AWAITING_VALIDATION: 'Awaiting validation',
   WAITING_FOR_FIX: 'Waiting for fix',

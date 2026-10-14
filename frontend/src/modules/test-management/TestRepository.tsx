@@ -1286,7 +1286,7 @@ function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
 // compared stay visible alongside their differences.
 const _CONTENT_VERSION_FIELDS: Array<[keyof TestCaseVersionOut, string]> = [
   ['epic_id', 'Epic ID'], ['cr_number', 'CR Number'], ['feature_id', 'Feature ID'],
-  ['user_story_id', 'User Story ID'], ['test_type', 'Test Type'], ['module_name', 'Module'],
+  ['user_story_id', 'User Story ID'], ['test_type', 'Test Type'], ['module_name', 'Feature / Area'],
   ['test_scenario', 'Test Scenario'], ['pre_condition', 'Pre-condition'],
   ['description', 'Description'], ['priority', 'Priority'],
 ]
@@ -1922,7 +1922,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
     const stepErrors = testCaseStepErrors(steps)
     const missing: string[] = []
     if (!testType.trim()) missing.push('Test Type')
-    if (!moduleName.trim()) missing.push('Module Name')
+    if (!moduleName.trim()) missing.push('Feature / Area')
     if (!priority.trim()) missing.push('Priority')
     if (!scenario.trim()) missing.push('Test Scenario')
     if (!description.trim()) missing.push('Description')
@@ -2000,8 +2000,9 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
               {TEST_CASE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
-          <Field label="Module Name *">
+          <Field label="Feature / Area *">
             <input required value={moduleName} onChange={(e) => setModuleName(e.target.value)} disabled={readOnly} />
+            <small className="muted">Specific functionality tested; separate from the application module.</small>
           </Field>
           <Field label="Priority *">
             <select required value={priority} onChange={(e) => setPriority(e.target.value)} disabled={readOnly}>
@@ -2368,7 +2369,7 @@ function BulkUpdateModal({ projectId, selectedCases, folders, onClose, onUpdated
     }
     if (updatePriority) changes.push(`Priority → ${priority}`)
     if (updateTestType) changes.push(`Test Type → ${testType}`)
-    if (updateModule) changes.push(`Module Name → ${moduleName.trim() || 'None'}`)
+    if (updateModule) changes.push(`Feature / Area → ${moduleName.trim() || 'None'}`)
     if (updateTags) changes.push(`Tags → ${tags.trim() || 'None'}`)
     return changes
   }, [folder, folders, priority, testType, moduleName, tags, updateFolder, updatePriority, updateTestType, updateModule, updateTags])
@@ -2464,8 +2465,8 @@ function BulkUpdateModal({ projectId, selectedCases, folders, onClose, onUpdated
             <BulkFieldCard title="Test Type" description="Change testing category" enabled={updateTestType} onToggle={setUpdateTestType} disabled={testcaseFieldsLocked}>
               <select required={updateTestType} value={testType} onChange={(e) => setTestType(e.target.value)}><option value="">Select test type</option>{TEST_CASE_TYPES.map((type) => <option key={type}>{type}</option>)}</select>
             </BulkFieldCard>
-            <BulkFieldCard title="Module Name" description="Organize by product module" enabled={updateModule} onToggle={setUpdateModule} disabled={testcaseFieldsLocked}>
-              <input value={moduleName} onChange={(e) => setModuleName(e.target.value)} placeholder="Blank removes module name" />
+            <BulkFieldCard title="Feature / Area" description="Identify the functionality tested" enabled={updateModule} onToggle={setUpdateModule} disabled={testcaseFieldsLocked}>
+              <input value={moduleName} onChange={(e) => setModuleName(e.target.value)} placeholder="Blank clears feature / area" />
             </BulkFieldCard>
             <BulkFieldCard title="Tags / Labels" description="Replace searchable labels" enabled={updateTags} onToggle={setUpdateTags} wide disabled={testcaseFieldsLocked}>
               <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="smoke, payments, regression — blank removes tags" />

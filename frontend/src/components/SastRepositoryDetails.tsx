@@ -30,26 +30,40 @@ export default function SastRepositoryDetails({
   hashValue,
   onHashChange,
   sectionNumber = '02',
+  allowAdd = true,
+  showHash = true,
+  isReadOnlyRow = () => false,
+  canRemoveRow = () => true,
+  rowStatus,
+  rowKey,
 }: {
   rows: SastRepositoryRow[]
   onChange: (rows: SastRepositoryRow[]) => void
   hashValue: string
   onHashChange: (value: string) => void
   sectionNumber?: string
+  allowAdd?: boolean
+  showHash?: boolean
+  isReadOnlyRow?: (index: number) => boolean
+  canRemoveRow?: (index: number) => boolean
+  rowStatus?: (index: number) => React.ReactNode
+  rowKey?: (index: number) => React.Key
 }) {
   const fieldHelpId = useId()
   const data = rows.length ? rows : [blankSastComponent()]
 
   function setAt(index: number, key: string, value: string) {
+    if (isReadOnlyRow(index)) return
     onChange(data.map((row, rowIndex) => rowIndex === index ? { ...row, [key]: value } : row))
   }
 
   function addRepository() {
+    if (!allowAdd) return
     onChange([...data, blankSastComponent()])
   }
 
   function removeRepository(index: number) {
-    if (data.length <= 1) return
+    if (data.length <= 1 || !canRemoveRow(index) || isReadOnlyRow(index)) return
     onChange(data.filter((_, rowIndex) => rowIndex !== index))
   }
 
@@ -61,14 +75,15 @@ export default function SastRepositoryDetails({
           <h4>Repository and build details</h4>
           <p>Add one complete, traceable record for every repository included in the scan.</p>
         </div>
-        <button type="button" className="btn security-add-button" onClick={addRepository}>+ Add repository</button>
+        {allowAdd && <button type="button" className="btn security-add-button" onClick={addRepository}>+ Add repository</button>}
       </div>
       <div className="security-target-list">
         {data.map((repository, index) => (
-          <div className="security-target-card" key={index}>
+          <div className="security-target-card" key={rowKey ? rowKey(index) : index}>
             <div className="security-target-card-head">
               <span>Repository {String(index + 1).padStart(2, '0')}</span>
-              {data.length > 1 && (
+              {rowStatus && <span className="badge badge-gray">{rowStatus(index)}</span>}
+              {data.length > 1 && canRemoveRow(index) && !isReadOnlyRow(index) && (
                 <button type="button" className="security-remove-button" aria-label={`Remove repository ${index + 1}`} onClick={() => removeRepository(index)}>Remove</button>
               )}
             </div>
@@ -78,6 +93,7 @@ export default function SastRepositoryDetails({
                   <span>{field.label} *</span>
                   <input
                     required
+                    disabled={isReadOnlyRow(index)}
                     value={repository[field.key] || ''}
                     placeholder={field.placeholder || field.label}
                     aria-describedby={field.key === 'repository_url' ? `${fieldHelpId}-${index}` : undefined}
@@ -94,12 +110,12 @@ export default function SastRepositoryDetails({
           </div>
         ))}
       </div>
-      <div className="security-hash-field">
+      {showHash && <div className="security-hash-field">
         <Field label="SHA256 / MD5 Hash">
           <input value={hashValue} onChange={(event) => onHashChange(event.target.value)} placeholder="Optional build or artifact hash" />
         </Field>
         <p>Optional, but recommended when a packaged build or artifact is supplied for scanning.</p>
-      </div>
+      </div>}
     </section>
   )
 }

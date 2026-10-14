@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../api";
 import { istToday } from "../../time";
-import { Field, Modal } from "../../components/Common";
+import { ErrorText, Field, Modal } from "../../components/Common";
 import SearchableSelect from "../../components/SearchableSelect";
+import NewApplicationDisabledModal from "../../components/NewApplicationDisabledModal";
 import RoleGroupLink from "../../components/RoleGroupLink";
 import { IconUsers } from "../../components/Icons";
 import { CHANGE_TYPES, DEPLOYMENT_ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
-import { ApplicationMasterOut } from "../../types";
+import { ApplicationMasterOut, ApplicationCreationPolicyOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
 import { ModuleNameField } from "./ModuleNameField";
 import { CHANGE_REFERENCE_REGEX, CHANGE_REFERENCE_MAX_LENGTH, CHANGE_REFERENCE_FORMAT_ERROR } from "../../changeReference";
@@ -53,16 +54,48 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
   const [approvedNames, setApprovedNames] = useState<ApplicationMasterOut[]>(
     []
   );
+  const [approvedNamesLoaded, setApprovedNamesLoaded] = useState(false);
   const [showOther, setShowOther] = useState(false);
   const [showNewApplicationWarning, setShowNewApplicationWarning] = useState(false);
+  const [applicationCreationEnabled, setApplicationCreationEnabled] = useState(false);
+  const [checkingCreationPolicy, setCheckingCreationPolicy] = useState(false);
+  const [showCreationDisabled, setShowCreationDisabled] = useState(false);
+  const [creationPolicyError, setCreationPolicyError] = useState<unknown>(null);
   const [bugFixSources, setBugFixSources] = useState<BugFixSourceOption[]>([]);
 
   useEffect(() => {
     api
       .get<ApplicationMasterOut[]>("/api/application-names")
-      .then(setApprovedNames)
+      .then(names => { setApprovedNames(names); setApprovedNamesLoaded(true); })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    api.getFresh<ApplicationCreationPolicyOut>("/api/system-settings/application-creation")
+      .then(policy => { if (active) setApplicationCreationEnabled(policy.enabled); })
+      .catch(error => { if (active) setCreationPolicyError(error); });
+    return () => { active = false; };
+  }, []);
+
+  async function creationAllowed() {
+    setCheckingCreationPolicy(true); setCreationPolicyError(null);
+    try {
+      // Recheck at activation so an already-open wizard observes admin changes.
+      const policy = await api.getFresh<ApplicationCreationPolicyOut>("/api/system-settings/application-creation");
+      setApplicationCreationEnabled(policy.enabled);
+      if (!policy.enabled) { setShowNewApplicationWarning(false); setShowCreationDisabled(true); }
+      return policy.enabled;
+    } catch (error) {
+      setApplicationCreationEnabled(false); setCreationPolicyError(error);
+      setShowNewApplicationWarning(false); setShowCreationDisabled(true);
+      return false;
+    } finally { setCheckingCreationPolicy(false); }
+  }
+
+  async function chooseOther() {
+    if (await creationAllowed()) setShowNewApplicationWarning(true);
+  }
 
   // Once the approved list has loaded, figure out whether the current value
   // (e.g. re-opening a Draft that already has a still-pending "Other" name,
@@ -70,12 +103,12 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
   // needs the "Other" textbox shown instead -- covers both "brand new,
   // nothing typed yet" and "editing an existing Draft" the same way.
   useEffect(() => {
-    if (!form.application_name) return;
+    if (!approvedNamesLoaded || !form.application_name) return;
     const isApproved = approvedNames.some(
       (a) => a.name === form.application_name
     );
-    if (!isApproved) setShowOther(true);
-  }, [approvedNames, form.application_name]);
+    setShowOther(!isApproved);
+  }, [approvedNamesLoaded, approvedNames, form.application_name]);
 
   // A Bug Fix or Enhancement may point back to the completed Functional Testing
   // request where the original implementation was verified. The endpoint
@@ -106,6 +139,7 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
 
   return (
     <>
+      {showCreationDisabled && <NewApplicationDisabledModal onClose={() => setShowCreationDisabled(false)} />}
       {showNewApplicationWarning && (
         <Modal
           title="New application name warning"
@@ -158,7 +192,9 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
             <button
               type="button"
               className="btn"
-              onClick={() => {
+              disabled={checkingCreationPolicy}
+              onClick={async () => {
+                if (!(await creationAllowed())) return;
                 setShowNewApplicationWarning(false);
                 if (!showOther) set("application_name", "");
                 setShowOther(true);
@@ -181,9 +217,10 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
             <SearchableSelect
               value={showOther ? OTHER : form.application_name}
               placeholder="Select Application Name"
+              disabled={checkingCreationPolicy}
               onChange={(v) => {
                 if (v === OTHER) {
-                  setShowNewApplicationWarning(true);
+                  void chooseOther();
                 } else {
                   setShowOther(false);
                   set("application_name", v);
@@ -191,9 +228,10 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
               }}
               options={[
                 ...approvedNames.map((a) => ({ value: a.name, label: a.name })),
-                { value: OTHER, label: "Other (new application)" },
+                { value: OTHER, label: "Other (new application)", disabled: !applicationCreationEnabled, onDisabledSelect: () => { void chooseOther(); } },
               ]}
             />
+            <ErrorText error={creationPolicyError} />
             {showOther && (
               <>
                 <input

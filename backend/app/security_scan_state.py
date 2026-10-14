@@ -1,6 +1,28 @@
 """Resolve current findings without inventing scans for unchanged targets."""
 import hashlib
 
+OBSTACLE_STATES = {"REQUESTER_ACTION_REQUIRED", "INTERNAL_HOLD", "QA_REVIEW_PENDING", "SCOPE_APPROVAL_PENDING"}
+
+
+def active_obstacles(obj):
+    return [row for row in getattr(obj, "obstacles", []) if row.status != "RESOLVED"]
+
+
+def obstacle_state(row):
+    if row.status == "QA_REVIEW_PENDING":
+        return "QA_REVIEW_PENDING"
+    if row.status == "SCOPE_APPROVAL_PENDING":
+        return "SCOPE_APPROVAL_PENDING"
+    return "REQUESTER_ACTION_REQUIRED" if row.kind == "REQUESTER" else "INTERNAL_HOLD"
+
+
+def overlay_obstacles(obj, states):
+    for obstacle in active_obstacles(obj):
+        for row in states:
+            if not obstacle.target_ids or row["target_id"] in obstacle.target_ids:
+                row["state"] = obstacle_state(obstacle)
+    return states
+
 
 def _target_ids(row) -> set:
     return {target["id"] for target in (getattr(row, "targets", None) or [])
@@ -110,7 +132,7 @@ def repository_states(obj, results) -> list[dict]:
             "fix_submitted_at": getattr(component, "fix_submitted_at", None),
             "fix_submitted_by_id": getattr(component, "fix_submitted_by_id", None),
         })
-    return states
+    return overlay_obstacles(obj, states)
 
 
 def all_repositories_clear(obj, results) -> bool:
@@ -175,7 +197,7 @@ def target_states(obj, results) -> list[dict]:
             "latest_scan_id": result.id if result else None, "open_findings": open_count,
             "fix_submitted_at": target.fix_submitted_at, "fix_submitted_by_id": target.fix_submitted_by_id,
         })
-    return states
+    return overlay_obstacles(obj, states)
 
 
 dast_target_states = target_states

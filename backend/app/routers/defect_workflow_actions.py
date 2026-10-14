@@ -5,6 +5,7 @@ from .. import models, reassignment
 from ..constants import Role, ENVIRONMENTS
 from ..defect_assignment import current_defect_responsibility
 from ..defect_workflow import state, policy, transitions, environment_for, production_required
+from ..defect_action_evidence import selected_evidence
 
 
 def apply_action(db, obj, payload, user):
@@ -50,14 +51,13 @@ def apply_action(db, obj, payload, user):
             obj.assignee_id = resolver_id
             obj.assigned_team = resolver_event.get('assigned_team') or obj.assigned_team
 
-    if payload.evidence_document_ids:
-        available = {doc.id: doc for doc in d.doc_store.list_documents(db, d._DOC_MODULE, obj.id)}
-        evidence_ids = list(dict.fromkeys(payload.evidence_document_ids))
-        if any(doc_id not in available for doc_id in evidence_ids):
-            raise HTTPException(400, 'Evidence must be attached to this defect')
-        event['evidence_documents'] = [{'id': doc_id, 'file_name': available[doc_id].file_name} for doc_id in evidence_ids]
+    evidence_documents, evidence_reference = selected_evidence(db, obj, payload.evidence_document_ids)
+    if evidence_documents:
+        event['evidence_documents'] = evidence_documents
         if not (payload.reference or '').strip():
-            payload = payload.model_copy(update={'reference': 'Attached evidence: ' + ', '.join(available[doc_id].file_name for doc_id in evidence_ids)})
+            payload = payload.model_copy(update={'reference': evidence_reference})
+    notes = (payload.remarks or '').strip() or None
+    event['reference'] = (payload.reference or '').strip() or None
 
     def required(value, name):
         if value is None or not str(value).strip():
@@ -79,12 +79,16 @@ def apply_action(db, obj, payload, user):
         return candidate
 
     def verification(result):
+        if result == 'Passed' and not payload.verification_confirmed:
+            raise HTTPException(400, 'Confirm fresh verification of this defect for the current build and environment')
         env = environment_for(obj, previous)
         build = required(payload.build, 'Tested build')
         evidence = required(payload.reference, 'Evidence reference')
-        notes = required(payload.remarks, 'Observed result and verification notes')
+        observed = required(notes, 'Failure observed / reopening reason') if result == 'Failed' else notes
         event.update(kind='verification', stage=previous, environment=env, build=build,
-                     result=result, reference=evidence, remarks=notes)
+                     result=result, reference=evidence, remarks=observed)
+        if result == 'Passed':
+            event.update(verification_confirmed=True, confirmation_revision=payload.revision)
         # Regression confirmation is optional.  Retain an explicitly supplied
         # answer in the immutable workflow history without manufacturing a
         # value for older clients that omit the field.
@@ -92,7 +96,7 @@ def apply_action(db, obj, payload, user):
             event['regression_confirmed'] = payload.regression_confirmed
         obj.tested_build_version = build
         obj.retest_result = result
-        obj.retest_actual_result = notes
+        obj.retest_actual_result = observed
         obj.retest_remarks = evidence
         obj.retest_at = models.now()
 
@@ -116,7 +120,7 @@ def apply_action(db, obj, payload, user):
         event.update(kind='blocked', **s['blocked'])
     elif payload.action == 'unblock':
         allowed(manager or (s.get('blocked') or {}).get('owner_id') == user.id)
-        event.update(kind='unblocked', remarks=required(payload.remarks, 'Unblocking reason'))
+        event.update(kind='unblocked', remarks=notes)
         s.pop('blocked', None)
     elif payload.action == 'transition':
         target = payload.status
@@ -124,7 +128,7 @@ def apply_action(db, obj, payload, user):
             raise HTTPException(400, f'Invalid transition from {previous} to {target}')
         if s.get('blocked'):
             raise HTTPException(400, 'Clear the blocker before changing stage')
-        event.update(kind='transition', to=target, remarks=payload.remarks)
+        event.update(kind='transition', to=target, remarks=notes)
         if target == 'Triaged':
             allowed(d._can_assign(db, obj, user))
             impact = payload.production_impact
@@ -139,8 +143,8 @@ def apply_action(db, obj, payload, user):
             obj.assigned_team = dept
             obj.assigned_by_id = user.id
             obj.assigned_at = models.now()
-            obj.assignment_remarks = required(payload.remarks, 'Triage assessment')
-            event.update(assignee_id=person.id, assigned_team=dept)
+            obj.assignment_remarks = notes
+            event.update(assignee_id=person.id, assignee_name=person.full_name, assigned_team=dept, production_impact=s['production_impact'])
             s['release_owner_id'] = owner(payload.release_owner_id, 'release owner').id if payload.release_owner_id else None
             if p['business_acceptance']:
                 s['business_owner_id'] = owner(payload.business_owner_id, 'business acceptance owner').id
@@ -163,7 +167,8 @@ def apply_action(db, obj, payload, user):
             s['deployed_build'] = obj.fixed_build_version
             s['qa_build'] = obj.fixed_build_version
             event.update(iteration=s['iteration'], kind='deployment', environment=p['qa_environment'],
-                         build=obj.fixed_build_version, reference=required(payload.reference, 'Deployment/change reference'))
+                         build=obj.fixed_build_version, qa_owner_id=qa_owner.id,
+                         reference=required(payload.reference, 'Deployment/change reference'))
         elif target == 'Not a Defect Review':
             # A resolver may propose this outcome, but cannot finalize their
             # own decision.  Route it to a named QA reviewer so agreement or
@@ -241,19 +246,20 @@ def apply_action(db, obj, payload, user):
                 raise HTTPException(403, 'This disposition is controlled by the requester side')
             allowed(d._can_defer(db, obj, user) if target == 'Deferred' else
                     (manager or assignee or obj.reporter_id == user.id or d._is_assignee_department_head(db, obj, user)))
-            reason = required(payload.remarks, 'Decision reason')
             if target == 'Deferred':
-                obj.deferral_reason = reason
+                obj.deferral_reason = required(notes, 'Deferral reason')
                 obj.deferral_approved_by = str(user.id)
                 obj.target_release = required(payload.target_release, 'Target release')
                 if not payload.review_date or payload.review_date < models.today_ist():
                     raise HTTPException(400, 'Select a current or future review date')
                 obj.expected_resolution_date = payload.review_date
+                event.update(target_release=obj.target_release, review_date=payload.review_date.isoformat(), approved_by=user.id)
             elif target == 'Duplicate':
                 original = d._get_visible(payload.duplicate_defect_id, db, user)
                 if original.id == obj.id or original.status == 'Duplicate':
                     raise HTTPException(400, 'Select a different canonical defect')
                 obj.duplicate_of_id = original.id
+                event.update(duplicate_of_id=original.id, duplicate_of_key=original.defect_key)
         else:
             # Leaving verification records a passed result before release/closure.
             allowed(manager or (previous == 'QA Testing' and qa)
@@ -268,6 +274,7 @@ def apply_action(db, obj, payload, user):
             if target == 'Ready for Release':
                 obj.target_release = required(payload.target_release, 'Target release')
                 s['release_owner_id'] = owner(payload.release_owner_id or s.get('release_owner_id'), 'release owner').id
+                event.update(target_release=obj.target_release, release_owner_id=s['release_owner_id'])
             if target == 'Production Verification':
                 s['deployed_build'] = required(payload.build, 'Deployed production build')
                 event.update(kind='deployment', environment='Production', build=s['deployed_build'],
@@ -275,7 +282,7 @@ def apply_action(db, obj, payload, user):
             if target == 'Closed':
                 obj.closed_at = models.now()
                 obj.resolution_type = 'Fixed'
-                obj.closure_remarks = required(payload.remarks, 'Closure summary')
+                obj.closure_remarks = notes
         obj.status = target
     elif payload.action == 'assess':
         allowed(d._can_assign(db, obj, user))
@@ -288,9 +295,11 @@ def apply_action(db, obj, payload, user):
         if payload.production_impact != 'Affected' and (obj.environment == 'Production' or any(
                 e['environment'] == 'Production' for e in s.get('occurrences', []))):
             raise HTTPException(400, 'A recorded production occurrence requires production verification')
+        if payload.production_impact != s.get('production_impact', 'Unknown'):
+            required(notes, 'Impact change reason')
         s['production_impact'] = payload.production_impact
         event.update(kind='assessment', production_impact=payload.production_impact,
-                     remarks=required(payload.remarks, 'Assessment evidence and rationale'))
+                     remarks=notes)
     else:
         raise HTTPException(400, 'Unknown workflow action')
     s.setdefault('history', []).append(event)
@@ -299,8 +308,13 @@ def apply_action(db, obj, payload, user):
     db.query(models.TestRunDefect).filter(models.TestRunDefect.defect_key == obj.defect_key,
         models.TestRunDefect.defect_url.startswith('/defects')).update(
         {models.TestRunDefect.defect_status: obj.status}, synchronize_session=False)
-    comments = '\n'.join(str(x) for x in [event.get('remarks'), event.get('environment'),
-                           event.get('build'), event.get('result'), event.get('reference')] if x)
+    summary = f'{previous} → {obj.status}' if payload.action == 'transition' else event['kind']
+    comments = '\n'.join(str(x) for x in [summary, event.get('remarks') or event.get('reason'), event.get('environment'),
+                           event.get('build'), event.get('result'), event.get('reference'),
+                           event.get('duplicate_of_key'), event.get('production_impact'),
+                           event.get('assignee_name'), event.get('assigned_team'),
+                           event.get('target_release'), event.get('review_date'),
+                           'Fresh verification confirmed' if event.get('verification_confirmed') else None] if x)
     d._audit(db, obj, user, obj.status if payload.action == 'transition' else event['kind'],
              comments or event['kind'], previous, obj.status)
     db.commit()

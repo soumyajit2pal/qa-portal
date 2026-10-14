@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react'
-import { api, mapWithConcurrency } from '../api'
+import { api, HttpError, mapWithConcurrency } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { Modal, ErrorText } from '../components/Common'
 import ConfirmModal from '../components/ConfirmModal'
+import NewApplicationDisabledModal from '../components/NewApplicationDisabledModal'
 import { IconCheckCircle } from '../components/Icons'
 import { QARequestOut, DraftChecklistEvidenceOut, RequestTypeConfigOut } from '../types'
 import { EMPTY_FORM, QARequestForm, blankSastComponent, blankDastComponent } from './types'
@@ -184,6 +185,7 @@ export function NewRequestModal({ onClose, onCreated, editing, scopeAddition = f
   // each doing its own request). See loadSavedEvidence below.
   const [savedEvidence, setSavedEvidence] = useState<Record<string, DraftChecklistEvidenceOut[]>>({})
   const [error, setError] = useState<unknown>(null)
+  const [showCreationDisabled, setShowCreationDisabled] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stepIndex, setStepIndex] = useState(() => {
     const initialIndex = initialStepKey
@@ -351,6 +353,10 @@ export function NewRequestModal({ onClose, onCreated, editing, scopeAddition = f
       onCreated(saved)
     } catch (err) {
       if (scopeAddition) await loadSavedEvidence()
+      if (err instanceof HttpError && err.code === 'APPLICATION_CREATION_DISABLED') {
+        setShowCreationDisabled(true)
+        goToStep('details')
+      }
       setError(err)
     } finally {
       setBusy(false)
@@ -412,6 +418,7 @@ export function NewRequestModal({ onClose, onCreated, editing, scopeAddition = f
       // button or the footer's "Cancel"/"Save" buttons below can close it.
       preventBackdropClose
     >
+      {showCreationDisabled && <NewApplicationDisabledModal onClose={() => setShowCreationDisabled(false)} />}
       {/* Scoping wrapper -- every rule below keyed off `.qa-wizard` in index.css
           is intentionally scoped to just this wizard. `.form-section`,
           `.form-field`, `.chip-toggle`, `.checklist-row` and `.wizard-steps`/

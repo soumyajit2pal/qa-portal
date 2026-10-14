@@ -947,6 +947,8 @@ def _is_workflow_transition(action: models.ApprovalAction) -> bool:
     Without this guard, an evidence upload during SM approval would send a
     second, misleading SM reminder even though no workflow stage changed.
     """
+    if str(action.step_name or "").startswith("Security obstacle #") and action.entity_type in {"SAST", "DAST"}:
+        return True
     # Defects have an explicit state graph. Several legitimate stage names
     # contain none of the generic action keywords below, so use the recorded
     # state change as the authoritative signal. This covers creation and
@@ -995,6 +997,9 @@ def _notification_route(db, action, target):
     department = _department(target)
     workflow_departments = _workflow_departments(target)
     roles = _next_approver_roles(target)
+    if str(action.step_name or "").startswith("Security obstacle #") and action.entity_type in {"SAST", "DAST"}:
+        # Scoped routes already enforce each obstacle's independent owner.
+        roles = set()
     application_name_review = roles == {Role.APPLICATION_OWNER}
     department_scoped = bool(roles & {Role.SM, Role.DEPARTMENT_HEAD_CM,
                                      Role.DEPARTMENT_HEAD_AGM})
@@ -1125,7 +1130,8 @@ def _unfiltered_notification_route(db: SASession, action: models.ApprovalAction,
         return NotificationRoute(_user_ids(target.owner_id), "Cycle Owner", True,
             "You own this test cycle. Review its current status and continue the lifecycle.")
 
-    assigned_route = _security_remediation_route(db, target) or _assigned_user_route(target)
+    from .security_obstacles import notification_route as obstacle_notification_route
+    assigned_route = obstacle_notification_route(db, action, target) or _security_remediation_route(db, target) or _assigned_user_route(target)
     if assigned_route:
         logger.info(
             "SMTP workflow route evaluated reference=%s status=%s owner=individual eligible_recipient_count=%s",

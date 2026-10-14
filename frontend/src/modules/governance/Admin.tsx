@@ -16,6 +16,7 @@ import SearchableSelect from '../../components/SearchableSelect'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import TestProjectAdmin from './TestProjectAdmin'
+import ApplicationCreationSettings from './ApplicationCreationSettings'
 import { formatDateTimeIST, portalDate } from '../../time'
 import { hasOtherActiveWorkspace } from '../../workspaceMembership'
 import {
@@ -2139,6 +2140,7 @@ export default function Admin() {
       </div>}
 
       {section === 'applications' && <div className="access-workspace-panel access-departments-section">
+        <ApplicationCreationSettings />
         <ApplicationSeedCard departmentOptions={departmentOptions} departments={departments} />
       </div>}
 

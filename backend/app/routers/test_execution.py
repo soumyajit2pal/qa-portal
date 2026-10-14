@@ -2445,7 +2445,7 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
     ]
     return [
         {"project": execution.cycle.project, "cycle": execution.cycle, "execution": execution,
-         "module_name": (execution.pinned_version or execution.test_case).module_name}
+         "feature_area": execution.pinned_version.module_name if execution.pinned_version else None}
         for execution in executions
     ]
 

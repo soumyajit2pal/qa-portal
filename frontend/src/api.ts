@@ -217,6 +217,7 @@ export function isAdminAuthorizationRequest(path: string, method: string = 'GET'
   // mutations are System Administrator operations.
   if (pathname === '/api/system-settings/maintenance-window' && (verb === 'GET' || verb === 'PUT')) return true
   if (pathname === '/api/system-settings/maintenance-window/cancel' && verb === 'POST') return true
+  if (pathname === '/api/system-settings/application-creation' && verb === 'PUT') return true
   if (verb === 'POST' && pathname === '/api/application-names') return true
   if (/^\/api\/application-names\/\d+\/(?:department|name)$/.test(pathname) && verb === 'PATCH') return true
   if (pathname === '/api/application-names/bulk-seed-template') return true

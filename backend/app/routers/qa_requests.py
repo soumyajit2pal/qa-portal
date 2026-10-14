@@ -893,9 +893,9 @@ def _child_delegation_target(db: Session, qa_request_id: int, target_type: str,
         # fix submission, so a completed handoff cannot gain a new delegate.
         query = query.populate_existing().with_for_update()
         if model is models.SASTRequest:
-            query = query.options(selectinload(models.SASTRequest.components))
+            query = query.options(selectinload(models.SASTRequest.components), selectinload(models.SASTRequest.obstacles))
         elif model is models.DASTRequest:
-            query = query.options(selectinload(models.DASTRequest.targets))
+            query = query.options(selectinload(models.DASTRequest.targets), selectinload(models.DASTRequest.obstacles))
     # ORA-02014 when lock=True -- see assign_for_input's comment in this same
     # file for the full explanation. .one_or_none() instead of .first() is
     # identical here (model.id is the primary key, so at most one row either
@@ -966,13 +966,15 @@ def assign_child_for_input(qa_request_id: int, target_type: str, target_id: int,
     if target.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can delegate this request")
     scan_input_pending = False
+    obstacle_input_pending = normalized in {'SAST', 'DAST'} and any(
+        row.kind == 'REQUESTER' and row.status == 'OPEN' for row in target.obstacles)
     if normalized in {'SAST', 'DAST'} and target.status in {'CONFIGURATION', 'SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'ASSIGNED_TO_LEAD', 'RESCAN'}:
         from ..security_scan_state import repository_states, target_states
         scans = db.query(models.SecurityScanResult).filter_by(request_type=normalized, request_id=target.id).order_by(
             models.SecurityScanResult.imported_at.desc(), models.SecurityScanResult.id.desc()).all()
         resolve_states = repository_states if normalized == 'SAST' else target_states
         scan_input_pending = any(row['state'] in {'WAITING_FOR_FIX', 'STALE'} for row in resolve_states(target, scans))
-    if target.status not in requester_statuses and not scan_input_pending:
+    if target.status not in requester_statuses and not scan_input_pending and not obstacle_input_pending:
         raise HTTPException(400, "Delegation is available only while this request is with the requester for input or correction")
     if _active_child_delegation(db, normalized, target.id, lock=True):
         raise HTTPException(400, "This request already has an active delegation")
@@ -1405,6 +1407,9 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     # resolved after flush, once this row has an id to link back to.
     application_name_in = data.pop("application_name")
     name_upper = (application_name_in or "").strip().upper()
+    if not db.query(models.ApplicationMaster.id).filter_by(name=name_upper).scalar():
+        # Reject a stale/tampered new-name draft before allocating any records.
+        app_names.require_enabled(db)
     data["business_defect_number"] = _business_defect_number(
         data.get("business_defect_number"), data.get("change_type"),
     )

@@ -1,8 +1,13 @@
-import type { DefectLinkableExecutionOut } from './types'
+import type { DefectLinkableExecutionOut, QARequestListOut } from './types'
 
-/** Prefer the execution snapshot; an explicit null means no module. */
-export function defectExecutionModule(context?: DefectLinkableExecutionOut): string {
-  if (!context) return ''
-  if (Object.prototype.hasOwnProperty.call(context, 'module_name')) return context.module_name || ''
-  return context.execution.test_case?.module_name || ''
+/** A testcase area must never enter the application-module catalogue. */
+export function defectRequestModule(request?: Pick<QARequestListOut, 'module_name'>): string {
+  return request?.module_name || ''
+}
+
+/** Read only a pinned execution snapshot, including older API snapshots. */
+export function defectExecutionFeatureArea(context?: DefectLinkableExecutionOut): string {
+  if (!context?.execution.pinned_version_id) return ''
+  if (Object.prototype.hasOwnProperty.call(context, 'feature_area')) return context.feature_area || ''
+  return context.module_name || ''
 }

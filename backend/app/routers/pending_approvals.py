@@ -2,7 +2,7 @@ import datetime
 from typing import List, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import and_, func, or_, select, union_all
 from sqlalchemy.orm import Session, selectinload
 
@@ -801,7 +801,7 @@ def count_pending_approvals(db: Session = Depends(get_db),
     if is_system_admin(current_user):
         return {"count": len(_actionable_items(db, current_user))}
     branch_counts = db.execute(_pending_count_statement(db, current_user)).scalars().all()
-    return {"count": sum(int(value or 0) for value in branch_counts) + len(_test_case_items(db, current_user))}
+    return {"count": sum(int(value or 0) for value in branch_counts) + len(_test_case_items(db, current_user)) + len(_security_obstacle_items(db, current_user))}
 
 
 @router.get("", response_model=schemas.PendingApprovalPage)
@@ -819,6 +819,44 @@ def list_pending_approvals(
     return _paginate_pending_items(_actionable_items(db, current_user), params, category)
 
 
+def _security_obstacle_items(db, user):
+    if set(user.roles) & {Role.VIEW_ONLY, Role.SCALE_6_PLUS}:
+        return []
+    from ..security_obstacles import _reviewer, _input_owner
+    from . import sast_dast
+    results = []
+    for model, kind, path in ((models.SASTRequest, "SAST", "/sast"), (models.DASTRequest, "DAST", "/dast")):
+        query = db.query(model).filter(model.obstacles.any(models.SecurityObstacle.status != "RESOLVED"))
+        workspace_ids = active_qa_workspace_scope_ids(user)
+        if workspace_ids:
+            query = query.filter(model.qa_request.has(models.QARequest.qa_workspace_id.in_(workspace_ids)))
+        for obj in query.all():
+            try:
+                sast_dast._require_visible(db, obj, user)
+            except HTTPException:
+                continue
+            actionable = []
+            for row in obj.obstacles:
+                if row.status == "OPEN" and user.id == (_input_owner(obj) if row.kind == "REQUESTER" else row.owner_id):
+                    actionable.append("Requester action" if row.kind == "REQUESTER" else "Internal hold resolution")
+                elif row.status == "QA_REVIEW_PENDING" and user.id != row.submitted_by_id and _reviewer(obj, user):
+                    actionable.append("Fresh QA review")
+                elif row.status == "SCOPE_APPROVAL_PENDING" and user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.id not in {row.submitted_by_id, obj.requester_id}:
+                    try:
+                        sast_dast.require_same_department(user, obj.department)
+                        sast_dast.require_department_unit_action_scope(db, user, obj.department, obj.qa_request.department_unit_id if obj.qa_request else None)
+                        sast_dast._require_distinct_department_head_approver(db, obj, user)
+                    except HTTPException:
+                        continue
+                    actionable.append("Scope reapproval")
+            if actionable and admin_department_allowed(user, obj.department):
+                results.append(_item(f"{kind} -- Obstacles", kind, obj.id, obj.request_id,
+                    f"{kind}: " + ", ".join(dict.fromkeys(actionable)), obj.status,
+                    ", ".join(dict.fromkeys(actionable)), obj.department, _user_name(db, obj.requester_id),
+                    obj.updated_at, _detail_path(path, obj.request_id, obj.id), *_parent_context(obj)))
+    return results
+
+
 def _actionable_items(db, current_user):
     items = (
         _application_master_items(db, current_user)
@@ -828,6 +866,7 @@ def _actionable_items(db, current_user):
         + _signoff_items(db, current_user)
         + _test_project_items(db, current_user)
         + _test_case_items(db, current_user)
+        + _security_obstacle_items(db, current_user)
     )
     return [item for item in items
             if item["category"] == "Application Name -- Application Owner Approval"

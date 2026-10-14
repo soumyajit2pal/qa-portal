@@ -26,6 +26,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from . import models
+from .application_creation_policy import require_enabled
 
 
 def resolve_application_name(db: Session, name: Optional[str], department: Optional[str],
@@ -39,9 +40,10 @@ def resolve_application_name(db: Session, name: Optional[str], department: Optio
         can be saved as a draft, but submission requires the explicit
         application-name reconsideration action and a reason. This applies
         equally to the original request and a different request;
-      - otherwise a brand-new PENDING_APP_OWNER row is created.
-    Returns (uppercased_name, application_master_id). Otherwise never blocks
-    the caller: drafts can reference a name at any approval status. Submission
+      - otherwise a brand-new PENDING_APP_OWNER row is created only when
+        the System Admin has enabled new application creation.
+    Returns (uppercased_name, application_master_id). Existing names remain
+    reusable at any approval status, including drafts saved before disablement. Submission
     separately enforces reconsideration for rejected names and Application
     Owner review for pending names. Deliberately does
     NOT block simply because a name "already exists or is pending" -- reusing
@@ -63,6 +65,7 @@ def resolve_application_name(db: Session, name: Optional[str], department: Optio
     existing = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.name == name_upper).first()
     if existing:
         return name_upper, existing.id
+    require_enabled(db)
     new_entry = models.ApplicationMaster(
         name=name_upper, status="PENDING_APP_OWNER", department=department,
         requested_by_id=requester_id, qa_request_id=qa_request_id,

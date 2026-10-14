@@ -1426,6 +1426,7 @@ class ReadinessChecklistItem(Base):
 # Module 4: SAST Request Management
 # ---------------------------------------------------------------------------
 class SASTRequest(QARequestModuleMixin, Base):
+    obstacles = relationship("SecurityObstacle", foreign_keys="SecurityObstacle.sast_request_id", order_by="SecurityObstacle.id")
     @property
     def missing_testing_types(self):
         from .request_scope import missing_for_child
@@ -1671,6 +1672,7 @@ class SASTChecklistItem(Base):
 # Module 5: DAST Request Management
 # ---------------------------------------------------------------------------
 class DASTRequest(QARequestModuleMixin, Base):
+    obstacles = relationship("SecurityObstacle", foreign_keys="SecurityObstacle.dast_request_id", order_by="SecurityObstacle.id")
     @property
     def missing_testing_types(self):
         from .request_scope import missing_for_child
@@ -1896,6 +1898,52 @@ class DASTFinding(Base):
     status = Column(String(32), default="Open")
 
     dast_request = relationship("DASTRequest", back_populates="findings")
+
+
+class SecurityObstacle(Base):
+    """Post-readiness handoffs preserve scope identities and immutable audit rows."""
+    __tablename__ = "qap_security_obstacles"
+    __table_args__ = (
+        CheckConstraint("(sast_request_id IS NOT NULL AND dast_request_id IS NULL) OR (dast_request_id IS NOT NULL AND sast_request_id IS NULL)", name="ck_qap_obstacle_request"),
+        Index("ix_qap_obstacle_sast", "sast_request_id", "status"),
+        Index("ix_qap_obstacle_dast", "dast_request_id", "status"),
+    )
+    id = pk_column()
+    sast_request_id = Column(Integer, ForeignKey("qap_sast_requests.id"))
+    dast_request_id = Column(Integer, ForeignKey("qap_dast_requests.id"))
+    kind = Column(String(16), nullable=False)
+    status = Column(String(32), nullable=False, default="OPEN")
+    revision = Column(Integer, nullable=False, default=1)
+    category = Column(String(100), nullable=False)
+    reason = Column(Text, nullable=False)
+    requested_correction = Column(Text, nullable=False)
+    target_ids_json = Column(Text, nullable=False, default="[]")
+    changed_fields_json = Column(Text, nullable=False, default="[]")
+    allow_scope_additions = Column(Boolean, nullable=False, default=False, server_default=text("0"))
+    added_target_ids_json = Column(Text, nullable=True, default="[]")
+    resume_stage = Column(String(32), nullable=False)
+    owner_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    opened_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False)
+    submitted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    reviewed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    readiness_required = Column(Boolean, nullable=False, default=False)
+    reapproval_required = Column(Boolean, nullable=False, default=False)
+    resolution = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=now)
+    submitted_at = Column(DateTime, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+
+    @property
+    def target_ids(self):
+        return json.loads(self.target_ids_json or "[]")
+
+    @property
+    def changed_fields(self):
+        return json.loads(self.changed_fields_json or "[]")
+
+    @property
+    def added_target_ids(self):
+        return json.loads(self.added_target_ids_json or "[]")
 
 
 class SecurityScanResult(Base):

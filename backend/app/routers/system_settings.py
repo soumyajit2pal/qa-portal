@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import maintenance_window, models, schemas
+from .. import application_creation_policy, maintenance_window, models, schemas
 from ..audit_service import write_audit
 from ..constants import Role
 from ..database import get_db
@@ -21,6 +21,34 @@ logger = logging.getLogger("qa_portal.system_settings")
 def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
+
+
+@router.get("/application-creation", response_model=schemas.ApplicationCreationPolicyOut)
+def get_application_creation_policy(response: Response, db: Session = Depends(get_db),
+                                    current_user: models.User = Depends(get_current_user)):
+    _no_store(response)
+    return application_creation_policy.load(db)
+
+
+@router.put("/application-creation", response_model=schemas.ApplicationCreationPolicyOut)
+def put_application_creation_policy(payload: schemas.ApplicationCreationPolicyUpdate,
+                                    request: Request, response: Response, db: Session = Depends(get_db),
+                                    current_user: models.User = Depends(require_roles(Role.ADMIN))):
+    _no_store(response)
+    try:
+        before, after = application_creation_policy.update(db, payload)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "Application creation policy changed. Refresh and try again.") from exc
+    except HTTPException:
+        db.rollback()
+        raise
+    write_audit(db, event_type="SYSTEM_CONFIGURATION", action="APPLICATION_CREATION_POLICY_UPDATED",
+                actor=current_user, request=request, status_code=200, target_type="SYSTEM_SETTING",
+                target_id=application_creation_policy.SETTING_KEY, target_name="New application creation",
+                details={"before":before.model_dump(), "after":after.model_dump()})
+    return after
 
 
 def _load_or_500(db: Session):

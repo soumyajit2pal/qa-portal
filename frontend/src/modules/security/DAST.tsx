@@ -1,3 +1,4 @@
+import SecurityObstacles from "./SecurityObstacles"
 import TestingScopeNotice, { additionalTestingOptions } from '../../components/TestingScopeNotice'
 import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
@@ -585,7 +586,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   const pendingMandatoryEvidence = checklist.filter(
     (c) => c.is_mandatory && (documentsByItem[c.id] || []).length === 0
   )
-  const isInitialAnalystAssignment = status === 'PLANNING'
+  const isInitialAnalystAssignment = !req.security_analyst_id
   // 2026-08 Reassignment CR -- see SAST.tsx's identical comment for the
   // full reasoning, including the later QA_LEAD carve-out. Mirrors
   // sast_dast.py's _require_can_reassign_security_analyst exactly.
@@ -652,6 +653,13 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
       <ErrorText error={error} />
 
       <TestingScopeNotice missing={req.missing_testing_types} parentId={req.qa_request_id} />
+      <SecurityObstacles kind="DAST" req={req} userId={viewOnly ? undefined : user?.id}
+        canManage={!viewOnly && (isAssignedAnalyst || isAssignedQALead)}
+        inputOwnerId={req.active_delegation?.assigned_to_id || req.requester_id}
+        canApprove={!viewOnly && sameDept && hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && !isRequester}
+        ownerOptions={Array.from(new Map([...securityAnalysts, ...qaLeads].map(option => [option.id, option])).values())}
+        users={users} onChanged={async updated => { onChanged(updated as DASTOut); await load(); await loadScan() }} />
+
       {tab === 'overview' && (
         <div>
           {(scanResults.length > 0 || activeTargetWorkflow || requiresReverification) && (

@@ -2534,6 +2534,8 @@ STAGE_TEAM = {
 # the role that must perform the next action. These are deliberately separate
 # from responsible_team, which is the owning business department in 3W.
 SAST_DAST_PENDING_WITH = {
+    "REQUESTER_ACTION_REQUIRED": "Requester", "INTERNAL_HOLD": "Internal hold owner",
+    "QA_REVIEW_PENDING": "Security Analyst / QA Lead", "SCOPE_APPROVAL_PENDING": "Department Head",
     "DRAFT": "Requester", "SUBMITTED": "SM", "SM_APPROVAL_PENDING": "SM",
     "RETURNED_BY_SM": "Requester", "SM_REJECTED": "Requester",
     "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
@@ -2549,6 +2551,13 @@ SAST_DAST_PENDING_WITH = {
 
 
 def _security_pending_with(request, scan, states_field) -> str:
+    from ..security_scan_state import active_obstacles, obstacle_state
+    blockers = {obstacle_state(row) for row in active_obstacles(request)}
+    if blockers:
+        owners = [SAST_DAST_PENDING_WITH[state] for state in sorted(blockers)]
+        if request.status not in blockers:
+            owners.append("Security Analyst")
+        return " / ".join(dict.fromkeys(owners))
     pending_with = SAST_DAST_PENDING_WITH.get(request.status, "Security Analyst")
     if request.status not in {"SCANNING", "FINDING_VALIDATION", "REMEDIATION", "ASSIGNED_TO_REQUESTER",
                               "WAITING_FOR_FIX", "ASSIGNED_TO_LEAD", "RESCAN"}:

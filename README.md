@@ -367,7 +367,7 @@ unverifiable, so retain the original key when rotating unrelated authentication 
 
 ## Application name approval
 
-New application names proposed through **Other (new application)** in a QA Request
+When System Admins enable new application creation, names proposed through **Other (new application)** in a QA Request
 are decided by any user with the **Application Owner** role and operational access
 to that request's workspace, regardless of department. The pending list, approval
 count, approver directory, and notification routing use this same scope. Drafts
@@ -685,14 +685,25 @@ alongside these metrics before increasing memory, pool limits or TTLs. Liveness 
 
 Defects capture an optional **Module Name** next to **Application**, using the
 same application/workspace module picker as QA requests. It defaults from a
-linked QA request or the failing testcase and remains a snapshot of the reported
+linked QA request or stays blank (Whole application); a testcase area never
+supplies or creates an application-module value. Explicit module selections,
+including Whole application, remain snapshots of the reported
 issue. The register has an **Application / Module** column; module names are also
 searchable and included in defect details and Excel reports. **Feature / Area**
 retains the existing free-text `module_feature` field for the specific affected
-feature. New module names are reusable without an approval step. Apply migration
+feature and defaults only from the execution's pinned testcase version. An empty
+or missing pinned value requires reporter input rather than a later testcase
+draft. Reporter edits to Feature / Area remain independent of Module Name.
+Linking a QA request after saving preserves the saved module choice, including
+Whole application. The testcase editor, bulk update and version comparison use
+the **Feature / Area** label; their stored `module_name` key and existing import
+template headers are retained for compatibility. New module names are reusable
+without an approval step. Apply migration
 `e8b3d7c2a610` with `alembic upgrade head` before restarting the updated backend;
 it adds a nullable field and fills historical linked defects from matching QA
 requests, preserving existing feature descriptions and explicitly saved modules.
+The module/area mapping correction uses existing columns and needs no additional
+database migration; deploy frontend and backend together.
 
 ### Defect rejection and Not a Defect review
 
@@ -747,6 +758,39 @@ defect still has another attempt link on the same execution. Links, conversions,
 status changes and removals appear in Activity. Existing reports/export sheets retain
 all references. Deploy backend and frontend together; no new schema migration is
 required for multiple linking.
+
+### Defect action notes and fresh verification
+
+Routine triage, start-work, start-QA, handoff, deployment and duplicate actions
+accept optional comments. Structured requirements remain: triage owner/department
+and impact, root cause and fix details for a QA handoff, build/deployment reference,
+and a canonical defect for duplicates. Optional notes and extra evidence are
+collapsed in the modern workflow form. Legacy resolution summaries are optional;
+fix details provide the summary when one is not supplied.
+
+Deferral, rejection, reopening, Not a Defect proposals/decisions, enhancement
+conversion, risk acceptance, blockers and new occurrences still require a specific
+reason. Changing production impact requires an explanation; confirming the same
+assessment or clearing a blocker accepts an optional comment.
+
+Users can explicitly select evidence already attached to the same defect or
+provide a reference. Selected documents must still exist on that defect when the
+action saves. Each action records the selected IDs/names in its history or audit
+record, and previous events remain intact. Selecting evidence does not grant a
+passing verification or silently reuse a previous test result.
+
+Every new passed QA, business or production verification requires
+`verification_confirmed: true`, a tested build and relevant evidence. The checkbox
+starts unchecked and clears on action, build or defect-revision changes. Narrative
+verification and closure notes are optional for a pass; reopening still requires
+the failure/reconsideration reason and evidence. Existing verification history is
+preserved, and a reopened fix needs fresh confirmation even for the same build.
+The separate regression-testing confirmation remains optional.
+
+Legacy closure requires the current `revision` and the same explicit verification
+confirmation; legacy transitions now increment the existing workflow revision so
+an earlier closure request cannot be replayed after a new fix/retest cycle. Deploy
+the frontend and backend together. No database migration is required.
 
 ### Defect CC followers
 
@@ -1002,6 +1046,16 @@ SMTP, LDAP and Fortify integrations still require validation. This run did not
 deploy or restart services. Results and evidence are in
 `validation/full-regression-validation-2026-10-13.json`; the historical module
 regression remains in `regression-results/module-regression-2026-10-10.json`.
+
+The subsequent defect-lifecycle revalidation is recorded separately in
+`validation/defect-lifecycle-validation-2026-10-13.json`, with the updated local
+suite counts and coverage for optional notes, exception reasons, evidence reuse
+and fresh verification confirmation.
+
+The subsequent module/area mapping regression passed 176 backend tests and 501
+frontend tests, TypeScript, the production build, bundle security audit and offline
+API schema checks. Results are in
+`validation/defect-module-area-validation-2026-10-13.json`.
 
 ## Authentication & the Admin section
 
@@ -1332,3 +1386,39 @@ rows as the directory grows; the pending-work response still includes all pendin
 items; approval history retains its existing 2,000-candidate/500-visible-event
 ceiling. The build retains its existing warning about a JavaScript chunk above
 500 KB. No database pool or production cache settings were changed by this review.
+
+
+### SAST/DAST obstacles after readiness
+
+During planning, configuration, scanning, validation and remediation, the assigned Security Analyst or a QA Lead can return affected repositories/targets to the requester for correction or open an internal hold with a named Security Analyst/QA Lead owner. An empty selection pauses the whole request; partial selections leave other scope actionable. Overlapping active obstacles are rejected. Analyst ownership, completed approvals, checklist evidence, scan results and findings remain intact.
+
+The requester (or active input delegate) submits corrections to affected scope rows and may add repositories under the permission rules below. Internal hold owners submit their resolution without changing requester inputs. Every submission requires fresh review by a different assigned analyst or workspace QA Lead; previous confirmations cannot be reused. Routine notes are optional, but obstacle reasons, required corrections and return reasons are mandatory. Source/deployed/credential changes invalidate current scan coverage while retaining historical imports. Repository/branch/technology or URL/environment/authentication scope changes also require Department Head scope reapproval and explicit fresh readiness confirmation. Existing valid approvals are retained; scope approval does not reset analyst assignment. Credential values are never copied into obstacle history or notification metadata.
+
+Obstacle actions appear in SAST/DAST details and the pending action queue. Audit records retain actor, time, previous/new obstacle phase, affected IDs, changed field names and review confirmation. Handoff email goes only to the current input/hold owner, the assigned analyst (or independent QA Lead reviewer where needed), or eligible Department Head approvers for scope reapproval. All obstacle corrections and decisions use a revision check under the request row lock, and unresolved obstacles prevent request completion/QA clearance.
+
+Deploy migration `a31d8e6c2f90_security_obstacles.py` before starting the updated backend, and publish the updated frontend alongside it. The migration adds `qap_security_obstacles`; it is restartable and keeps audit records on rollback. No migration or deployment is performed by local regression tests.
+
+
+### Repository additions during SAST corrections
+
+SAST requester corrections reuse the request creation repository cards, labels, Git URL guidance and required fields. Existing repository IDs are retained; affected repositories are editable and unaffected repositories are read only. Only unsaved additions expose Remove. Correction notes are optional; a short scope reason is mandatory when adding repositories. DAST continues to use protected credential updates, with credential guidance shown only in DAST.
+
+Whole-request returns permit adding repositories. A return limited to selected repositories requires an explicit permission from the assigned Security Analyst or a workspace QA Lead. Permission can be recorded while creating a return, or changed on an existing open return through Manage repository additions, with a reason and revision check. Internal holds cannot add or alter requester scope.
+
+Corrections patch existing rows and append new repository IDs atomically. Repository/branch combinations are checked against the proposed corrected scope and other additions; host casing, whitespace, trailing slashes and the conventional .git suffix are normalized while repository path and branch case are preserved. New repositories are associated with the originating obstacle, start without scan coverage, and cannot be scanned or clear the request until Department Head scope approval and fresh independent QA readiness review are complete. Existing valid evidence, approvals, findings and immutable scan history remain intact, and analyst ownership is preserved. An added repository returned for correction keeps its submitted ID and remains in the audit record.
+
+Deploy migration `b47e2a9c6d13_security_scope_additions.py` after `a31d8e6c2f90_security_obstacles.py` before starting the updated backend. It adds scope permissions and repository provenance to the obstacle record, defaults existing returns to restricted additions (whole-request returns still permit additions), and retains those columns on rollback. Regression tests apply migrations only to isolated SQLite; Oracle DDL is checked offline.
+
+Open requester obstacles support delegation even while other repositories/targets continue scanning. Completing a different target's fix retains that delegation while another requester obstacle is open. The assigned analyst or workspace QA Lead can use Change action owner / routing to replace an unavailable internal owner or correct a mistaken requester/internal handoff. A reason and current revision are required; only open obstacles can change routing. Scope, evidence, approvals and analyst ownership are retained, and fresh submission and independent QA review remain required.
+
+The first analyst assignment remains available during a planning hold and resumes configuration after review. Review notifications fall back to eligible independent QA Leads if the analyst is inactive or no longer eligible. Stale or timed-out correction dialogs offer Refresh latest request, which bypasses the read cache and discards unsaved dialog edits. DAST corrections use the same UAT/Pre-Production environments as intake, retain protected credentials by default and allow explicit clearing when authentication is No.
+
+Run `venv/bin/python -m scripts.check_security_scope_schema_readonly` and `venv/bin/python -m scripts.check_system_workflow_readonly` from `backend/` to inspect the configured Oracle deployment in read-only transactions, without importing application startup. The first compares migration heads and required security columns; the second validates existing responses, pending approvers and each active obstacle's next owner. Validation evidence for the October 14 recovery review is in `validation/security-integrity-validation-2026-10-14.json`.
+
+### Admin control of new application creation
+
+Admin → Applications includes New application creation with an Enable “Other (new application)” checkbox and Save setting. It applies across all workspaces and defaults to disabled. The setting persists in the existing `qap_system_settings` table under `application_creation.v1`; no new migration is required. Only System Admins can update it, and changes record the previous/new values and actor in the system configuration audit. Updates require the current revision; a conflicting admin edit loads the latest saved value before another save.
+
+When disabled, Other remains visible with disabled styling. Clicking it or activating it with Enter/Space opens a modal: “New application creation is disabled. Select an application from the existing list or contact an administrator to add a new application.” The selected listed application is retained. Enabling restores the existing BCP warning and Application Owner approval workflow. The wizard rechecks the setting when Other is activated and before continuing with a new name; backend enforcement also rejects stale or direct creation/edit requests that introduce an unlisted application. Existing catalogue names, saved proposals, pending approvals and history remain usable. Admin manual additions and Excel seeding of approved applications remain available while requester creation is disabled.
+
+Authenticated users read `GET /api/system-settings/application-creation`; only System Admins may `PUT` `{enabled, expected_revision}`. Responses use no-store headers. The shared name resolver enforces the policy across QA intake and linked Functional/SAST/DAST/Performance application edits. Validation evidence is in `validation/application-creation-validation-2026-10-14.json`.

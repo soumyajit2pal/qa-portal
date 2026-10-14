@@ -7,6 +7,8 @@ import { isKeyboardActivationKey } from '../keyboard'
 export interface SearchableSelectOption {
   value: string
   label: string
+  disabled?: boolean
+  onDisabledSelect?: () => void
 }
 
 interface SearchableSelectProps {
@@ -126,7 +128,8 @@ export default function SearchableSelect({ value, onChange, options, ariaLabel, 
     : filtered
 
   function select(opt: SearchableSelectOption) {
-    onChange(opt.value)
+    if (opt.disabled) opt.onDisabledSelect?.()
+    else onChange(opt.value)
     setOpen(false)
     setQuery('')
   }
@@ -137,9 +140,10 @@ export default function SearchableSelect({ value, onChange, options, ariaLabel, 
     return (
       <div
         key={opt.value}
-        className={`searchable-select-option ${active ? 'active' : ''}`}
+        className={`searchable-select-option ${active ? 'active' : ''} ${opt.disabled ? 'disabled' : ''}`}
         role="option"
         aria-selected={active}
+        aria-disabled={opt.disabled || undefined}
         tabIndex={0}
         onClick={() => select(opt)}
         onKeyDown={(event) => {

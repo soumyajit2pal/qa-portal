@@ -25,7 +25,7 @@ from .. import application_names as app_names
 from .. import reassignment
 from ..fortify_ssc import FortifySSCClient, FortifySSCError
 from ..workflow_authority import is_system_admin
-from ..security_scan_state import repository_states, target_states, dast_target_identity
+from ..security_scan_state import repository_states, target_states, dast_target_identity, active_obstacles, OBSTACLE_STATES
 
 router = APIRouter(tags=["sast-dast"])
 
@@ -183,7 +183,7 @@ def _get_or_404(db: Session, model_cls, req_id: int, label: str, lock: bool = Fa
             # Refresh already-cached repository queues and active handoffs
             # after acquiring the request lock. A lazy relationship reload
             # alone reuses stale child identities from the session cache.
-            query = query.options(selectinload(targets),
+            query = query.options(selectinload(targets), selectinload(model_cls.obstacles),
                 selectinload(model_cls.qa_request).selectinload(models.QARequest.delegations))
     # Primary-key lookup: avoid Oracle-incompatible FETCH FIRST with FOR UPDATE.
     obj = query.one_or_none()
@@ -601,7 +601,7 @@ def _assign_security_analyst(db: Session, obj, payload, current_user):
     SCANNING must stay there after an analyst swap."""
     _require_visible(db, obj, current_user)
     _require(obj, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, "Assign Security Analyst")
-    is_initial_assignment = obj.status == "PLANNING"
+    is_initial_assignment = obj.security_analyst_id is None
     previous_id = obj.security_analyst_id
     if is_initial_assignment:
         _require_assigned_qa_lead(obj, current_user)
@@ -612,7 +612,11 @@ def _assign_security_analyst(db: Session, obj, payload, current_user):
                           "security_analyst_id", obj.qa_request.qa_workspace_id if obj.qa_request else None)
     obj.security_analyst_id = analyst.id
     if is_initial_assignment:
-        obj.status = "CONFIGURATION"
+        if obj.status == "PLANNING":
+            obj.status = "CONFIGURATION"
+        for obstacle in active_obstacles(obj):
+            if obstacle.resume_stage == "PLANNING":
+                obstacle.resume_stage = "CONFIGURATION"
     decision = "Security Analyst Assigned" if is_initial_assignment else "Security Analyst Reassigned"
     step = "Planning" if is_initial_assignment else SAST_DAST_STATUS_LABELS.get(obj.status, obj.status)
     _log(db, obj, step, current_user, decision, f"Assigned Security Analyst: {analyst.full_name}")
@@ -803,6 +807,8 @@ def _sast_dast_named_assignment(model, user_id: int):
     requester_work = model.status.in_(SAST_DAST_REQUESTER_WORK_STATUSES)
     analyst_work = model.status.in_(SAST_DAST_SECURITY_ANALYST_WORK_STATUSES)
     if model in (models.SASTRequest, models.DASTRequest):
+        requester_work = or_(requester_work, model.obstacles.any(and_(models.SecurityObstacle.kind == "REQUESTER", models.SecurityObstacle.status == "OPEN")))
+        analyst_work = or_(analyst_work, model.obstacles.any(models.SecurityObstacle.status == "QA_REVIEW_PENDING"))
         relation = model.components if model is models.SASTRequest else model.targets
         target_model = models.SASTComponent if model is models.SASTRequest else models.DASTTarget
         requester_work = or_(requester_work, and_(
@@ -813,8 +819,10 @@ def _sast_dast_named_assignment(model, user_id: int):
             target_model.scan_state.in_(["NOT_SCANNED", "STALE", "READY_FOR_RESCAN", "AWAITING_VALIDATION"]))
         analyst_work = or_(and_(model.status.notin_(SCAN_ACTIVE_STATUSES), analyst_work),
             and_(model.status.in_(SCAN_ACTIVE_STATUSES), relation.any(scan_work)),
-            and_(~relation.any(), analyst_work))
+            and_(~relation.any(), analyst_work),
+            model.obstacles.any(models.SecurityObstacle.status == "QA_REVIEW_PENDING"))
     return or_(
+        model.obstacles.any(and_(models.SecurityObstacle.kind == "INTERNAL", models.SecurityObstacle.status == "OPEN", models.SecurityObstacle.owner_id == user_id)),
         and_(model.requester_id == user_id,
              requester_work),
         and_(model.security_lead_id == user_id,
@@ -897,6 +905,12 @@ def _sast_aggregate_status(db: Session, obj) -> None:
 
 def _security_aggregate_status(db: Session, obj) -> None:
     states = {row["state"] for row in _security_target_states(db, obj)}
+    if states and states <= OBSTACLE_STATES:
+        obj.status = next(state for state in ("SCOPE_APPROVAL_PENDING", "QA_REVIEW_PENDING", "REQUESTER_ACTION_REQUIRED", "INTERNAL_HOLD") if state in states)
+        return
+    # Keep planning/configuration intact until any scan has been recorded.
+    if obj.status in {"PLANNING", "CONFIGURATION"} and not _scan_results(db, "SAST" if isinstance(obj, models.SASTRequest) else "DAST", obj.id):
+        return
     if states == {"CLEAR"}:
         obj.status = "SECURITY_COMPLETE"
     elif "AWAITING_VALIDATION" in states:
@@ -930,6 +944,8 @@ def _require_sast_complete(db: Session, obj, action: str) -> None:
 
 
 def _require_security_complete(db: Session, obj, action: str) -> None:
+    if active_obstacles(obj):
+        raise HTTPException(400, "Resolve all obstacles with fresh QA review before completing this request.")
     states = _security_target_states(db, obj)
     if not states or any(row["state"] != "CLEAR" for row in states):
         remaining = sum(row["state"] != "CLEAR" for row in states)
@@ -1298,7 +1314,8 @@ def _mark_fixed(db: Session, obj, current_user, sup_filter_col, payload: schemas
     _security_aggregate_status(db, obj)
     _log(db, obj, "Rescan", current_user, "Rescanning", None)
     remaining_fixes = any(row["state"] in {"WAITING_FOR_FIX", "STALE"} for row in _security_target_states(db, obj))
-    if delegation and not remaining_fixes:
+    remaining_requester_obstacles = any(row.kind == "REQUESTER" and row.status == "OPEN" for row in active_obstacles(obj))
+    if delegation and not remaining_fixes and not remaining_requester_obstacles:
         delegation.status = "RETURNED"
         delegation.closed_by_id = current_user.id
         delegation.returned_at = models.now()
@@ -2389,3 +2406,7 @@ def update_dast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
 def dast_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     _require_visible(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return _sast_dast_history_rows(db, "DAST", req_id)
+
+
+from ..security_obstacles import register_routes as _register_obstacle_routes
+_register_obstacle_routes(router)
