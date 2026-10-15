@@ -142,7 +142,7 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
                     files: List[UploadFile], uploaded_by_id: int,
                     log_entity_type: Optional[str] = None, log_entity_id: Optional[int] = None,
                     log_actor: Optional["models.User"] = None,
-                    log_label: Optional[str] = None) -> List[models.RequestDocument]:
+                    log_label: Optional[str] = None, *, commit: bool = True) -> List[models.RequestDocument]:
     """Accepts one or more files (multipart/form-data, field name 'files')
     and stores them under UPLOAD_ROOT/<folder_name>/<module>/, named to
     avoid collisions. `folder_name` should be the request's own human-
@@ -208,7 +208,10 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
                 f"Uploaded {len(created)} file{'s' if len(created) != 1 else ''}{suffix}: {names}",
             )
 
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
     except Exception:
         # A lost connection can make the commit outcome uncertain. Remove
         # bytes only after the database confirms no committed row uses them.

@@ -307,6 +307,15 @@ longer Bug Fix. Apply migration `e3b8c5d1a902` with `alembic upgrade head` befor
 starting the updated backend; it adds a nullable `business_defect_number` column
 to `qap_requests` and leaves existing requests unchanged.
 
+Returned Functional Requests use the same business defect field as QA request
+creation. Selecting Bug Fix in Edit Details reveals the optional field immediately;
+saving stores it on the linked QA request, and reopening or resubmitting retains
+the number. Changing to New or Enhancement clears it. The Functional update API
+enforces the same 64-character limit and normalization as intake, with the existing
+requester/reviewer permissions and return stages unchanged. This correction needs
+matching frontend/backend deployment and no additional migration. Regression
+evidence: `validation/returned-bug-fix-2026-10-15/report.json`.
+
 If Oracle reports `ORA-00904` for `BUSINESS_DEFECT_NUMBER`, the updated model
 is running against a schema that has not received this column. This can affect
 request lists and linked modules even for non-Bug-Fix records, because their
@@ -1422,3 +1431,123 @@ Admin → Applications includes New application creation with an Enable “Other
 When disabled, Other remains visible with disabled styling. Clicking it or activating it with Enter/Space opens a modal: “New application creation is disabled. Select an application from the existing list or contact an administrator to add a new application.” The selected listed application is retained. Enabling restores the existing BCP warning and Application Owner approval workflow. The wizard rechecks the setting when Other is activated and before continuing with a new name; backend enforcement also rejects stale or direct creation/edit requests that introduce an unlisted application. Existing catalogue names, saved proposals, pending approvals and history remain usable. Admin manual additions and Excel seeding of approved applications remain available while requester creation is disabled.
 
 Authenticated users read `GET /api/system-settings/application-creation`; only System Admins may `PUT` `{enabled, expected_revision}`. Responses use no-store headers. The shared name resolver enforces the policy across QA intake and linked Functional/SAST/DAST/Performance application edits. Validation evidence is in `validation/application-creation-validation-2026-10-14.json`.
+
+### Late historical linking of Closed defects
+
+Testcase Execution's Link existing picker includes active and Closed defects, with a status filter. Closed selections use the shared historical linking dialog. Attempt History also provides Link Closed defect for history on original Failed/Blocked attempts, including older attempts followed by a successful retest. Defect Management's Closed-defect Actions menu provides Link historical testcase and uses the same dialog, validation and warning confirmation.
+
+The caller must select an exact original Failed/Blocked attempt, provide a reason for late linking, confirm the warning and send the current defect workflow revision. Workspace, department, application, QA request and cycle-folder visibility checks remain enforced. A historical attempt must precede the recorded defect closure; recurring failures after closure require an active/reopened defect. Completed/Blocked cycles and inactive projects require a workspace QA Lead Group actor for this history amendment. Read-only grants cannot write history.
+
+Historical links retain the Closed status at linking, closure revision, reason, actor and timestamp. They are distinct from primary/additional active links: they never move the original trace, reopen the defect, change owners/results, grant verification or clear active/external blockers. A previous Failed/Blocked attempt still requires a fresh Retest Passed result. Workflow status mirrors exclude historical references, so later reopening does not rewrite their Closed snapshot. Historical references cannot be removed using ordinary Unlink, and existing Admin permanent-removal governance remains unchanged.
+
+The attempt history and Defect Management linked-execution directory identify Historical references and their original attempt. Unlinked/incomplete queues and execution/cycle/testcase filters recognize these associations. Historical references do not enter active cycle completion/clearance gates or current defect retest aggregates. Audit events on the defect, testcase and cycle record the association without altering frozen issued certificates, cycle data or original approval history.
+
+Apply migration `c58f3b7a2d91_closed_defect_historical_links.py` after `b47e2a9c6d13` before starting the updated backend, then publish the frontend alongside it. The restartable migration adds `is_historical` (default false), the governed defect reference/FK and closure revision to `qap_test_run_defects`, retaining existing links. Downgrade preserves reference data. Regression evidence is in `validation/closed-defect-history-validation-2026-10-14.json`; tests use isolated SQLite and validate Oracle DDL offline, without applying the migration to a live database.
+
+
+### Department-only defect reassignment and routing recovery (2026-10-14)
+
+Resolver reassignment stays inside the department established during triage. The UI and candidate API use the same backend policy. A user's other departments or workspace QA role cannot expand that pool. Same-department reassignment remains available before Start work; it changes ownership and leaves the lifecycle stage unchanged. QA handoffs continue through Ready for QA / Resolved, and QA, business and release stages update their dedicated owner fields.
+
+The responsible department and latest resolver are saved in existing workflow state. Earlier modern defects derive their department from immutable triage history; older legacy records use their persisted team until an explicit recovery records a verified department. Reassignment and recovery lock the defect row and require the current revision and prior owner, preventing stale forms from overwriting newer ownership or lifecycle changes. Independent QA reviewer checks also apply during reassignment.
+
+Defect Actions now includes **Recover resolver routing** for administrators and the workspace QA Lead Group, plus the recorded responsible department's head when a trusted routing snapshot exists. This is a governed correction, with a mandatory reason and shared warning confirmation. It retains the current stage, effective QA/business/release ownership, verification history, blockers, evidence and fresh retest requirements. Closed and terminal defects cannot use recovery. Where original routing is known, recovery is confined to that active department; where old records have no original snapshot, an administrator or workspace QA lead explicitly selects the department after reviewing history. Inactive departments require administrator attention.
+
+Both owner-change actions append workflow audit events and preserve normalized assignment tenures. Recovery records previous/new resolver, previous/new department, actor, time, reason and retained stage. The dialog handles loading failures, stale records and duplicate clicks, and prevents resubmission when the mutation saved but the parent view failed to refresh.
+
+The frontend and backend should be deployed together: `/api/defects/{id}/reassign` now requires `expected_revision` and `expected_owner_id`. The fresh selection endpoint is `/api/defects/{id}/assignment-context`; governed recovery uses `/api/defects/{id}/recover-routing`. No additional database migration is introduced by this change; the earlier c58f3b7a2d91 migration remains part of the existing deployment prerequisites. No live migration or service restart was performed during validation.
+
+Validation: 280 backend tests and 569 frontend tests passed, including 27 focused backend routing/recovery cases and 15 frontend dialog/ownership cases. Production typechecking, build and bundle audit passed. Offline OpenAPI validation checked 440 paths, 500 operations, 319 schemas and 1,181 references without database connections or startup maintenance. See `validation/defect-reassignment-validation-2026-10-14.json` and its evidence directory.
+
+
+### Full system blockage review (2026-10-14)
+
+The full regression and read-only Oracle review found and repaired two ownership paths: QA executive reassignment now resolves the workspace from the linked QA Request on older defects, and current business/release owners can see their named stage responsibility across departments inside their authorized workspace. Their records appear in the My Issues queue and its dashboard count. The stage ownership exception ends when ownership or stage changes and never broadens workspace access or resolver department eligibility. Enterprise Viewer candidates are also explicitly rejected for defect ownership.
+
+Oracle stage-owner JSON predicates use constant literal JSON paths; owner IDs remain bind parameters. This was exercised against Oracle in read-only transactions, alongside isolated scope and mutation tests. The live audit now checks defect visibility for operational users and validates current stage owners' role, workspace access and record reachability.
+
+The final local regression passed 285 backend tests, 569 frontend tests, production typecheck/build/bundle audit and offline API/Oracle contracts. Python source compilation checked 203 files without execution. The live audit covered 13 workflow records, three pending approval checkpoints and one open security correction; no missing active owners or approvers were detected.
+
+**Deployment is still blocked by the existing historical-link migration:** UAT remains at `b47e2a9c6d13`, while the source requires `c58f3b7a2d91`. `qap_test_run_defects` is missing `is_historical`, `governed_defect_id` and `linked_workflow_revision`. Consequently the updated `DefectOut.historical_execution_links` response fails validation against that database. Apply the existing migration with `venv/bin/python -m alembic upgrade head` from `backend`, then deploy/restart the matching frontend and backend and rerun the read-only audits. No migration, live record correction or service restart was performed during this review.
+
+The review does not claim the current deployment is free of blockage. Modules with no live data were exercised through isolated handlers and HTTP tests; real LDAP/SMTP/scanner interactions and production-load concurrency were not run. See `validation/system-blockage-validation-2026-10-14.json` and its evidence directory.
+
+
+### Functional Request defect traceability (2026-10-14)
+
+Defect Management has a searchable, server-paged **Functional Request** filter. It includes completed requests, **All Functional Requests**, and **No Functional Request linked**. The selection remains in the URL when a defect opens or closes, and applies to every queue count and workbook export. The request detail provides **View linked defects**. Traceability shows clickable Functional Request IDs separately from the parent QA Request ID.
+
+Associations are exact: direct Functional Request links, primary cycles/executions, additional executions, and Closed-defect historical attempt links. The SQL predicate uses existence checks so multiple paths count a defect once. An application name or shared parent QA Request alone does not associate a defect with a Functional Request. Request options use the existing Functional register's workspace, department-unit and delegation visibility rules.
+
+**Link Functional Request** uses the shared selector and warning confirmation. The backend checks scope, matching application/workspace/department, parent QA Request compatibility, duplicates across all association paths, and the current defect revision. A reason and confirmation are mandatory. Reporter/resolver/QA lead permissions apply to active defects; a QA lead must approve links to closed or terminal defects. Read-only users and inherited workspace viewers cannot link. Each direct association records the actor, timestamp, reason and previous revision, and appends both defect and Functional Request audit history. It preserves lifecycle, closure, stage ownership and retest evidence, and does not provide an execution result or bypass fresh retest checks. Traceability audit events do not produce workflow handoff emails.
+
+Future certificate captures include direct Functional Request links and historical defect references in the matching execution environment. Existing issued certificate snapshots are not rewritten. Full regression also exposed a pending-email duplicate-key collision: an action-local token now prevents recycled Python memory addresses from suppressing a distinct reminder, while repeated delivery for the same action/recipient stays deduplicated.
+
+Deploy migration **d69a4c8e2f10_defect_functional_request_links.py**, after **c58f3b7a2d91**, before starting the updated backend, and publish the frontend alongside it. From `backend`, run `venv/bin/python -m alembic upgrade head` in the intended deployment environment. The migration adds `qap_defect_func_links` with a composite primary key, foreign keys and a request index; it is restartable and retains audit data on rollback. No live migration, service restart, email delivery or scanner operation was performed by these local checks.
+
+Validation: 313 backend tests and 578 frontend tests passed. These include 15 new backend request-link/filter/certificate/migration cases and 9 frontend selector/dialog/filter cases. Production typechecking, build and bundle security audit passed, with the existing large main-chunk warning. Offline checks validated 442 API paths, 502 operations, 323 schemas and 1,191 references, plus Oracle migration and filter SQL without database access. See `validation/functional-request-defects-validation-2026-10-14.json` and its evidence directory. These results do not establish real LDAP, SMTP or SSC connectivity; the separate integration report remains applicable.
+
+### Execution retest observations and verification (2026-10-15)
+
+After a Failed or Blocked attempt, **Retest linked defects** records a new attempt before linked-defect verification is complete. The shared control is available in Testcase Execution, quick execution and My Executions. Defect Management's **Review testcase retests** opens the same evidence and verification control. An assigned runner records the observed testcase result, actual result, tested build and a Passed, Failed, Blocked or Not tested outcome for each linked finding. Passed and Failed outcomes require attached evidence or an evidence reference; other outcomes require a reason. New or In Progress findings cannot be marked Passed before a fix is submitted, but another ready fix can be retested while those findings remain open.
+
+A passing observation is stored as **Retest Pending**. It retains the pinned testcase version, actual cycle environment, tested build, per-defect status and fix-iteration snapshots, evidence and author. The assigned QA reviewer independently confirms each fix using a fresh confirmation and current revision; execution assignment and defect review ownership can belong to different people. A failed QA retest atomically records the failed attempt and reopens the affected internal defect to its resolver, preserving the saved QA owner and other findings' lifecycle stages. Legacy defect flows retain their existing handoffs. External failures update the locally tracked reference and audit history; external tracker state must be checked separately.
+
+**Confirm final retest** requires another fresh confirmation, an unchanged execution context, outcomes for every currently linked finding, and all existing verification, external-status and approved-disposition checks. It creates a separate Retest Passed attempt linked to the original observation; the original result and evidence remain unchanged. Pending retests cannot pass through ordinary single, bulk, rich-result or imported-result controls, cycle completion, Full Clearance or Conditional Clearance. Environment or fix changes invalidate stale verification; build numbers remain audit evidence and need not equal the cycle build. Required business/release stages and self-verification restrictions remain enforced. The execution export includes a **Retest Outcomes** worksheet.
+
+Deploy migration **e7a91c4d8b20_execution_retest_observations.py**, after **d69a4c8e2f10**, before starting the updated backend, with the matching frontend. From `backend`, run `venv/bin/python -m alembic upgrade head` in the intended deployment environment. The migration creates `qap_test_retests` and `qap_retest_outcomes`, is restartable, and retains audit records on rollback. **This migration has not been applied to UAT by this implementation task.**
+
+Validation passed: **342 backend tests**, **589 frontend tests**, production typechecking/build/bundle audit, and offline OpenAPI/Oracle DDL checks covering 447 API paths, 507 operations, 330 schemas and 1,207 references. The added tests cover the retest sequence, separate runner/reviewer permissions, failed-fix reopening, rollback, evidence retention, stale contexts, all-linked-defect checks, pending clearance guards, exports and migration restartability. See `validation/execution-retests-validation-2026-10-15.json`. These are isolated regression checks; real LDAP, SMTP, scanner connectivity and deployed Oracle execution of this new migration were not exercised.
+
+### Retest system recheck (2026-10-15)
+
+The subsequent full rerun passed all 342 backend tests, 589 frontend tests, production typechecking/build/bundle audit and offline API/Oracle contracts. No product source changed during this recheck. The retest tests cover observations before verification, independent QA review, failed-fix reopening, immutable evidence, stale-context rejection and final pass/clearance guards alongside the existing workflow suites.
+
+Read-only UAT inspection now confirms migration **e7a91c4d8b20** is applied, all 71 mapped tables have the expected columns, and the new retest tables have their target constraints, foreign keys and run index. All 117 current workflow records serialized successfully; the owner/approver audit found no issues. Register filters passed 78 checks across 15 authorized actor/workspace contexts. All three currently assigned executions with prior failures returned valid retest contexts, and `/api/health` reported the application and database healthy. No retest observations exist in UAT yet, so retest writes and final confirmation were exercised in isolated API tests. The recheck applied no migration and changed no business records.
+
+Real LDAP remains disabled/unconfigured, SMTP remains disabled/unconfigured, and both configured SSC endpoints refused connections. The defect participant audit found no unrelated role groups in the creation route, but no live email delivery was attempted. Public OpenAPI access over local plain HTTP returned 426; UAT documentation is disabled by configuration, and contracts were validated offline. These deployment/integration limits are separate from the passing retest regression. See `validation/retest-system-recheck-validation-2026-10-15.json` and `validation/retest-system-recheck-2026-10-15/` for evidence.
+
+### Simplified execution retesting (2026-10-15)
+
+Retesting now appears inside the existing **Record Result → Log New Attempt** form. The same rich actual-result editor, attachment control and artifact reference fields serve first runs and retests. Quick execution and My Executions use one Run action; Defect Management opens the same saved evidence and review controls. The separate "Retest linked defects" form and repeated per-defect reason fields have been removed.
+
+Findings that have no submitted fix show **Awaiting fix**. When none is ready, the form retains the current execution result and shows that status instead of asking for a new passing observation. For a ready fix, select only the findings tested, enter the attempt result and evidence once, and optionally provide a different outcome or specific details for an individual finding. Untouched findings retain their lifecycle, owner and prior evidence without a manufactured Not tested outcome. A failed finding uses the shared actual result as its reopening reason unless more specific details are supplied. Existing Change Request/NA disposition entry remains available.
+
+Partial retests retain separate immutable attempts. Each finding's latest observation supersedes its earlier observations; valid proof for untouched findings is reused across partial attempts in the same execution, pinned version, environment and fix iteration. Reviewers can verify an earlier finding after another finding has been tested. Verification uses the recorded evidence, including authenticated downloads from the original execution attempt, rather than asking for another upload. Reopened findings wait for a fresh submitted fix; changed fixes, stale contexts, missing evidence and later failed outcomes cannot reuse earlier success. External tracker status and approved-disposition rules remain in force.
+
+The latest passing observation still needs explicit final confirmation. The backend checks every currently linked finding using current verification and evidence, then writes a separate Retest Passed attempt with the source outcome receipt IDs in audit history. Ordinary result APIs cannot bypass the pending retest guard. Cycle completion and Full/Conditional Clearance guards are preserved. Deploy the matching frontend and backend together; **no additional migration is required** beyond the existing `e7a91c4d8b20` retest tables.
+
+Validation passed: 356 backend tests, 596 frontend tests, production typecheck/build/bundle audit, 212 Python source compilations, and offline API/Oracle contracts. Read-only Oracle checks validated 118 current workflow records, four assigned execution contexts, current migration `e7a91c4d8b20`, and active owner/approver reachability. See `validation/simplified-retest-validation-2026-10-15.json`. Retest writes were exercised in isolated API tests; this check changed no live business records and did not re-probe external LDAP, SMTP or scanner connectivity.
+
+### Closed-defect Run correction (2026-10-15)
+
+When linked findings have cleared the execution's verification requirements, **Run** now uses the normal result buttons, including **Retest Passed**. It no longer routes every previously failed testcase with a linked defect into the observation form. An unfinalized retest or unresolved finding still uses the governed retest flow. Older readiness responses are normalized so omitted presentation fields do not produce a false Awaiting fix message. If the table row is stale but a freshly loaded context permits ordinary results, the open result view exposes Retest Passed with fresh confirmation and the current execution revision.
+
+Read-only inspection confirmed the reported `TQA-DEF-00004` is Closed/Fixed and its verification covers execution `TQA-TC-04`; the backend's ordinary retest gate returns no blocker. The fix preserves closure, original failed attempts, pending final confirmation, environment verification and certificate guards. Validation passed 359 backend tests, 601 frontend tests, the production build/bundle audit and offline contracts. No additional migration or live business-record correction was performed. See `validation/closed-retest-run-validation-2026-10-15.json`.
+
+### Cycle planning and reviewed request links (2026-10-15)
+
+Planned End Date is optional when creating/editing a cycle and during Ready,
+execution, completion and clearance. Start Date stays required; an end date,
+when supplied, must be on or after it. Existing dates and immutable completed
+cycle evidence remain intact. The database column was already nullable, so no
+additional migration is needed.
+
+The shared cycle request picker searches request ID, application, CR/EPIC,
+change type and business defect reference. Preview opens the existing Functional
+Request drawer in read-only mode. Selecting **Use this request** records an audit
+confirmation and returns a signed receipt scoped to the user, project, cycle
+(when editing), request and current request details. Receipts expire after one
+hour and are applied once, atomically with the cycle/link save. Changed request
+details, expired receipts and another user's/request's/project's/cycle's receipt
+require a fresh preview. Confirmation and application are retained as separate
+append-only audit events and do not send workflow reminders.
+
+Create Cycle, changed request links (including completed-cycle trace recovery)
+and Functional **Link & Start Execution** enforce the receipt in the backend.
+Standalone cycles, unlinking, unrelated metadata edits and starting an existing
+link do not need a new preview. Governed clearance re-execution keeps its inherited
+request link and immutable lineage. Existing workspace/application/stage/owner,
+retest, completion and certificate checks remain enforced. Deploy matching
+frontend/backend versions together. Regression evidence and scope limits are in
+`validation/cycle-preview-2026-10-15/report.json`.

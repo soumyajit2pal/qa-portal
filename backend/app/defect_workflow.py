@@ -84,7 +84,7 @@ def _verification_state_is_usable(obj, workflow_state):
     )
 
 
-def verified_for(obj, environment, build=None):
+def verified_for(obj, environment, build=None, execution_id=None):
     """Return whether verification covers an execution context.
 
     Verification is environment-scoped for every modern workflow stage. The
@@ -99,7 +99,8 @@ def verified_for(obj, environment, build=None):
         return False
     results = [e for e in s.get('history', []) if e.get('kind') == 'verification'
                and e.get('iteration') == s.get('iteration', 0)
-               and e.get('environment') == environment]
+               and e.get('environment') == environment
+               and (not e.get('execution_id') or e.get('execution_id') == execution_id)]
     return bool(results and results[-1]['result'] == 'Passed')
 
 

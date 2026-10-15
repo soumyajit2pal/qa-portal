@@ -11,7 +11,7 @@ from . import models
 from .constants import CERTIFICATE_TYPES, ENVIRONMENT_PIPELINE_ORDER, QAStatus, SAST_DAST_CLEARANCE_RESOLVED_STATUSES
 
 TERMINAL = {'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'}
-EXECUTION_STATUSES = ['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed']
+EXECUTION_STATUSES = ['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Retest Pending', 'Not Executed']
 EXECUTION_POPULATION_BASIS = 'unique_testcase_latest'
 FULL_CLEARANCE_EXECUTION_STATUSES = {'Pass', 'Retest Passed', 'NA'}
 CLEARANCE_TYPES = {'Full Clearance', 'Conditional Clearance'}
@@ -256,8 +256,10 @@ def capture(db, obj):
         or_(models.Defect.qa_workspace_id == obj.qa_workspace_id,
             models.Defect.qa_request.has(models.QARequest.qa_workspace_id == obj.qa_workspace_id)),
         or_(models.Defect.qa_request_id == source.qa_request_id,
+            models.Defect.functional_request_links.any(models.DefectFunctionalRequestLink.functional_request_id == source.id),
             models.Defect.execution_id.in_(all_execution_ids),
             models.Defect.execution_links.any(models.DefectExecutionLink.execution_id.in_(all_execution_ids)),
+            models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution_id.in_(all_execution_ids))),
             models.Defect.cycle_id.in_(all_cycle_ids))).order_by(models.Defect.id).all()
     result = aggregate(executions, defects)
     result['testing_scope'] = obj.live_testing_scope
@@ -323,7 +325,7 @@ def capture(db, obj):
                   environment=obj.environment_tested, build=obj.build_number,
                   execution_ids=[item.id for item in executions], defect_ids=[item.id for item in defects],
                   cycle_ids=cycle_ids, defect_scope_cycle_ids=all_cycle_ids,
-                  population_note='Latest effective result per unique testcase across the leaf/latest linked Functional Request cycles of each re-execution lineage. When a testcase appears in more than one eligible leaf cycle, executed_at (or the slot created_at for Not Executed) determines the latest state, with execution ID as a deterministic tie-breaker. All eligible execution slots remain listed in the frozen audit trace even when duplicate testcase memberships are collapsed in the summary. Lineage leaves are determined before filtering by certificate environment, so a successor in another environment cannot make its predecessor current evidence again. Superseded execution rounds remain immutable history and are excluded from execution totals. Build values are retained as evidence and do not filter eligibility. Defects include direct QA Request links and primary/additional links across every historical ancestor of the selected environment-matching leaves; each defect is counted once. Deferred remains open. Pass % = (Pass + Retest Passed) / (Total − NA). No matching records means no evidence, not a passing result.')
+                  population_note='Latest effective result per unique testcase across the leaf/latest linked Functional Request cycles of each re-execution lineage. When a testcase appears in more than one eligible leaf cycle, executed_at (or the slot created_at for Not Executed) determines the latest state, with execution ID as a deterministic tie-breaker. All eligible execution slots remain listed in the frozen audit trace even when duplicate testcase memberships are collapsed in the summary. Lineage leaves are determined before filtering by certificate environment, so a successor in another environment cannot make its predecessor current evidence again. Superseded execution rounds remain immutable history and are excluded from execution totals. Build values are retained as evidence and do not filter eligibility. Defects include direct QA Request and Functional Request links and primary/additional/historical execution links across every historical ancestor of the selected environment-matching leaves; each defect is counted once. Deferred remains open. Pass % = (Pass + Retest Passed) / (Total − NA). No matching records means no evidence, not a passing result.')
     return result
 
 
@@ -417,6 +419,8 @@ def has_documented_text(value):
 
 
 def validate_conditional_clearance_requirements(evidence):
+    if evidence['execution']['counts'].get('Retest Pending'):
+        raise HTTPException(400, 'Confirm pending retest verification before requesting clearance')
     if any(count and status not in EXECUTION_STATUSES
            for status, count in evidence['execution']['counts'].items()):
         raise HTTPException(400, 'Conditional Clearance requires recognized test execution statuses')

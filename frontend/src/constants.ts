@@ -1060,6 +1060,7 @@ type ExecutionLinkedDefect = {
   resolution_type?: string | null
   related_cr_number?: string | null
   modern_workflow?: boolean
+  requires_execution_verification?: boolean
   verified_execution_ids?: number[]
 }
 
@@ -1070,14 +1071,14 @@ export function defectBlocksExecution(defect: ExecutionLinkedDefect, executionId
   if (['Deferred', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'].includes(defect.status)) return false
   if (defect.status === 'Closed' && defect.resolution_type === 'Accepted Risk') return false
   if (executionId && defect.verified_execution_ids?.includes(executionId)) return false
-  return !!defect.modern_workflow || !DEFECT_RETEST_CLEAR_STATUSES.includes(defect.status)
+  return !!(defect.modern_workflow || defect.requires_execution_verification) || !DEFECT_RETEST_CLEAR_STATUSES.includes(defect.status)
 }
 
-type AttemptDefectReference = { defect_key: string; defect_url?: string | null; defect_status?: string | null }
+type AttemptDefectReference = { is_historical?: boolean; defect_key: string; defect_url?: string | null; defect_status?: string | null }
 
 export function activeExternalExecutionDefects(runs: { defects?: AttemptDefectReference[] }[] | undefined): AttemptDefectReference[] {
   return (runs || []).flatMap(run => run.defects || []).filter(defect =>
-    !defect.defect_url?.startsWith('/defects')
+    !defect.is_historical && !defect.defect_url?.startsWith('/defects')
     && !['RESOLVED', 'CLOSED'].includes((defect.defect_status || 'Open').trim().toUpperCase()))
 }
 
@@ -1099,6 +1100,22 @@ export function activeExternalExecutionDefects(runs: { defects?: AttemptDefectRe
 //    (defectKeyInput) -- the backend additionally verifies that key
 //    resolves to an existing, currently-active governed Defect, which this
 //    client-side check can't do without a round trip.
+export function usesRetestForm(execution: {
+  id?: number; status: string; linked_defects?: ExecutionLinkedDefect[]; runs?: { status: string; retest?: { final_run_id?: number | null } | null; defects?: AttemptDefectReference[] }[]
+}): boolean {
+  // Preserve the existing governed NA path for a converted Change Request.
+  if (execution.linked_defects?.some(defect => defect.status === 'Change Request Raised' && !!defect.related_cr_number?.trim())
+      && execution.linked_defects.every(defect => !defectBlocksExecution(defect, execution.id))
+      && !activeExternalExecutionDefects(execution.runs).length) return false
+  if (!hasRetestEligibleHistory(execution.runs, execution.status)) return false
+  const latest = execution.runs?.at(-1)
+  // An observation still awaiting confirmation must finish its recorded flow.
+  if ((latest?.retest && !latest.retest.final_run_id) || execution.status === 'Retest Pending') return true
+  // Cleared findings use the ordinary Run result buttons, including Retest Passed.
+  return !!execution.linked_defects?.some(defect => defectBlocksExecution(defect, execution.id))
+    || !!activeExternalExecutionDefects(execution.runs).length
+}
+
 export function executionStatusGate(
   linkedDefects: ExecutionLinkedDefect[] | undefined,
   runs: { status: string; defects?: AttemptDefectReference[] }[] | undefined,
@@ -1108,10 +1125,11 @@ export function executionStatusGate(
   executionId?: number,
 ): string | null {
   if (!['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed'].includes(status)) return null
+  if (currentStatus === 'Retest Pending' && ['Pass', 'Retest Passed'].includes(status)) return 'Use Confirm final retest after the per-defect verification checks are satisfied.'
   const activeDefects = (linkedDefects || []).filter((defect) => defectBlocksExecution(defect, executionId))
   if (activeDefects.length) {
     const names = activeDefects.map((d) => `${d.defect_key} (${d.status})`).join(', ')
-    return `Linked defect verification does not cover this execution (${names}). Check the environment in Edit Cycle. Build numbers remain visible as audit evidence, but do not need to match the cycle build.`
+    return `Final passing result requires linked defect verification (${names}). Use the execution form to record ready fixes and evidence before verification. Check the actual cycle environment. Build numbers remain visible as audit evidence, but do not need to match the cycle build.`
   }
   const externalDefects = activeExternalExecutionDefects(runs)
   if (externalDefects.length) {
@@ -1153,3 +1171,5 @@ export function hasRetestEligibleHistory(
   return (runs || []).some((run) => ['Fail', 'Blocked'].includes(run.status))
     || ((runs || []).length === 0 && ['Fail', 'Blocked'].includes(currentStatus || ''))
 }
+
+export const EXECUTION_LINKABLE_DEFECT_STATUSES = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Not a Defect Review', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'Deferred', 'Closed']

@@ -3,6 +3,7 @@ import { api } from "../../api";
 import { istToday } from "../../time";
 import { ErrorText, Field, Modal } from "../../components/Common";
 import SearchableSelect from "../../components/SearchableSelect";
+import BusinessDefectNumberField from "../../components/BusinessDefectNumberField";
 import NewApplicationDisabledModal from "../../components/NewApplicationDisabledModal";
 import RoleGroupLink from "../../components/RoleGroupLink";
 import { IconUsers } from "../../components/Icons";
@@ -328,16 +329,8 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
               }}
             />
           </Field>
-          {form.change_type === "Bug Fix" && (
-            <Field label="Defect Number (Raised By Business)">
-              <input
-                value={form.business_defect_number}
-                maxLength={64}
-                placeholder="Enter the defect number raised by business"
-                onChange={(event) => set("business_defect_number", event.target.value)}
-              />
-            </Field>
-          )}
+          <BusinessDefectNumberField changeType={form.change_type} value={form.business_defect_number}
+            onChange={(value) => set("business_defect_number", value)} />
           {["Bug Fix", "Enhancement"].includes(form.change_type) && (
             <Field label="Previous Completed Request ID (optional)">
               <SearchableSelect

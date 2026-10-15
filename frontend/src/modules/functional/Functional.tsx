@@ -1,7 +1,7 @@
 import TestingScopeNotice, { additionalTestingOptions } from '../../components/TestingScopeNotice'
 import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
-import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
+import { useRequestNavigation, useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
@@ -12,6 +12,8 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisi
 import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
 import UserAssignSelect from "../../components/UserAssignSelect";
 import ConfirmModal from "../../components/ConfirmModal";
+import BusinessDefectNumberField from "../../components/BusinessDefectNumberField";
+import CycleRequestPicker from "../../components/CycleRequestPicker";
 import JiraActivity from "../../components/JiraActivity";
 import ClearableSearchInput from "../../components/ClearableSearchInput";
 import RaisedHistoryFilter from "../../components/RaisedHistoryFilter";
@@ -101,6 +103,7 @@ function FunctionalFormModal({
     application_name: editing.application_name || "",
     cr_number: editing.cr_number || editing.epic_number || "",
     change_type: editing.change_type || "New",
+    business_defect_number: editing.business_defect_number || "",
     environment: editing.environment || "SIT",
     target_promotion_environment: editing.target_promotion_environment || "UAT",
     release_version: editing.release_version || "",
@@ -263,7 +266,11 @@ function FunctionalFormModal({
             <Field label="Change Type">
               <select
                 value={form.change_type}
-                onChange={(e) => set("change_type", e.target.value)}
+                onChange={(e) => {
+                  const changeType = e.target.value;
+                  set("change_type", changeType);
+                  if (changeType !== "Bug Fix") set("business_defect_number", "");
+                }}
               >
                 {CHANGE_TYPES.map((o) => (
                   <option key={o} value={o}>
@@ -272,6 +279,8 @@ function FunctionalFormModal({
                 ))}
               </select>
             </Field>
+            <BusinessDefectNumberField changeType={form.change_type} value={form.business_defect_number}
+              onChange={(value) => set("business_defect_number", value)} />
             <Field label="Deployment Environment">
               <select
                 value={form.environment}
@@ -496,10 +505,11 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
   req: FunctionalOut;
   busy: boolean;
   onCancel: () => void;
-  onStart: (cycleId: number | null) => void;
+  onStart: (cycleId: number | null, previewToken?: string) => void;
 }) {
   const [cycles, setCycles] = useState<EligibleTestCycleOut[]>([]);
   const [selectedCycleId, setSelectedCycleId] = useState<number | null>(null);
+  const [requestPreviewToken, setRequestPreviewToken] = useState("");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -566,7 +576,7 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
         {!loading && cycles.length === 0 && !error && <div className="execution-cycle-empty"><span className="execution-cycle-empty-icon">○</span><strong>No eligible Test Cycles</strong><span>Create or make a Test Cycle available for this application, then return here to start execution.</span></div>}
         {!loading && cycles.length > 0 && visibleCycles.length === 0 && <div className="execution-cycle-empty compact"><strong>No matching Test Cycles</strong><span>Try a different cycle name, ID, or project.</span></div>}
         <div className="execution-cycle-list">
-          {visibleCycles.map((cycle) => <button type="button" key={cycle.id} aria-pressed={selectedCycleId === cycle.id} className={selectedCycleId === cycle.id ? "selected" : ""} onClick={() => setSelectedCycleId(cycle.id)}>
+          {visibleCycles.map((cycle) => <button type="button" key={cycle.id} aria-pressed={selectedCycleId === cycle.id} className={selectedCycleId === cycle.id ? "selected" : ""} onClick={() => { setSelectedCycleId(cycle.id); setRequestPreviewToken('') }}>
             <span className="execution-cycle-radio" aria-hidden="true"><i /></span>
             <span className="execution-cycle-copy"><strong>{cycle.name}</strong><small><b>{cycle.cycle_key}</b><span>•</span>{cycle.project_key}<span>•</span>{cycle.project_name}</small></span>
             <Badge status={cycle.status} />
@@ -575,6 +585,10 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
         <ErrorText error={error} />
       </div>
 
+      {selectedCycle && <CycleRequestPicker projectId={selectedCycle.project_id} application={req.application_name || ''}
+        cycleId={selectedCycle.id} value={`Functional:${req.id}`} options={[req]} disabled standalone={false}
+        onChange={() => {}} onReviewed={setRequestPreviewToken} reviewRequired reviewed={!!requestPreviewToken} />}
+
       <div className="execution-cycle-footer">
         <div className={`execution-cycle-selection ${selectedCycle ? "ready" : ""}`}>
           <span aria-hidden="true">{selectedCycle ? "✓" : "1"}</span>
@@ -582,7 +596,7 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
         </div>
         <div className="execution-cycle-actions">
           <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
-          <button type="button" className="btn btn-primary" disabled={busy || selectedCycleId === null} onClick={() => onStart(selectedCycleId)}>{busy ? "Starting…" : "Link & Start Execution"}</button>
+          <button type="button" className="btn btn-primary" disabled={busy || selectedCycleId === null || !requestPreviewToken} onClick={() => onStart(selectedCycleId, requestPreviewToken)}>{busy ? "Starting…" : "Link & Start Execution"}</button>
         </div>
       </div>
     </div>}
@@ -722,6 +736,7 @@ interface FunctionalDetailProps {
   onClose: () => void;
   onChanged: (req: FunctionalOut) => void;
   users: UserOption[];
+  preview?: { busy: boolean; onConfirm: () => void };
 }
 
 export function FunctionalDetail({
@@ -729,8 +744,10 @@ export function FunctionalDetail({
   onClose,
   onChanged,
   users,
+  preview,
 }: FunctionalDetailProps) {
   const { user } = useAuth();
+  const navigate = useRequestNavigation();
   const [tab, setTab] = useState("overview");
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>([]);
   const [history, setHistory] = useState<ApprovalActionOut[]>([]);
@@ -874,13 +891,13 @@ export function FunctionalDetail({
     await act("request-signoff", { signoff_id: cert.id });
   }
 
-  async function startExecution(cycleId: number | null) {
+  async function startExecution(cycleId: number | null, previewToken?: string) {
     setError(null);
     setBusyAction("start-execution");
     try {
       const updated = await api.post<FunctionalOut>(
         `/api/functional-requests/${req.id}/start-execution`,
-        { test_cycle_id: cycleId }
+        { test_cycle_id: cycleId, ...(previewToken ? { request_preview_token: previewToken } : {}) }
       );
       onChanged(updated);
       setShowStartExecution(false);
@@ -910,7 +927,7 @@ export function FunctionalDetail({
   const qaLeads = useUserOptions('qa_lead')
   const testers = useUserOptions('tester')
 
-  const viewOnly = isViewOnly(user);
+  const viewOnly = !!preview || isViewOnly(user);
   const workflowActors = functionalWorkflowActors({
     userId: user?.id,
     requesterId: req.requester_id,
@@ -1411,6 +1428,7 @@ export function FunctionalDetail({
               </WarningNotice>
             )}
 
+          {!preview && <>
           <div className="section-title">Workflow Actions</div>
           {executionNotice && <div className={`execution-start-notice ${executionNotice.includes("was unlinked") ? "unlinked" : "linked"}`} role="status"><strong>{executionNotice.includes("was unlinked") ? "Test cycle unlinked" : "Execution started"}</strong><span>{executionNotice}</span></div>}
           {createdReexecutionCycle && (
@@ -1462,6 +1480,9 @@ export function FunctionalDetail({
                 }
               >
                 Export PDF
+              </button>
+              <button className="btn btn-sm" onClick={() => navigate(`/defects?functional_request_id=${req.id}`)}>
+                View linked defects
               </button>
               {canEditDetails && (
                 <button
@@ -2021,6 +2042,7 @@ export function FunctionalDetail({
               onCreated={requestSignoffWithCertificate}
             />
           )}
+          </>}
         </div>
       )}
 
@@ -2109,7 +2131,7 @@ export function FunctionalDetail({
                 />
               </span>
               <ChecklistEvidence apiBase="/api/functional-requests" reqId={req.id} itemId={c.id}
-                canManage={canManageReadinessEvidence(req.status, evidenceOwner)}
+                canManage={!preview && canManageReadinessEvidence(req.status, evidenceOwner)}
                 required={c.is_mandatory || c.requester_checked}
                 documents={documentsByItem[c.id] || []}
                 onReload={reloadEvidence}
@@ -2120,14 +2142,20 @@ export function FunctionalDetail({
       )}
 
       {tab === "history" && (
-        <JiraActivity ownerWorkspaceId={req.qa_workspace_id} entityType="FUNCTIONAL_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
+        <JiraActivity readOnly={!!preview} ownerWorkspaceId={req.qa_workspace_id} entityType="FUNCTIONAL_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {tab === "documents" && (
-        <RequestDocuments apiBase="/api/functional-requests" reqId={req.id} canManage={canManageDocuments} />
+        <RequestDocuments apiBase="/api/functional-requests" reqId={req.id} canManage={!preview && canManageDocuments} />
       )}
 
       <ReadinessPassError error={readinessPassError} />
+      {preview && <div className="cycle-request-preview-confirm">
+        <p>Review the application, CR / EPIC, business defect reference and requested change before linking this request.</p>
+        <button type="button" className="btn btn-primary" disabled={preview.busy || !!error} onClick={preview.onConfirm}>
+          {preview.busy ? 'Confirming…' : 'Use this request'}
+        </button>
+      </div>}
       {showStartExecution && <StartExecutionModal req={req} busy={busyAction === "start-execution"} onCancel={() => setShowStartExecution(false)} onStart={startExecution} />}
     </Modal>
   );
@@ -2260,6 +2288,12 @@ export default function Functional() {
               key: "cr_number",
               header: "CR Number/EPIC Number",
               render: (r) => r.cr_number || r.epic_number || "—",
+            },
+            {
+              key: "change_type",
+              header: "Change Type",
+              render: (r) => r.change_type || "—",
+              filterValue: (r) => r.change_type || "",
             },
             {
               key: "change_description",

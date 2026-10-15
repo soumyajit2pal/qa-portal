@@ -114,7 +114,7 @@ def assignment_error(db, defect, candidate, field, department=None):
     if not candidate or not candidate.is_active or not candidate.show_in_user_dropdowns:
         return 'Select an active, visible user'
     roles = set(candidate.roles)
-    if Role.VIEW_ONLY in roles or not roles.intersection(OWNER_ROLES[field]):
+    if roles & {Role.VIEW_ONLY, Role.SCALE_6_PLUS} or not roles.intersection(OWNER_ROLES[field]):
         return 'Select a user with an eligible workflow role'
     from .workspace_service import selectable_workspace_ids, inherited_workspace_access_mode
     workspace_id = getattr(defect, 'qa_workspace_id', None) or (defect.qa_request.qa_workspace_id if defect.qa_request else None)

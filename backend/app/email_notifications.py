@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from html import escape
 from urllib.parse import quote
+from uuid import uuid4
 
 from sqlalchemy import event, or_
 from sqlalchemy.orm import Session as SASession, joinedload, selectinload
@@ -205,12 +206,17 @@ def _recipient_key(action: models.ApprovalAction, recipient_email: str) -> tuple
     """Return a transaction-local key for the outbox's unique pair.
 
     An ``ApprovalAction`` normally has no database identity while the
-    before-commit listener is assembling its notifications.  The Python
-    object identity is therefore the only stable key until the action has
-    been flushed.  Once it has an ID, use that ID so an existing persisted
-    outbox row is also recognised.
+    before-commit listener is assembling its notifications. An action-local
+    token stays stable until flush. A Python memory address can be reused
+    after a previous transaction, so it must not identify a new action.
+    Once it has an ID, use that ID to recognise persisted outbox rows.
     """
-    action_key = f"id:{action.id}" if action.id is not None else f"pending:{id(action)}"
+    if action.id is not None:
+        action_key = f"id:{action.id}"
+    else:
+        if not getattr(action, '_outbox_pending_key', None):
+            action._outbox_pending_key = uuid4().hex
+        action_key = f"pending:{action._outbox_pending_key}"
     return action_key, recipient_email.strip()
 
 
@@ -947,6 +953,8 @@ def _is_workflow_transition(action: models.ApprovalAction) -> bool:
     Without this guard, an evidence upload during SM approval would send a
     second, misleading SM reminder even though no workflow stage changed.
     """
+    if action.step_name in {'Traceability', 'Defect Traceability', 'Test Cycle Preview', 'Request Preview'}:
+        return False
     if str(action.step_name or "").startswith("Security obstacle #") and action.entity_type in {"SAST", "DAST"}:
         return True
     # Defects have an explicit state graph. Several legitimate stage names
@@ -1262,6 +1270,9 @@ def _status_label(value) -> str:
 
 
 def _queue_for_action(db: SASession, action: models.ApprovalAction) -> int:
+    if action.step_name in {'Test Cycle Preview', 'Request Preview'}:
+        # Reviewing a request records traceability without a workflow handoff.
+        return 0
     # Before SMTP is deliberately enabled, do not accumulate weeks of stale
     # workflow mail that would surprise users on the first activation.
     if not _enabled():

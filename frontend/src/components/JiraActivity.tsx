@@ -731,10 +731,13 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
 function WorkflowEventDetails({ event, basePath }: { event: Record<string, any>; basePath: string }) {
   const [open, setOpen] = useState(false)
   const [error, setError] = useState<unknown>(null)
-  async function download(doc: { id: number; file_name: string }) {
+  async function download(doc: { id: number; file_name: string; module?: string; request_id?: number }) {
     try {
       setError(null)
-      const blob = await api.getBlob(`${basePath}/${doc.id}/download`, 600_000)
+      const evidencePath = doc.module === 'TEST_EXEC_IMAGE' && Number.isInteger(event.execution_id) && Number.isInteger(doc.request_id)
+        ? `/api/test-execution/executions/${event.execution_id}/runs/${doc.request_id}/images/${doc.id}/download`
+        : `${basePath}/${doc.id}/download`
+      const blob = await api.getBlob(evidencePath, 600_000)
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a'); anchor.href = url; anchor.download = doc.file_name
       anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)

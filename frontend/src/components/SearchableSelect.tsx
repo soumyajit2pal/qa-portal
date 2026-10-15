@@ -38,6 +38,9 @@ interface SearchableSelectProps {
   favoriteGroupLabel?: string
   optionsGroupLabel?: string
   searchPlaceholder?: string
+  // Remote option lists own searching and paging; retain this shared dropdown.
+  onSearchChange?: (query: string) => void
+  optionsFooter?: React.ReactNode
   // Passed through to the root wrapper -- e.g. a toolbar dropdown that
   // isn't already inside a width-constraining Field wrapper (native
   // <select>s in the same spot would otherwise just size to content too,
@@ -57,13 +60,15 @@ function normalize(options: string[] | SearchableSelectOption[]): SearchableSele
 // Short, fixed-size enums (Priority, Risk, Status, Environment and the like)
 // use `searchable={false}` so they keep this same visual and interaction
 // pattern without displaying an unnecessary search field.
-export default function SearchableSelect({ value, onChange, options, ariaLabel, placeholder, disabled, searchable = true, autoOpen = false, favoriteValues, favoriteGroupLabel = 'Favorites', optionsGroupLabel = 'All options', searchPlaceholder = 'Search...', style }: SearchableSelectProps) {
+export default function SearchableSelect({ value, onChange, options, ariaLabel, placeholder, disabled, searchable = true, autoOpen = false, favoriteValues, favoriteGroupLabel = 'Favorites', optionsGroupLabel = 'All options', searchPlaceholder = 'Search...', onSearchChange, optionsFooter, style }: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [panelPos, setPanelPos] = useState<PanelPos>({ top: 0, bottom: 'auto', left: 0, width: 0 })
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { onSearchChange?.(query) }, [query, onSearchChange])
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
@@ -116,7 +121,7 @@ export default function SearchableSelect({ value, onChange, options, ariaLabel, 
 
   const opts = normalize(options)
   const current = opts.find((o) => o.value === value)
-  const filtered = searchable
+  const filtered = searchable && !onSearchChange
     ? opts.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()))
     : opts
   const hasFavoriteGrouping = favoriteValues !== undefined
@@ -220,6 +225,7 @@ export default function SearchableSelect({ value, onChange, options, ariaLabel, 
             {favoriteOptions.map(renderOption)}
             {regularOptions.length > 0 && hasFavoriteGrouping && <div className="searchable-select-group-label" role="presentation">{optionsGroupLabel}</div>}
             {regularOptions.map(renderOption)}
+            {optionsFooter}
           </div>
         </div>
       )}

@@ -375,6 +375,14 @@ export interface LinkedRequestRef {
   module_name?: string | null
 }
 
+export interface CycleFunctionalRequestOption extends LinkedRequestRef {
+  application_name?: string | null
+  cr_number?: string | null
+  epic_number?: string | null
+  change_type?: string | null
+  business_defect_number?: string | null
+}
+
 // Minimal cross-reference the other direction from LinkedRequestRef -- one
 // of the Suppression / False Positive requests raised against a given
 // SAST/DAST request -- see backend schemas.LinkedSuppressionRef.
@@ -559,6 +567,7 @@ export interface FunctionalListOut {
   epic_number?: string | null
   cr_number?: string | null
   change_description?: string | null
+  change_type?: string | null
   department?: string | null
   application_owner?: string | null
   qa_request?: LinkedRequestRef | null
@@ -1968,9 +1977,37 @@ export interface TestRunDefectOut {
   linked_by_id?: number | null
   linked_by_name?: string | null
   created_at: string
+  is_historical?: boolean
+  governed_defect_id?: number | null
+  linked_workflow_revision?: number | null
+}
+
+export interface RetestOutcomeOut {
+  id: number
+  defect_id?: number | null
+  external_link_id?: number | null
+  defect_key: string
+  defect_status?: string | null
+  outcome: string
+  notes?: string | null
+  evidence_reference?: string | null
+  evidence_documents: { id: number; file_name: string }[]
+  defect_revision?: number | null
+  fix_iteration?: number | null
+  verification_valid: boolean
+}
+export interface ExecutionRetestOut {
+  run_id: number
+  observed_result: string
+  environment: string
+  tested_build: string
+  pinned_version_id: number
+  final_run_id?: number | null
+  outcomes: RetestOutcomeOut[]
 }
 
 export interface TestExecutionRunOut {
+  retest?: ExecutionRetestOut | null
   id: number
   execution_id: number
   attempt_no: number
@@ -2069,6 +2106,7 @@ export interface TestExecutionSummaryOut {
 }
 
 export interface LinkedGovernedDefectRef {
+  requires_execution_verification?: boolean
   modern_workflow?: boolean
   verified_execution_ids?: number[]
   id: number
@@ -2220,11 +2258,32 @@ export interface DefectWorkflowPolicy {
   business_environment: string
   production_for_all: boolean
 }
+export interface HistoricalDefectExecutionLinkOut extends DefectExecutionLinkOut {
+  run_id: number
+  attempt_no: number
+  notes?: string | null
+  linked_by_id?: number | null
+  linked_by_name?: string | null
+  created_at: string
+  linked_workflow_revision?: number | null
+}
+
+export interface FunctionalRequestReference {
+  id: number
+  request_id: string
+  sources: string[]
+  linked_at?: string | null
+  linked_by_name?: string | null
+  reason?: string | null
+}
+
 export interface DefectOut {
+  functional_requests?: FunctionalRequestReference[]
+  resolver_department?: string | null
   cc_user_ids?: number[]
   cc_users?: UserOption[]
   workflow?: DefectWorkflowPolicy | null
-  workflow_state?: { production_impact?: string; qa_owner_id?: number; qa_owner_reassigned_at?: string; business_owner_id?: number; release_owner_id?: number; deployed_build?: string; blocked?: { reason: string; review_date: string; owner_id?: number }; occurrences?: Record<string, any>[]; history?: Record<string, any>[] }
+  workflow_state?: { resolver_department?: string; resolver_owner_id?: number; production_impact?: string; qa_owner_id?: number; qa_owner_reassigned_at?: string; business_owner_id?: number; release_owner_id?: number; deployed_build?: string; blocked?: { reason: string; review_date: string; owner_id?: number }; occurrences?: Record<string, any>[]; history?: Record<string, any>[] }
   workflow_revision?: number
   workflow_stages?: string[]
   workflow_transitions?: string[]
@@ -2258,6 +2317,7 @@ export interface DefectOut {
   // to, beyond its primary one above -- see the "Link existing defect"
   // picker (TestExecution.tsx), widened to offer already-linked defects too.
   execution_links: DefectExecutionLinkOut[]
+  historical_execution_links?: HistoricalDefectExecutionLinkOut[]
   application_name: string
   module_name?: string | null
   module_feature: string
@@ -2323,6 +2383,7 @@ export interface DefectOut {
 // (PAG-005); Defects.tsx fetches the full `DefectOut` via `GET /{id}` only
 // when a row is actually opened (PAG-006).
 export interface DefectListOut {
+  functional_requests?: FunctionalRequestReference[]
   modern_workflow?: boolean
   resolution_type?: string | null
   verified_builds?: { environment: string; build: string }[]
@@ -2341,6 +2402,7 @@ export interface DefectListOut {
   execution_id?: number | null
   execution_status?: string | null
   execution_links: DefectExecutionLinkOut[]
+  historical_execution_links?: HistoricalDefectExecutionLinkOut[]
   application_name: string
   module_name?: string | null
   module_feature: string

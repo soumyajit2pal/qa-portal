@@ -1,5 +1,11 @@
 import type { DefectOut, UserOption } from './types'
 
+export function defectResolverDepartment(defect: DefectOut): string {
+  return defect.resolver_department || defect.workflow_state?.resolver_department
+    || [...(defect.workflow_state?.history || [])].reverse().find(entry => entry.to === 'Triaged' && entry.assigned_team)?.assigned_team
+    || defect.assigned_team || ''
+}
+
 export function independentDefectReviewers(users: UserOption[], proposerId?: number, resolverId?: number | null): UserOption[] {
   return users.filter(candidate => candidate.id !== proposerId && candidate.id !== resolverId)
 }
@@ -123,7 +129,8 @@ export function defectStageOwnership(defect: DefectOut, users: UserOption[]): De
   return {
     ownerId,
     ownerName,
-    departmentLabel: ownerDepartments.length ? ownerDepartments.join(', ') : fallbackDepartment,
+    departmentLabel: kind === 'resolver' ? defectResolverDepartment(defect) || fallbackDepartment
+      : ownerDepartments.length ? ownerDepartments.join(', ') : fallbackDepartment,
     heading: terminal ? 'Last responsible owner' : 'Responsible now',
     kind,
   }

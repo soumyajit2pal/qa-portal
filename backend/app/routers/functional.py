@@ -1,3 +1,4 @@
+from ..functional_request_scope import visible_functional_requests
 from ..request_scope import record_return_requirement, require_scope_satisfied
 import os
 from typing import Optional, List
@@ -23,6 +24,7 @@ from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
 from .. import reassignment
+from ..request_classification import business_defect_number
 from ..workflow_authority import is_system_admin
 from ..execution_cycles import (
     execution_cycle_choice,
@@ -606,13 +608,9 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
     # creation is disabled now, see create_functional above, but older rows
     # from before that -- if any -- would otherwise silently vanish from
     # every list view under an inner join).
-    q = db.query(models.FunctionalRequest).join(
-        models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id, isouter=True
-    ).options(
+    q = visible_functional_requests(db, current_user).options(
         joinedload(models.FunctionalRequest.qa_request).joinedload(models.QARequest.application_master),
     )
-    scope = dashboard_department_scope(current_user)
-    workspace_scope = active_qa_workspace_scope_ids(current_user)
     delegated_to_user = models.QARequest.delegations.any(and_(
         models.QARequestDelegation.target_type == "FUNCTIONAL",
         models.QARequestDelegation.target_id == models.FunctionalRequest.id,
@@ -630,13 +628,6 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
         ) > 0,
     )
     requester_work = _functional_requester_work(current_user.id)
-    if scope is not None:
-        organisation_scope = department_unit_visibility_condition(
-            db, current_user, models.QARequest.department, models.QARequest.department_unit_id,
-        )
-        q = q.filter(or_(organisation_scope, delegated_to_user))
-    if workspace_scope:
-        q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_scope))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, requester_work, delegated_to_user))
     q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name, models.QARequest.module_name)
@@ -737,6 +728,11 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
             if f in data and data[f] != getattr(obj, f):
                 raise HTTPException(403, f"Only an Administrator can change {f.replace('_', ' ').title()}")
     checked_items = data.pop("checked_items", None)
+    if "change_type" in data or "business_defect_number" in data:
+        data["business_defect_number"] = business_defect_number(
+            data.get("business_defect_number", obj.business_defect_number),
+            data.get("change_type", obj.change_type),
+        )
     # Same Deployment/Target Promotion Environment ordering rule as
     # routers/qa_requests.py's create_request/edit_request -- environment/
     # target_promotion_environment are delegated (read-only) properties on
@@ -1190,6 +1186,10 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
 
     require_cycle_startable(cycle)
     if should_create_link:
+        from .. import cycle_request_preview
+        from ..deps import require_can_execute_project
+        require_can_execute_project(db, cycle.project_id, current_user)
+        cycle_request_preview.refresh_parent(db, obj, lock=True)
         application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
         if (application_master_id and cycle.project.application_master_id is not None
                 and cycle.project.application_master_id != application_master_id):
@@ -1197,9 +1197,13 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
         request_workspace_id = obj.qa_request.qa_workspace_id if obj.qa_request else None
         if (cycle.origin_workspace_id or cycle.project.qa_workspace_id) != request_workspace_id:
             raise HTTPException(400, "The Test Cycle and Functional QA Request must belong to the same workspace")
+        review_id = cycle_request_preview.require_confirmed(
+            db, payload.request_preview_token, current_user, cycle.project, obj, cycle.id,
+        )
         db.add(models.TestCycleChildRequestLink(
             cycle_id=cycle.id, child_type="Functional", child_id=obj.id, child_key=obj.request_id,
         ))
+        cycle_request_preview.applied(db, review_id, cycle, obj, current_user)
     obj.status = QAStatus.EXECUTION_IN_PROGRESS
     _log(
         db, obj.id, "Test Design", current_user, "Execution Started",

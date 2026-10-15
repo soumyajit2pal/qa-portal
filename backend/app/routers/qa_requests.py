@@ -17,6 +17,7 @@ from .. import documents as doc_store
 from ..upload_limits import validate_qa_document_sizes, validate_document_file_types
 from .. import application_names as app_names
 from ..application_modules import list_module_names, save_module_name
+from ..request_classification import business_defect_number as _business_defect_number
 from ..application_approval import can_review_application_gateway, pending_application_gateway_condition
 from ..database import get_db
 from ..deps import (
@@ -205,12 +206,6 @@ def _validate_request_types(db: Session, request_types: list[str]) -> None:
     inactive = inactive_request_types(db, request_types)
     if inactive:
         raise HTTPException(400, f"Disabled Request Type(s) cannot be selected: {', '.join(inactive)}")
-
-
-def _business_defect_number(value: Optional[str], change_type: Optional[str]) -> Optional[str]:
-    if change_type != "Bug Fix":
-        return None
-    return (value or "").strip() or None
 
 
 def _validated_bug_fix_source(db: Session, source_request_id: Optional[str], change_type: Optional[str],

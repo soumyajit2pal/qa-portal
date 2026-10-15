@@ -7,7 +7,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import and_, func, or_
+from sqlalchemy import Integer, and_, cast, func, literal_column, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import documents as doc_store
@@ -18,8 +18,12 @@ from ..constants import (
 from ..database import get_db
 from ..deps import get_workflow_user as get_current_user, dashboard_department_scope, viewable_project_ids, active_qa_workspace_scope_ids
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
+from ..functional_request_scope import visible_functional_requests
+from ..defect_functional_requests import functional_request_condition
+from sqlalchemy.exc import IntegrityError
 from .. import reassignment
 from ..defect_action_evidence import selected_evidence
+from ..deps import get_current_user as get_governance_user
 
 router = APIRouter(prefix="/api/defects", tags=["defect-management"])
 
@@ -117,6 +121,24 @@ def _get_mutable(defect_id: int, db: Session, current_user: models.User) -> mode
     return obj
 
 
+def _stage_owner_condition(db: Session, current_user: models.User):
+    """Named stage responsibility is visible only while that stage is active.
+
+    Oracle stores workflow state in a CLOB; SQLite is used by isolated tests.
+    Keep the department exception tied to exact owner IDs and stage names,
+    under the existing outer workspace filter.
+    """
+    extract = func.json_value if db.get_bind().dialect.name == 'oracle' else func.json_extract
+    # Oracle requires JSON paths to be SQL literals, not bind parameters.
+    # These constant paths contain no user-controlled text.
+    business_owner = cast(extract(models.Defect.workflow_state_json, literal_column("'$.business_owner_id'")), Integer)
+    release_owner = cast(extract(models.Defect.workflow_state_json, literal_column("'$.release_owner_id'")), Integer)
+    return or_(
+        and_(models.Defect.status == 'Business Acceptance', business_owner == current_user.id),
+        and_(models.Defect.status.in_(['Ready for Release', 'Production Verification']), release_owner == current_user.id),
+    )
+
+
 def _scoped_defects(db: Session, current_user: models.User):
     """Keep standalone and request-linked defects inside workspace/department scope.
 
@@ -145,6 +167,7 @@ def _scoped_defects(db: Session, current_user: models.User):
         q = q.filter(or_(
             func.coalesce(models.Defect.department, models.QARequest.department).in_(scope),
             and_(models.Defect.assignee_id == current_user.id, models.Defect.assigned_team.in_(scope)),
+            _stage_owner_condition(db, current_user),
             models.TestCycle.project_id.in_(project_ids or []),
             and_(models.Defect.cc_entries.any(models.DefectCCUser.user_id == current_user.id),
                  func.coalesce(models.Defect.qa_workspace_id, models.QARequest.qa_workspace_id).in_(cc_memberships)),
@@ -246,24 +269,6 @@ def _is_assignee_department_head(db: Session, obj: models.Defect, user: models.U
     )
 
 
-def _valid_defect_reassignment_departments(obj: models.Defect, previous_assignee: Optional[models.User],
-                                           new_assignee: models.User) -> set:
-    """Destination departments shared by the allowed pool and target user.
-
-    The allowed pool is the current assignee's teammate department(s) plus
-    every configured QA/Test Management department. Returning the actual
-    intersection also guarantees the persisted ``assigned_team`` belongs to
-    the selected user.
-    """
-    previous_departments = set(previous_assignee.departments if previous_assignee else [])
-    if not previous_departments and obj.assigned_team:
-        previous_departments.add(obj.assigned_team)
-    workspace_id = obj.qa_workspace_id or (obj.qa_request.qa_workspace_id if obj.qa_request else None)
-    if new_assignee.has_qa_workspace_role(*_QA_DEFECT_ROLES, workspace_id=workspace_id):
-        return set(new_assignee.departments)
-    return previous_departments & set(new_assignee.departments)
-
-
 def _is_tester(obj: models.Defect, user: models.User) -> bool:
     from ..defect_assignment import current_defect_responsibility
     responsibility = current_defect_responsibility(obj)
@@ -325,7 +330,7 @@ def _required(value, label: str):
     return value.strip() if isinstance(value, str) else value
 
 
-def _execution_context(db: Session, execution_id: int, request: Optional[models.QARequest]):
+def _execution_context(db: Session, execution_id: int, request: Optional[models.QARequest], historical=False):
     execution = (
         db.query(models.TestExecution)
         .filter(models.TestExecution.id == execution_id)
@@ -337,9 +342,10 @@ def _execution_context(db: Session, execution_id: int, request: Optional[models.
         raise HTTPException(404, "Test Execution, Test Cycle, or Test Case was not found")
     cycle, test_case = execution.cycle, execution.test_case
     from .test_execution import _require_active_project, _require_open_cycle
-    _require_active_project(db, cycle.project_id)
-    _require_open_cycle(cycle)
-    if execution.status not in {"Fail", "Blocked"}:
+    if not historical:
+        _require_active_project(db, cycle.project_id)
+        _require_open_cycle(cycle)
+    if not historical and execution.status not in {"Fail", "Blocked"}:
         raise HTTPException(400, "A defect can be linked only to a Failed or Blocked Test Execution")
     linked_request = cycle.child_request_link
     if linked_request:
@@ -490,6 +496,9 @@ _RETEST_STATUSES = ("Resolved", "Retest", "Ready for QA", "QA Testing", "Busines
 # lazy-loading `reporter_name`/`assignee_name`/`qa_request_key`/`cycle_key`/
 # `test_case_key` (all `@property`s on `models.Defect`) once per row.
 _LIST_DEFECT_EAGER_LOADS = [
+    selectinload(models.Defect.historical_execution_links).joinedload(models.TestRunDefect.run).joinedload(models.TestExecutionRun.execution).joinedload(models.TestExecution.cycle),
+    selectinload(models.Defect.historical_execution_links).joinedload(models.TestRunDefect.run).joinedload(models.TestExecutionRun.execution).joinedload(models.TestExecution.test_case),
+    selectinload(models.Defect.historical_execution_links).joinedload(models.TestRunDefect.linked_by),
     joinedload(models.Defect.qa_request), joinedload(models.Defect.cycle),
     joinedload(models.Defect.primary_test_case), joinedload(models.Defect.reporter),
     joinedload(models.Defect.assignee), joinedload(models.Defect.execution),
@@ -505,12 +514,82 @@ _LIST_DEFECT_EAGER_LOADS = [
 ]
 
 
+# Follow all exact cycle associations in a bounded number of page queries.
+for loader in (
+    joinedload(models.Defect.cycle),
+    joinedload(models.Defect.execution).joinedload(models.TestExecution.cycle),
+    selectinload(models.Defect.execution_links).joinedload(models.DefectExecutionLink.execution).joinedload(models.TestExecution.cycle),
+    selectinload(models.Defect.historical_execution_links).joinedload(models.TestRunDefect.run).joinedload(models.TestExecutionRun.execution).joinedload(models.TestExecution.cycle),
+):
+    _LIST_DEFECT_EAGER_LOADS.append(loader.joinedload(models.TestCycle.child_request_link).joinedload(models.TestCycleChildRequestLink.functional_request))
+_LIST_DEFECT_EAGER_LOADS.extend([
+    selectinload(models.Defect.functional_request_links).joinedload(models.DefectFunctionalRequestLink.functional_request),
+    selectinload(models.Defect.functional_request_links).joinedload(models.DefectFunctionalRequestLink.linked_by),
+])
+
+
+def _register_filters(q, db, user, params=None, severity=None, priority=None,
+                      functional_request_id=None, without_functional_request=False, queue=None):
+    if functional_request_id is not None and without_functional_request:
+        raise HTTPException(400, 'Select a Functional Request or the unlinked filter, not both')
+    if functional_request_id is not None:
+        if not visible_functional_requests(db, user).filter(models.FunctionalRequest.id == functional_request_id).one_or_none():
+            raise HTTPException(404, 'Functional Request was not found in your scope')
+        q = q.filter(functional_request_condition(functional_request_id))
+    elif without_functional_request:
+        q = q.filter(~functional_request_condition())
+    for column, value in ((models.Defect.severity, severity), (models.Defect.priority, priority)):
+        if value is not None:
+            q = q.filter(column == value)
+    if queue == 'attention':
+        q = q.filter(models.Defect.severity.in_(_ATTENTION_SEVERITIES), models.Defect.status.notin_(_TERMINAL_STATUSES))
+    elif queue == 'mine':
+        q = q.filter(or_(models.Defect.assignee_id == user.id, models.Defect.reporter_id == user.id, _stage_owner_condition(db, user)))
+    elif queue in ('unlinked', 'incomplete-traceability'):
+        q = q.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any(), ~models.Defect.historical_execution_links.any())
+    elif queue == 'retest':
+        q = q.filter(models.Defect.status.in_(_RETEST_STATUSES))
+    elif queue == 'closed':
+        q = q.filter(models.Defect.status.in_(_TERMINAL_STATUSES))
+    elif queue not in (None, 'all'):
+        raise HTTPException(400, 'Unknown defect queue')
+    if isinstance(params, pagination.PageParams):
+        q = pagination.apply_search(q, params, models.Defect.defect_key, models.Defect.title, models.Defect.application_name, models.Defect.module_feature, models.Defect.module_name)
+        q = pagination.apply_status_filter(q, params, models.Defect.status)
+    return q
+
+
+@router.get('/functional-request-options', response_model=pagination.Page[schemas.FunctionalRequestOptionOut])
+def functional_request_options(params: pagination.PageParams = Depends(), defect_id: Optional[int] = None,
+                               request_id: Optional[int] = None, db: Session = Depends(get_db),
+                               current_user: models.User = Depends(get_current_user)):
+    q = visible_functional_requests(db, current_user).filter(models.FunctionalRequest.qa_request_id.isnot(None))
+    if defect_id is not None:
+        obj = _get_mutable(defect_id, db, current_user)
+        workspace_id = obj.qa_workspace_id or (obj.qa_request.qa_workspace_id if obj.qa_request else None)
+        department = obj.department or (obj.qa_request.department if obj.qa_request else None)
+        q = q.filter(models.QARequest.qa_workspace_id == workspace_id,
+                     models.QARequest.department == department,
+                     func.lower(func.trim(models.QARequest.application_name)) == obj.application_name.strip().lower())
+        if obj.qa_request_id:
+            q = q.filter(models.FunctionalRequest.qa_request_id == obj.qa_request_id)
+    if request_id is not None:
+        q = q.filter(models.FunctionalRequest.id == request_id)
+    q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name, models.QARequest.module_name)
+    # Completed/Closed requests remain selectable for historical traceability.
+    q = q.with_entities(models.FunctionalRequest.id, models.FunctionalRequest.request_id,
+                        models.QARequest.application_name, models.QARequest.module_name, models.FunctionalRequest.status)
+    q = q.order_by(models.FunctionalRequest.created_at.desc(), models.FunctionalRequest.id.desc())
+    return pagination.to_page_response(pagination.paginate(q, params), params)
+
+
 @router.get("", response_model=pagination.Page[schemas.DefectListOut])
 def list_defects(severity: Optional[str] = None,
                  priority: Optional[str] = None, cycle_id: Optional[int] = None,
                  test_case_id: Optional[int] = None, execution_id: Optional[int] = None,
                  qa_request_id: Optional[int] = None, assignee_id: Optional[int] = None,
                  reporter_id: Optional[int] = None,
+                 functional_request_id: Optional[int] = None, without_functional_request: bool = False,
                  queue: Optional[str] = Query(
                      None, description="'attention'|'mine'|'unlinked'|'incomplete-traceability'|'retest'|'closed', omitted for all -- "
                                         "matches Defects.tsx's own queue tabs exactly",
@@ -524,7 +603,6 @@ def list_defects(severity: Optional[str] = None,
     # Execution picker that needs every non-terminal workflow state.
     q = _scoped_defects(db, current_user).options(*_LIST_DEFECT_EAGER_LOADS)
     for column, value in (
-        (models.Defect.severity, severity), (models.Defect.priority, priority),
         (models.Defect.qa_request_id, qa_request_id),
         (models.Defect.assignee_id, assignee_id), (models.Defect.reporter_id, reporter_id),
     ):
@@ -541,33 +619,17 @@ def list_defects(severity: Optional[str] = None,
             models.Defect.execution_links.any(
                 models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == cycle_id)
             ),
+            models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution.has(models.TestExecution.cycle_id == cycle_id))),
         ))
     if execution_id is not None:
         q = q.filter(or_(
             models.Defect.execution_id == execution_id,
             models.Defect.execution_links.any(models.DefectExecutionLink.execution_id == execution_id),
+            models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution_id == execution_id)),
         ))
     if test_case_id is not None:
-        q = q.join(models.DefectTestCaseLink).filter(models.DefectTestCaseLink.test_case_id == test_case_id)
-    if queue == "attention":
-        q = q.filter(models.Defect.severity.in_(_ATTENTION_SEVERITIES)).filter(models.Defect.status.notin_(_TERMINAL_STATUSES))
-    elif queue == "mine":
-        q = q.filter(or_(models.Defect.assignee_id == current_user.id, models.Defect.reporter_id == current_user.id))
-    elif queue == "unlinked":
-        q = q.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any())
-    elif queue == "incomplete-traceability":
-        # Additional execution links also establish traceability. Request,
-        # cycle or testcase links alone do not establish an execution trail.
-        q = q.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any())
-    elif queue == "retest":
-        q = q.filter(models.Defect.status.in_(_RETEST_STATUSES))
-    elif queue == "closed":
-        q = q.filter(models.Defect.status.in_(_TERMINAL_STATUSES))
-    q = pagination.apply_search(
-        q, params, models.Defect.defect_key, models.Defect.title, models.Defect.application_name,
-        models.Defect.module_feature, models.Defect.module_name,
-    )
-    q = pagination.apply_status_filter(q, params, models.Defect.status)
+        q = q.filter(or_(models.Defect.test_case_links.any(models.DefectTestCaseLink.test_case_id == test_case_id), models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution.has(models.TestExecution.test_case_id == test_case_id)))))
+    q = _register_filters(q, db, current_user, params, severity, priority, functional_request_id, without_functional_request, queue)
     q = pagination.apply_sort(
         q, params, sortable={
             "defect_key": models.Defect.defect_key, "severity": models.Defect.severity,
@@ -580,7 +642,9 @@ def list_defects(severity: Optional[str] = None,
 
 
 @router.get("/dashboard", response_model=schemas.DefectDashboardOut)
-def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
+                     params: pagination.PageParams = Depends(), severity: Optional[str] = None, priority: Optional[str] = None,
+                     functional_request_id: Optional[int] = None, without_functional_request: bool = False):
     # SRS 7.2 pagination rollout -- previously fetched every scoped defect's
     # full ORM row into Python just to run Counter() over it, an unbounded
     # fetch that grew with the register regardless of how many rows anyone
@@ -588,7 +652,7 @@ def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = 
     # by_application/by_assignee are now real SQL `GROUP BY` aggregates
     # (never a full-row fetch), matching TestCaseSummaryOut/
     # TestExecutionSummaryOut's own pattern from the Test Management slice.
-    base = _scoped_defects(db, current_user)
+    base = _register_filters(_scoped_defects(db, current_user), db, current_user, params, severity, priority, functional_request_id, without_functional_request)
 
     by_status = Counter(dict(base.with_entities(models.Defect.status, func.count(models.Defect.id)).group_by(models.Defect.status).all()))
     by_severity = Counter(dict(base.with_entities(models.Defect.severity, func.count(models.Defect.id)).group_by(models.Defect.severity).all()))
@@ -639,9 +703,10 @@ def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = 
         models.Defect.severity.in_(_ATTENTION_SEVERITIES), models.Defect.status.notin_(_TERMINAL_STATUSES),
     ).with_entities(func.count(models.Defect.id)).scalar() or 0
     mine_count = base.filter(
-        or_(models.Defect.assignee_id == current_user.id, models.Defect.reporter_id == current_user.id),
+        or_(models.Defect.assignee_id == current_user.id, models.Defect.reporter_id == current_user.id,
+            _stage_owner_condition(db, current_user)),
     ).with_entities(func.count(models.Defect.id)).scalar() or 0
-    unlinked_count = base.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any()).with_entities(func.count(models.Defect.id)).scalar() or 0
+    unlinked_count = base.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any(), ~models.Defect.historical_execution_links.any()).with_entities(func.count(models.Defect.id)).scalar() or 0
     retest_count = sum(by_status.get(s, 0) for s in _RETEST_STATUSES)
 
     return {
@@ -656,15 +721,20 @@ def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = 
 
 
 @router.get("/export-xlsx")
-def export_defects(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def export_defects(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
+                   params: pagination.PageParams = Depends(), severity: Optional[str] = None, priority: Optional[str] = None,
+                   functional_request_id: Optional[int] = None, without_functional_request: bool = False, queue: Optional[str] = None):
     """Export the governed defect register with workflow and traceability fields."""
-    defects = _scoped_defects(db, current_user).options(selectinload(models.Defect.cc_entries)).order_by(models.Defect.created_at.desc()).all()
+    q = _register_filters(_scoped_defects(db, current_user), db, current_user, params, severity, priority, functional_request_id, without_functional_request, queue)
+    defects = q.options(*_LIST_DEFECT_EAGER_LOADS, selectinload(models.Defect.cc_entries).joinedload(models.DefectCCUser.user)).order_by(models.Defect.created_at.desc(), models.Defect.id.desc()).all()
     status_counts = Counter(item.status for item in defects)
     workbook = new_workbook()
     add_summary_sheet(
         workbook, "Defect Management Register",
         "Governed defects linked to QA requests, test cycles, test cases, and executions.",
-        [("Generated at", models.now()), ("Generated by", current_user.full_name)],
+        [("Generated at", models.now()), ("Generated by", current_user.full_name),
+         ("Functional Request scope", db.get(models.FunctionalRequest, functional_request_id).request_id if functional_request_id is not None else "No Functional Request linked" if without_functional_request else "All Functional Requests"),
+         ("Queue", queue or "all")],
         [
             ("Total defects", len(defects)),
             ("Open defects", sum(v for k, v in status_counts.items() if k not in set(_TERMINAL_STATUSES))),
@@ -674,7 +744,7 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
         ],
     )
     headers = [
-        "Defect ID", "Title", "QA Request", "Test Cycle", "Test Case", "Application", "Module Name",
+        "Defect ID", "Title", "QA Request", "Functional Requests", "Test Cycle", "Test Case", "Application", "Module Name",
         "Project", "Module / Feature", "Status", "Severity", "Priority", "Environment", "Assignee",
         "Reporter", "Created", "Target Release", "Expected Resolution", "Ageing (Days)",
         "Reopen Count", "External Defect ID", "Resolution Type", "Resolution Summary",
@@ -684,7 +754,7 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
     rows = []
     for item in defects:
         rows.append([
-            item.defect_key, item.title, item.qa_request_key, item.cycle_key, item.test_case_key,
+            item.defect_key, item.title, item.qa_request_key, ", ".join(ref["request_id"] for ref in item.functional_requests), item.cycle_key, item.test_case_key,
             item.application_name, item.module_name, item.cycle.project.project_key if item.cycle and item.cycle.project else None,
             item.module_feature, item.status, item.severity, item.priority, item.environment,
             item.assignee_name, item.reporter_name, item.reported_at, item.target_release,
@@ -841,15 +911,22 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
                           db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
     obj = _get_mutable(defect_id, db, current_user)
-    execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request)
+    execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request, historical=payload.link_type == 'HISTORICAL')
     obj = db.query(models.Defect).filter_by(id=obj.id).populate_existing().with_for_update().one()
-    if obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised"}:
+    if payload.link_type == 'ACTIVE' and obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised"}:
         raise HTTPException(400, f"A {obj.status} defect cannot be linked to a new execution")
     if obj.qa_workspace_id and (cycle.origin_workspace_id or cycle.project.qa_workspace_id) != obj.qa_workspace_id:
         raise HTTPException(400, "Test execution must belong to the defect workspace")
     if cycle.project.application_master and cycle.project.application_master.name.casefold() != obj.application_name.casefold():
         raise HTTPException(400, "Test execution must belong to the defect application")
     _require_execution_link_access(db, cycle, current_user)
+    if payload.link_type == 'HISTORICAL':
+        from .test_execution import _require_cycle_visibility
+        _require_cycle_visibility(db, cycle, current_user)
+        from ..defect_history import append_link
+        append_link(db, obj, execution, payload, current_user)
+        db.commit(); db.refresh(obj)
+        return obj
     if obj.execution_id and obj.execution_id != execution.id:
         # Already has a DIFFERENT primary execution -- add this as an
         # additional link instead of the 400 this used to always raise.
@@ -925,6 +1002,10 @@ def update_defect_cc(defect_id: int, payload: schemas.DefectCCUpdate,
 @router.post("/{defect_id}/transition", response_model=schemas.DefectOut)
 def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Session = Depends(get_db),
                       current_user: models.User = Depends(get_current_user)):
+    return _transition_defect(defect_id, payload, db, current_user)
+
+
+def _transition_defect(defect_id, payload, db, current_user, *, commit=True):
     obj = _get_mutable(defect_id, db, current_user)
     obj = db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()
     if obj.workflow_json:
@@ -1030,6 +1111,10 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         previous_assigned_at = obj.assigned_at
         obj.assignee_id = assignee_user.id; obj.assigned_team = department.name
         obj.assigned_by_id = current_user.id; obj.assigned_at = models.now(); obj.assignment_remarks = remarks or None
+        routing = obj.workflow_state
+        routing['resolver_department'] = department.name
+        routing['resolver_owner_id'] = assignee_user.id
+        obj.workflow_state_json = json.dumps(routing)
         reassignment.record_assignment_change(
             db, "DEFECT", obj.id, "DEFECT_ASSIGNEE", current_user,
             [previous_assignee_id], [assignee_user.id], remarks,
@@ -1188,9 +1273,13 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     db.query(models.TestRunDefect).filter(
         models.TestRunDefect.defect_key == obj.defect_key,
         models.TestRunDefect.defect_url.startswith('/defects'),
+        models.TestRunDefect.is_historical == False,
     ).update({models.TestRunDefect.defect_status: requested}, synchronize_session=False)
     _audit(db, obj, current_user, requested, details, previous, requested)
-    db.commit(); db.refresh(obj)
+    if commit:
+        db.commit(); db.refresh(obj)
+    else:
+        db.flush()
     return obj
 
 
@@ -1200,18 +1289,19 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
 def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session = Depends(get_db),
                      current_user: models.User = Depends(get_current_user)):
     obj = _get_mutable(defect_id, db, current_user)
-    from ..defect_assignment import assignment_error, current_defect_responsibility
+    db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()
+    from ..defect_assignment import current_defect_responsibility
+    from ..defect_routing import can_reassign_owner, reassignment_error, resolver_scope, resolver_routing_mismatch
     responsibility = current_defect_responsibility(obj)
+    if payload.expected_revision != obj.workflow_revision or payload.expected_owner_id != responsibility.owner_id:
+        raise HTTPException(409, 'Defect ownership or stage changed. Refresh and review before reassigning.')
     if not responsibility.owner_id or obj.status not in DEFECT_REASSIGNABLE_STATUSES:
         raise HTTPException(400, f"{obj.defect_key} does not currently have a responsible owner who can be reassigned.")
     previous_assignee_id = responsibility.owner_id
     previous_assigned_at = obj.assigned_at if responsibility.legacy_assignee_override else None
     previous_assignee = db.get(models.User, previous_assignee_id)
-    reassignment.require_can_reassign(
-        current_user, previous_assignee_id,
-        previous_assignee.departments if previous_assignee else None,
-        qa_workspace_id=(obj.qa_workspace_id if responsibility.kind == "qa" else None),
-    )
+    if not can_reassign_owner(db, obj, current_user):
+        raise HTTPException(403, 'Only the current responsible owner, their authorized department head or QA executive can reassign this stage')
     reason = reassignment.require_reason(payload.reason)
     new_assignee = db.get(models.User, payload.assignee_id)
     if not new_assignee or not new_assignee.is_active:
@@ -1220,42 +1310,28 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
         raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
     if new_assignee.id == previous_assignee_id:
         raise HTTPException(400, "Select a different assignee for reassignment")
+    candidate_error = reassignment_error(db, obj, new_assignee)
+    if candidate_error:
+        raise HTTPException(400, candidate_error)
+    workflow_state = obj.workflow_state
+    resolver = resolver_scope(obj)
+    previous_team = obj.assigned_team
     if responsibility.field == "assignee_id":
-        # Resolver reassignment remains constrained to the current resolver's
-        # teammates or an eligible QA team, and updates the triage ownership
-        # fields exactly as before.
-        valid_destinations = _valid_defect_reassignment_departments(obj, previous_assignee, new_assignee)
-        if not valid_destinations:
-            raise HTTPException(
-                400,
-                "Select a teammate of the current assignee or a member of the QA team",
-            )
-        destination = payload.assigned_team if payload.assigned_team in valid_destinations else None
-        if not destination:
-            destination = sorted(valid_destinations)[0]
-        candidate_error = assignment_error(db, obj, new_assignee, "assignee_id", destination)
-        if candidate_error:
-            raise HTTPException(400, candidate_error)
-        department = db.query(models.Department).filter(
-            models.Department.name == destination,
-            models.Department.is_active == True,  # noqa: E712
-        ).first()
-        if not department:
-            raise HTTPException(400, "The selected user's destination Department is not active")
-        obj.assigned_team = department.name
+        if resolver_routing_mismatch(obj):
+            raise HTTPException(400, 'Resolver routing is inconsistent. An administrator or authorized lead must use routing recovery.')
+        if payload.assigned_team and payload.assigned_team != resolver.department:
+            raise HTTPException(400, 'Reassignment must stay in the responsible department; use the lifecycle action for a QA handoff')
         obj.assignee_id = new_assignee.id
         obj.assigned_by_id = current_user.id
         obj.assigned_at = models.now()
+        workflow_state['resolver_department'] = resolver.department
+        workflow_state['resolver_owner_id'] = new_assignee.id
     else:
         # Once the developer hands off the fix, responsibility belongs to a
         # dedicated QA/business/release owner field. Updating assignee_id here
         # was the defect: the UI changed its Assignee label, but Responsible
         # now and workflow authorization still pointed at the previous stage
         # owner. Validate and update the field that owns the current stage.
-        candidate_error = assignment_error(db, obj, new_assignee, responsibility.field)
-        if candidate_error:
-            raise HTTPException(400, candidate_error)
-        workflow_state = obj.workflow_state if obj.workflow_json else {}
         if responsibility.kind == "qa":
             obj.retest_tester_id = new_assignee.id
             workflow_state["qa_owner_id"] = new_assignee.id
@@ -1266,12 +1342,8 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
             # resolver, so restore it while moving QA ownership to the proper
             # field.
             if responsibility.legacy_assignee_override:
-                resolver_event = next((
-                    event for event in reversed(workflow_state.get("history", []))
-                    if event.get("to") == "Triaged" and event.get("assignee_id")
-                ), None)
-                if resolver_event:
-                    resolver_id = int(resolver_event["assignee_id"])
+                if resolver.source != 'current' and resolver.owner_id:
+                    resolver_id = int(resolver.owner_id)
                     reassignment.record_assignment_change(
                         db, "DEFECT", obj.id, "DEFECT_ASSIGNEE", current_user,
                         [obj.assignee_id], [resolver_id],
@@ -1279,14 +1351,20 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
                         previous_assigned_at=obj.assigned_at,
                     )
                     obj.assignee_id = resolver_id
-                    obj.assigned_team = resolver_event.get("assigned_team") or obj.assigned_team
+                    obj.assigned_team = resolver.department
         elif responsibility.kind == "business":
             workflow_state["business_owner_id"] = new_assignee.id
         elif responsibility.kind == "release":
             workflow_state["release_owner_id"] = new_assignee.id
-        if obj.workflow_json:
-            obj.workflow_state_json = json.dumps(workflow_state)
-            obj.workflow_revision += 1
+    workflow_state.setdefault('history', []).append({
+        'kind': 'reassignment', 'at': models.now().isoformat(), 'user_id': current_user.id,
+        'user_name': current_user.full_name, 'from': obj.status, 'to': obj.status,
+        'assignment_role': responsibility.assignment_role, 'previous_owner_id': previous_assignee_id,
+        'owner_id': new_assignee.id, 'previous_department': previous_team,
+        'assigned_team': obj.assigned_team, 'remarks': reason,
+    })
+    obj.workflow_state_json = json.dumps(workflow_state)
+    obj.workflow_revision += 1
     previous_label = previous_assignee.full_name if previous_assignee else (obj.assignee_name or "Unassigned")
     reassignment.record_reassignment(
         db, "DEFECT", obj.id, current_user, previous_label, new_assignee.full_name, reason,
@@ -1295,6 +1373,90 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
         new_assignee_ids=[new_assignee.id],
         previous_assigned_at=previous_assigned_at,
     )
+    db.commit(); db.refresh(obj)
+    return obj
+
+
+@router.get('/{defect_id}/assignment-context', response_model=schemas.DefectAssignmentContext)
+def defect_assignment_context(defect_id: int, department: Optional[str] = None,
+                              db: Session = Depends(get_db), current_user: models.User = Depends(get_governance_user)):
+    from ..defect_assignment import current_defect_responsibility
+    from ..defect_routing import (resolver_scope, can_reassign_owner, can_recover_routing,
+                                 recovery_departments, reassignment_error, recovery_error, resolver_routing_mismatch)
+    from .auth import _redact_confidential_roles
+    obj = _get_visible(defect_id, db, current_user)
+    responsibility = current_defect_responsibility(obj)
+    scope = resolver_scope(obj)
+    responsible_user = db.get(models.User, responsibility.owner_id) if responsibility.owner_id else None
+    allowed_departments = recovery_departments(db, obj, current_user)
+    selected_department = department or scope.department
+    users = db.query(models.User).filter(models.User.is_active == True).order_by(models.User.full_name, models.User.id).all()
+    ordinary_allowed = can_reassign_owner(db, obj, current_user)
+    return {
+        'defect': obj, 'responsibility_kind': responsibility.kind,
+        'responsibility_owner_id': responsibility.owner_id, 'resolver_department_source': scope.source,
+        'responsibility_owner_name': responsible_user.full_name if responsible_user else None,
+        'suggested_resolver_id': scope.owner_id, 'can_reassign': ordinary_allowed,
+        'can_recover': can_recover_routing(db, obj, current_user),
+        'routing_recovery_needed': resolver_routing_mismatch(obj),
+        'reassignment_candidates': [_redact_confidential_roles(user, current_user) for user in users
+            if ordinary_allowed and user.id != responsibility.owner_id and reassignment_error(db, obj, user) is None],
+        'recovery_departments': allowed_departments,
+        'recovery_candidates': [_redact_confidential_roles(user, current_user) for user in users
+            if selected_department in allowed_departments and recovery_error(db, obj, user, selected_department) is None],
+    }
+
+
+@router.post('/{defect_id}/recover-routing', response_model=schemas.DefectOut)
+def recover_defect_routing(defect_id: int, payload: schemas.DefectRoutingRecovery,
+                           db: Session = Depends(get_db), current_user: models.User = Depends(get_governance_user)):
+    """Governance correction; it never acts as a lifecycle or QA handoff."""
+    from ..defect_assignment import current_defect_responsibility
+    from ..defect_routing import can_recover_routing, recovery_departments, recovery_error
+    obj = _get_mutable(defect_id, db, current_user)
+    db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()
+    if not can_recover_routing(db, obj, current_user):
+        raise HTTPException(403, 'Only an administrator, workspace QA lead group or the responsible department head can recover active resolver routing')
+    if payload.expected_revision != obj.workflow_revision or payload.expected_owner_id != obj.assignee_id:
+        raise HTTPException(409, 'Defect ownership or stage changed. Refresh and review before recovering routing.')
+    if not payload.confirmation:
+        raise HTTPException(400, 'Confirm the resolver routing recovery')
+    reason = reassignment.require_reason(payload.reason)
+    department = payload.assigned_team.strip()
+    if department not in recovery_departments(db, obj, current_user):
+        raise HTTPException(400, 'Select the active responsible department recorded at triage; contact an administrator if it is inactive')
+    candidate = db.get(models.User, payload.assignee_id)
+    error = recovery_error(db, obj, candidate, department)
+    if error:
+        raise HTTPException(400, error)
+    if candidate.id == obj.assignee_id and department == obj.assigned_team:
+        raise HTTPException(400, 'Resolver routing already matches this owner and department')
+    previous_id, previous_team, previous_at = obj.assignee_id, obj.assigned_team, obj.assigned_at
+    previous_name = obj.assignee_name or 'Unassigned'
+    responsibility = current_defect_responsibility(obj)
+    routing = obj.workflow_state
+    # Pin the effective QA owner before changing the resolver timestamp, so
+    # legacy inference cannot mistake the recovered resolver for a QA owner.
+    if responsibility.kind == 'qa' and responsibility.owner_id:
+        obj.retest_tester_id = responsibility.owner_id
+        routing['qa_owner_id'] = responsibility.owner_id
+    obj.assignee_id, obj.assigned_team = candidate.id, department
+    obj.assigned_by_id, obj.assigned_at = current_user.id, models.now()
+    routing['resolver_department'], routing['resolver_owner_id'] = department, candidate.id
+    routing.setdefault('history', []).append({
+        'kind': 'routing_recovery', 'from': obj.status, 'to': obj.status,
+        'at': models.now().isoformat(), 'user_id': current_user.id, 'user_name': current_user.full_name,
+        'previous_owner_id': previous_id, 'previous_department': previous_team,
+        'assignee_id': candidate.id, 'assignee_name': candidate.full_name, 'assigned_team': department,
+        'stage_owner_id': responsibility.owner_id if responsibility.kind != 'resolver' else candidate.id,
+        'confirmation': True, 'remarks': reason,
+    })
+    obj.workflow_state_json = json.dumps(routing)
+    obj.workflow_revision += 1
+    reassignment.record_reassignment(db, 'DEFECT', obj.id, current_user,
+        f'{previous_name} ({previous_team or "No department"})', f'{candidate.full_name} ({department})',
+        reason, step_name='Resolver Routing Recovery', assignment_role='DEFECT_ASSIGNEE',
+        previous_assignee_ids=[previous_id], new_assignee_ids=[candidate.id], previous_assigned_at=previous_at)
     db.commit(); db.refresh(obj)
     return obj
 
@@ -1372,6 +1534,10 @@ def link_defect_request(defect_id: int, payload: schemas.DefectLinkRequest,
     if request.application_name.casefold() != obj.application_name.casefold():
         raise HTTPException(400, 'Request must belong to the defect application')
     executions = ([obj.execution] if obj.execution else []) + [link.execution for link in obj.execution_links if link.execution]
+    executions += [link.run.execution for link in obj.historical_execution_links if link.run and link.run.execution]
+    for link in obj.functional_request_links:
+        if link.functional_request.qa_request_id != request.id:
+            raise HTTPException(400, 'A linked Functional Request belongs to a different QA request')
     for execution in executions:
         link = execution.cycle.child_request_link
         if link:
@@ -1384,5 +1550,55 @@ def link_defect_request(defect_id: int, payload: schemas.DefectLinkRequest,
     obj.workflow_revision += 1
     _audit(db, obj, current_user, 'Request Linked', f'Linked {request.request_id}. Saved module selection and workspace workflow version retained.')
     db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.post('/{defect_id}/link-functional-request', response_model=schemas.DefectOut)
+def link_functional_request(defect_id: int, payload: schemas.DefectLinkFunctionalRequest,
+                            db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = _get_mutable(defect_id, db, current_user)
+    from ..workspace_service import inherited_workspace_access_mode
+    workspace_id = obj.qa_workspace_id or (obj.qa_request.qa_workspace_id if obj.qa_request else None)
+    if set(current_user.roles) & {Role.VIEW_ONLY, Role.SCALE_6_PLUS} or inherited_workspace_access_mode(db, current_user, workspace_id) == 'PARENT_VIEWER':
+        raise HTTPException(403, 'Read-only users cannot add Functional Request links')
+    manager = _is_manager(db, obj, current_user)
+    if not (manager or obj.reporter_id == current_user.id or _is_assignee(obj, current_user)):
+        raise HTTPException(403, 'Only the reporter, resolver or QA lead can link a Functional Request')
+    db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()
+    if payload.revision != obj.workflow_revision:
+        raise HTTPException(409, 'Defect changed. Refresh before linking a Functional Request.')
+    if obj.status in _TERMINAL_STATUSES and not manager:
+        raise HTTPException(403, 'A QA lead must approve historical request linking for a closed or terminal defect')
+    reason = payload.reason.strip()
+    if not reason:
+        raise HTTPException(400, 'A reason for request linking is required')
+    request = visible_functional_requests(db, current_user).filter(models.FunctionalRequest.id == payload.functional_request_id).one_or_none()
+    if not request or not request.qa_request:
+        raise HTTPException(404, 'Functional Request was not found in your scope')
+    parent = db.query(models.QARequest).filter_by(id=request.qa_request_id).populate_existing().with_for_update().one()
+    _require_request_access(db, parent, current_user)
+    workspace_id = obj.qa_workspace_id or (obj.qa_request.qa_workspace_id if obj.qa_request else None)
+    department = obj.department or (obj.qa_request.department if obj.qa_request else None)
+    if parent.qa_workspace_id != workspace_id or parent.department != department:
+        raise HTTPException(400, 'Functional Request must belong to the defect workspace and department')
+    if (parent.application_name or '').strip().casefold() != obj.application_name.strip().casefold():
+        raise HTTPException(400, 'Functional Request must belong to the defect application')
+    if obj.qa_request_id and parent.id != obj.qa_request_id:
+        raise HTTPException(400, 'Functional Request belongs to a different parent QA Request')
+    if db.query(models.Defect.id).filter(models.Defect.id == obj.id, functional_request_condition(request.id)).scalar() is not None:
+        raise HTTPException(409, 'This Functional Request is already linked directly or through an execution')
+    db.add(models.DefectFunctionalRequestLink(defect_id=obj.id, functional_request_id=request.id,
+        linked_by_id=current_user.id, linked_workflow_revision=obj.workflow_revision, reason=reason))
+    obj.workflow_revision += 1
+    comments = f'Linked Functional Request {request.request_id}. Reason: {reason}. Traceability only; lifecycle, ownership, closure, retest and issued certificates retained.'
+    _audit(db, obj, current_user, 'Functional Request Linked', comments, previous_state=obj.status, new_state=obj.status, step_name='Traceability')
+    db.add(models.ApprovalAction(entity_type='FUNCTIONAL_REQUEST', entity_id=request.id, step_name='Defect Traceability',
+        actor_id=current_user.id, actor_role=current_user.roles_csv, decision='Defect Linked', comments=f'{obj.defect_key}. {comments}'))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'This Functional Request was already linked. Refresh the defect.')
     db.refresh(obj)
     return obj

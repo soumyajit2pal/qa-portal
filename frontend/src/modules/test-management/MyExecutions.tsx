@@ -1,3 +1,4 @@
+import ExecutionRetest from '../../components/ExecutionRetest'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useInternalNavigate } from '../../hooks/useRequestNavigation'
@@ -5,7 +6,7 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, TableColumn, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
-import { TEST_EXECUTION_STATUSES, executionStatusGate, hasRetestEligibleHistory } from '../../constants'
+import { TEST_EXECUTION_STATUSES, executionStatusGate, hasRetestEligibleHistory, usesRetestForm } from '../../constants'
 import { MyExecutionOut, TestProjectOut, TestCycleOut, TestExecutionOut, TestRunDefectOut, PageOut, DefectListOut, TestExecutionRunOut } from '../../types'
 
 // SRS EXE-002 -- the backend returns the signed-in user's actionable queue
@@ -89,9 +90,10 @@ function QuickResultActions({ execution, onChanged, onError }: {
 
   return (
     <div className="tm-inline-run" onClick={(event) => event.stopPropagation()}>
-      <button ref={triggerRef} type="button" className="tm-play-button" disabled={busy} onClick={togglePanel}>
+      {!usesRetestForm(execution) && <button ref={triggerRef} type="button" className="tm-play-button" disabled={busy} onClick={togglePanel}>
         <span>▶</span> Run
-      </button>
+      </button>}
+      {usesRetestForm(execution) && <ExecutionRetest execution={execution} onChanged={onChanged} />}
       {open && position && createPortal(
         <div ref={panelRef} className="tm-inline-run-panel portaled" style={position} onClick={(event) => event.stopPropagation()}>
           <div className="tm-inline-run-head"><span><small>Quick execution</small><strong>Record result</strong></span><b>Attempt #{(execution.run_count || 0) + 1}</b></div>

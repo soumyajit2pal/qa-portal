@@ -82,7 +82,7 @@ def _defect_trace_keys(defect: models.Defect) -> tuple[list[str], list[str]]:
         defect.primary_test_case.test_case_key for _ in [0]
         if defect.primary_test_case and defect.primary_test_case.test_case_key
     }
-    for link in defect.execution_links:
+    for link in [*defect.execution_links, *defect.historical_execution_links]:
         if link.cycle_key:
             cycles.add(link.cycle_key)
         if link.test_case_key:
@@ -207,7 +207,7 @@ def defect_quality(
         .join(models.TestExecutionRun, models.TestRunDefect.run_id == models.TestExecutionRun.id)
         .join(models.TestExecution, models.TestExecutionRun.execution_id == models.TestExecution.id)
         .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
-        .filter(models.TestCycle.project_id == project_id)
+        .filter(models.TestCycle.project_id == project_id, models.TestRunDefect.is_historical == False)
         .all()
     )
     retested_ok = 0
@@ -822,7 +822,7 @@ def export_catalogue_report(
         title = "Incomplete Defect Traceability"
         population_note = "Visible defects without a primary or additional execution link; request, cycle and testcase links alone do not complete execution traceability."
         query = _scoped_defects(db, current_user).filter(
-            models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any())
+            models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any(), ~models.Defect.historical_execution_links.any())
         if search and search.strip():
             needle = f"%{search.strip()}%"
             query = query.filter(or_(models.Defect.defect_key.ilike(needle), models.Defect.title.ilike(needle),

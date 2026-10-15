@@ -3923,6 +3923,9 @@ class TestCycleChildRequestLink(Base):
     child_id = Column(Integer, nullable=False, index=True)
     child_key = Column(String(40), nullable=False, index=True)
     cycle = relationship("TestCycle", back_populates="child_request_link")
+    functional_request = relationship("FunctionalRequest", viewonly=True, uselist=False,
+        primaryjoin=lambda: and_(foreign(TestCycleChildRequestLink.child_id) == FunctionalRequest.id,
+                                TestCycleChildRequestLink.child_type == 'Functional'))
 
 
 class TestExecution(Base):
@@ -4080,10 +4083,56 @@ class TestExecutionRun(Base):
     executed_by = relationship("User", foreign_keys=[executed_by_id])
     defects = relationship("TestRunDefect", back_populates="run", cascade="all,delete-orphan",
                            order_by="TestRunDefect.created_at")
+    retest = relationship('TestRetest', foreign_keys='TestRetest.run_id', back_populates='run', uselist=False, lazy='selectin', cascade='all,delete-orphan')
 
     @property
     def executed_by_name(self):
         return self.executed_by.full_name if self.executed_by else None
+
+
+class TestRetest(Base):
+    """Observed attempt, with an append-only final confirmation attempt."""
+    __tablename__ = 'qap_test_retests'
+    run_id = Column(Integer, ForeignKey('qap_test_execution_runs.id'), primary_key=True)
+    observed_result = Column(String(20), nullable=False)
+    environment = Column(String(40), nullable=False)
+    tested_build = Column(String(150), nullable=False)
+    pinned_version_id = Column(Integer, ForeignKey('qap_test_case_versions.id'), nullable=False)
+    final_run_id = Column(Integer, ForeignKey('qap_test_execution_runs.id'), nullable=True, unique=True)
+    run = relationship('TestExecutionRun', foreign_keys=[run_id], back_populates='retest')
+    outcomes = relationship('TestRetestOutcome', back_populates='retest', order_by='TestRetestOutcome.id', cascade='all,delete-orphan', lazy='selectin')
+
+
+class TestRetestOutcome(Base):
+    __tablename__ = 'qap_retest_outcomes'
+    __table_args__ = (UniqueConstraint('run_id', 'defect_id', name='uq_qap_retest_defect'),
+        UniqueConstraint('run_id', 'external_link_id', name='uq_qap_retest_external'),
+        CheckConstraint('(defect_id IS NOT NULL AND external_link_id IS NULL) OR (defect_id IS NULL AND external_link_id IS NOT NULL)',name='ck_qap_retest_one_target'))
+    id = pk_column()
+    run_id = Column(Integer, ForeignKey('qap_test_retests.run_id'), nullable=False, index=True)
+    defect_id = Column(Integer, ForeignKey('qap_defects.id'), nullable=True)
+    external_link_id = Column(Integer, ForeignKey('qap_test_run_defects.id'), nullable=True)
+    defect_key = Column(String(100), nullable=False)
+    defect_status = Column(String(40), nullable=True)
+    outcome = Column(String(20), nullable=False)
+    notes = Column(Text, nullable=True)
+    evidence_reference = Column(String(2000), nullable=True)
+    evidence_documents_json = Column(Text, nullable=True)
+    defect_revision = Column(Integer, nullable=True)
+    fix_iteration = Column(Integer, nullable=True)
+    retest = relationship('TestRetest', back_populates='outcomes')
+    defect = relationship('Defect', foreign_keys=[defect_id])
+    external_link = relationship('TestRunDefect', foreign_keys=[external_link_id])
+
+    @property
+    def evidence_documents(self):
+        import json
+        return json.loads(self.evidence_documents_json or '[]')
+
+    @property
+    def verification_valid(self):
+        from .execution_retests import outcome_verified
+        return outcome_verified(self)
 
 
 class TestRunDefect(Base):
@@ -4095,7 +4144,8 @@ class TestRunDefect(Base):
     retained only as the latest-run summary for compatibility.
     """
     __tablename__ = "qap_test_run_defects"
-    __table_args__ = (UniqueConstraint("run_id", "defect_key", name="uq_qap_run_defect_key"),)
+    __table_args__ = (UniqueConstraint("run_id", "defect_key", name="uq_qap_run_defect_key"),
+                      Index("ix_qap_run_governed_defect", "governed_defect_id"))
     id = pk_column()
     run_id = Column(Integer, ForeignKey("qap_test_execution_runs.id"), nullable=False, index=True)
     defect_key = Column(String(100), nullable=False)
@@ -4107,7 +4157,38 @@ class TestRunDefect(Base):
     created_at = Column(DateTime, default=now)
 
     run = relationship("TestExecutionRun", back_populates="defects")
+    is_historical = Column(Boolean, nullable=False, default=False, server_default="0")
+    governed_defect_id = Column(Integer, ForeignKey("qap_defects.id", name="fk_qap_run_hist_defect"), nullable=True)
+    linked_workflow_revision = Column(Integer, nullable=True)
     linked_by = relationship("User", foreign_keys=[linked_by_id])
+
+    @property
+    def execution_id(self):
+        return self.run.execution_id
+
+    @property
+    def attempt_no(self):
+        return self.run.attempt_no
+
+    @property
+    def cycle_id(self):
+        return self.run.execution.cycle_id
+
+    @property
+    def cycle_key(self):
+        return self.run.execution.cycle.cycle_key
+
+    @property
+    def project_id(self):
+        return self.run.execution.cycle.project_id
+
+    @property
+    def test_case_key(self):
+        return self.run.execution.test_case.test_case_key
+
+    @property
+    def status(self):
+        return self.run.status
 
     @property
     def linked_by_name(self):
@@ -4138,10 +4219,16 @@ class Defect(Base):
     @property
     def verified_execution_ids(self):
         from .defect_workflow import verified_for
-        if not self.workflow_json:
-            return []
         executions = ([self.execution] if self.execution else []) + [link.execution for link in self.execution_links if link.execution]
-        return list({ex.id for ex in executions if ex.cycle and verified_for(self, ex.cycle.environment)})
+        if not self.workflow_json:
+            events=self.workflow_state.get('execution_verifications', [])
+            return list({event['execution_id'] for event in events if self.status=='Closed'
+                and event.get('result')=='Passed' and event.get('iteration')==(self.reopen_count or 0)})
+        return list({ex.id for ex in executions if ex.cycle and verified_for(self, ex.cycle.environment, execution_id=ex.id)})
+
+    @property
+    def requires_execution_verification(self):
+        return self.modern_workflow or bool(self.workflow_state.get('execution_verifications'))
 
     @property
     def workflow(self):
@@ -4152,6 +4239,11 @@ class Defect(Base):
     def workflow_state(self):
         from .defect_workflow import state
         return state(self)
+
+    @property
+    def resolver_department(self):
+        from .defect_routing import resolver_scope
+        return resolver_scope(self).department
 
     @property
     def workflow_stages(self):
@@ -4264,6 +4356,10 @@ class Defect(Base):
     # DefectTestCaseLink's own established "primary field + separate
     # many-to-many table for extra links" pattern exactly.
     execution_links = relationship("DefectExecutionLink", back_populates="defect", cascade="all,delete-orphan")
+    functional_request_links = relationship("DefectFunctionalRequestLink", back_populates="defect", cascade="all,delete-orphan")
+    historical_execution_links = relationship("TestRunDefect",
+        primaryjoin=lambda: and_(Defect.id == foreign(TestRunDefect.governed_defect_id), TestRunDefect.is_historical == True),
+        viewonly=True, order_by="TestRunDefect.created_at")
     cc_entries = relationship("DefectCCUser", back_populates="defect", cascade="all,delete-orphan",
                               order_by="DefectCCUser.user_id")
 
@@ -4316,6 +4412,34 @@ class Defect(Base):
         return self.qa_request.request_id if self.qa_request else None
 
     @property
+    def functional_requests(self):
+        """Exact associations only; a parent QA Request or application is not a link."""
+        refs = {}
+        def add(request, source, link=None):
+            if request is None:
+                return
+            ref = refs.setdefault(request.id, dict(id=request.id, request_id=request.request_id, sources=[]))
+            if source not in ref['sources']:
+                ref['sources'].append(source)
+            if link is not None:
+                ref.update(linked_at=link.linked_at, linked_by_name=link.linked_by.full_name if link.linked_by else None, reason=link.reason)
+        def from_cycle(cycle, source):
+            if cycle and cycle.child_request_link:
+                add(cycle.child_request_link.functional_request, source)
+        from_cycle(self.cycle, 'Primary execution')
+        if self.execution:
+            from_cycle(self.execution.cycle, 'Primary execution')
+        for link in self.execution_links:
+            if link.execution:
+                from_cycle(link.execution.cycle, 'Additional execution')
+        for link in self.historical_execution_links:
+            if link.run and link.run.execution:
+                from_cycle(link.run.execution.cycle, 'Historical execution')
+        for link in self.functional_request_links:
+            add(link.functional_request, 'Direct', link)
+        return [refs[key] for key in sorted(refs)]
+
+    @property
     def cycle_key(self):
         return self.cycle.cycle_key if self.cycle else None
 
@@ -4350,6 +4474,21 @@ class Defect(Base):
     @property
     def linked_test_case_keys(self):
         return [link.test_case.test_case_key for link in self.test_case_links if link.test_case]
+
+
+class DefectFunctionalRequestLink(Base):
+    """Audited direct traceability; does not replace an execution or retest gate."""
+    __tablename__ = 'qap_defect_func_links'
+    __table_args__ = (Index('ix_qap_def_func_req', 'functional_request_id'),)
+    defect_id = Column(Integer, ForeignKey('qap_defects.id'), primary_key=True)
+    functional_request_id = Column(Integer, ForeignKey('qap_functional_requests.id'), primary_key=True)
+    linked_by_id = Column(Integer, ForeignKey('qap_users.id'), nullable=False)
+    linked_at = Column(DateTime, default=now, nullable=False)
+    reason = Column(Text, nullable=False)
+    linked_workflow_revision = Column(Integer, nullable=False)
+    defect = relationship('Defect', back_populates='functional_request_links')
+    functional_request = relationship('FunctionalRequest')
+    linked_by = relationship('User', foreign_keys=[linked_by_id])
 
 
 class DefectCCUser(Base):

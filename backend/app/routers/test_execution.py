@@ -7,7 +7,7 @@ from sqlalchemy import and_, exists, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
-from .. import models, schemas, pagination, email_notifications
+from .. import models, schemas, pagination, email_notifications, cycle_request_preview
 from ..execution_cycles import (
     CYCLE_LINKABLE_FUNCTIONAL_STATUSES,
     cycle_unlink_allowed,
@@ -689,9 +689,9 @@ def _validate_cycle_ready(db: Session, cycle: models.TestCycle, start_date, end_
     executions = cycle.executions
     if not executions:
         raise HTTPException(400, "A cycle needs at least one test case before it can become Ready")
-    if not start_date or not end_date:
-        raise HTTPException(400, "Both a start date and an end date are required before the cycle can become Ready")
-    if start_date > end_date:
+    if not start_date:
+        raise HTTPException(400, "A start date is required before the cycle can become Ready")
+    if end_date is not None and start_date > end_date:
         raise HTTPException(400, "Start date cannot be after end date")
     link = cycle.child_request_link
     if link:
@@ -928,6 +928,7 @@ def _active_external_defects(db: Session, execution_id: int):
     links = db.query(models.TestRunDefect).join(models.TestExecutionRun).filter(
         models.TestExecutionRun.execution_id == execution_id,
         or_(models.TestRunDefect.defect_url.is_(None), ~models.TestRunDefect.defect_url.startswith('/defects')),
+        models.TestRunDefect.is_historical == False,
     ).all()
     return [link for link in links if (link.defect_status or 'Open').strip().upper()
             not in _EXTERNAL_DEFECT_RETEST_CLEAR_STATUSES]
@@ -952,6 +953,13 @@ _DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES = (
 )
 
 
+def _verified_for_cycle(defect, cycle):
+    from ..defect_workflow import verified_for
+    executions = ([defect.execution] if defect.execution else []) + [link.execution for link in defect.execution_links if link.execution]
+    scoped = [execution for execution in executions if execution.cycle_id == cycle.id]
+    return all(verified_for(defect,cycle.environment,execution_id=execution.id) for execution in scoped) if scoped else verified_for(defect,cycle.environment)
+
+
 def _execution_lock_state(db: Session, execution_id: int):
     """Returns (active_defects, has_prior_failed_or_blocked, defects) for the status gate.
     active_defects -- every governed Defect (defects.py) linked to this slot
@@ -969,9 +977,9 @@ def _execution_lock_state(db: Session, execution_id: int):
         models.Defect.execution_links.any(models.DefectExecutionLink.execution_id == execution_id),
     )).all()
     from ..defect_workflow import verified_for
-    execution = db.get(models.TestExecution, execution_id) if any(getattr(d, 'workflow_json', None) for d in defects) else None
+    execution = db.get(models.TestExecution, execution_id)
     cycle = execution.cycle if execution else None
-    active_defects = [d for d in defects if _defect_blocks_execution(d, cycle, verified_for)]
+    active_defects = [d for d in defects if _defect_blocks_execution(d, cycle, verified_for, execution_id=execution_id)]
     has_prior_failed_or_blocked = db.query(models.TestExecutionRun.id).filter(
         models.TestExecutionRun.execution_id == execution_id,
         models.TestExecutionRun.status.in_(("Fail", "Blocked")),
@@ -984,7 +992,7 @@ def _execution_lock_state(db: Session, execution_id: int):
     return active_defects, has_prior_failed_or_blocked, defects
 
 
-def _defect_blocks_execution(defect, cycle, verification_check=None) -> bool:
+def _defect_blocks_execution(defect, cycle, verification_check=None, execution_id=None) -> bool:
     """Return whether one governed defect still locks a linked execution.
 
     Non-remediation outcomes short-circuit before environment verification. This is
@@ -1006,17 +1014,19 @@ def _defect_blocks_execution(defect, cycle, verification_check=None) -> bool:
     ):
         return False
     if not getattr(defect, "workflow_json", None):
+        if getattr(defect, 'requires_execution_verification', False) and execution_id:
+            return execution_id not in defect.verified_execution_ids
         return defect.status not in _DEFECT_RETEST_CLEAR_STATUSES
     if verification_check is None:
         from ..defect_workflow import verified_for as verification_check
     return not (
         cycle
-        and verification_check(defect, cycle.environment)
+        and verification_check(defect, cycle.environment, execution_id=execution_id)
     )
 
 
 def _execution_status_gate(db: Session, execution_id: int, status_value: str,
-                           defect_key: str = "") -> "str | None":
+                           defect_key: str = "", retest_run_id=None) -> "str | None":
     """Reported directly, in two parts, in this order:
 
     1. "testcase already failed, and defect also linked, then why again
@@ -1054,6 +1064,9 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
     Returns a human-readable reason, or None if nothing blocks status_value."""
     if status_value not in ("Pass", "Fail", "Blocked", "NA", "Retest Passed"):
         return None
+    latest = db.query(models.TestExecutionRun).filter_by(execution_id=execution_id).order_by(models.TestExecutionRun.attempt_no.desc()).first()
+    if latest and latest.retest and not latest.retest.final_run_id and latest.status == 'Retest Pending' and status_value in {'Pass','Retest Passed'} and retest_run_id != latest.id:
+        return 'Use Confirm final retest after the per-defect verification checks are satisfied.'
     active_defects, has_prior_failed_or_blocked, linked_defects = _execution_lock_state(db, execution_id)
     if active_defects:
         names = ", ".join(f"{d.defect_key} ({d.status})" for d in active_defects)
@@ -1122,8 +1135,7 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
     return None
 
 
-def _prepare_execution_update(db: Session, obj: models.TestExecution, status_value: str,
-                              current_user: models.User, defect_key: str = "") -> models.TestCycle:
+def _prepare_execution_activity(db: Session, obj: models.TestExecution, current_user: models.User, *, require_runner=True) -> models.TestCycle:
     _execution_or_404(db, obj.id, lock=True)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_cycle_visibility(db, cycle, current_user)
@@ -1140,13 +1152,20 @@ def _prepare_execution_update(db: Session, obj: models.TestExecution, status_val
     # blocked.
     if not obj.pinned_version_id:
         raise HTTPException(400, "This testcase slot has no pinned approved version and cannot be executed")
+    if require_runner:
+        _require_assigned_runner(obj, current_user)
+    return cycle
+
+
+def _prepare_execution_update(db: Session, obj: models.TestExecution, status_value: str,
+                              current_user: models.User, defect_key: str = "") -> models.TestCycle:
+    cycle = _prepare_execution_activity(db, obj, current_user)
     from ..constants import TEST_EXECUTION_STATUSES
     if status_value not in TEST_EXECUTION_STATUSES:
         raise HTTPException(400, f"Invalid execution status '{status_value}'")
     violation = _execution_status_gate(db, obj.id, status_value, defect_key)
     if violation:
         raise HTTPException(400, f"Cannot record '{status_value}': {violation}")
-    _require_assigned_runner(obj, current_user)
     return cycle
 
 
@@ -1540,7 +1559,7 @@ def list_cycles(project_id: int, params: pagination.PageParams = Depends(),
 
 @router.get(
     "/projects/{project_id}/functional-request-options",
-    response_model=List[schemas.LinkedRequestRef],
+    response_model=List[schemas.CycleFunctionalRequestOptionOut],
 )
 def list_functional_request_options(
     project_id: int,
@@ -1583,6 +1602,48 @@ def list_functional_request_options(
     )
 
 
+def _cycle_preview_target(db, user, project_id, request_id, cycle_id):
+    project = _get_project_or_404(db, project_id)
+    _require_active_project(db, project_id)
+    require_can_execute_project(db, project_id, user)
+    cycle = None
+    if cycle_id is not None:
+        cycle = _get_cycle_or_404(db, cycle_id)
+        if cycle.project_id != project_id:
+            raise HTTPException(404, "Test Cycle not found in this project")
+        _require_cycle_visibility(db, cycle, user)
+    request = db.query(models.FunctionalRequest).filter_by(id=request_id).populate_existing().one_or_none()
+    if not request or not request.request_id:
+        raise HTTPException(404, "Functional QA Request not found")
+    cycle_request_preview.refresh_parent(db, request)
+    from .functional import _require_visible
+    _require_visible(db, request, user)
+    if project.application_master_id is None or request.application_master_id != project.application_master_id:
+        raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
+    workspace_id = cycle.origin_workspace_id if cycle and cycle.origin_workspace_id else project.qa_workspace_id
+    if not request.qa_request or request.qa_request.qa_workspace_id != workspace_id:
+        raise HTTPException(400, "The Test Cycle and Functional QA Request must belong to the same workspace")
+    require_cycle_request_linkable(request, cycle.status if cycle else "Draft")
+    return project, request
+
+
+@router.get("/projects/{project_id}/functional-requests/{request_id}/preview", response_model=schemas.CycleRequestPreviewOut)
+def preview_cycle_request(project_id: int, request_id: int, cycle_id: Optional[int] = None,
+                          db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    project, request = _cycle_preview_target(db, current_user, project_id, request_id, cycle_id)
+    return {"request": request, "preview_token": cycle_request_preview.loaded(current_user, project, request, cycle_id)}
+
+
+@router.post("/projects/{project_id}/functional-requests/{request_id}/preview/confirm", response_model=schemas.CycleRequestPreviewReceipt)
+def confirm_cycle_request_preview(project_id: int, request_id: int, payload: schemas.CycleRequestPreviewConfirm,
+                                  cycle_id: Optional[int] = None, db: Session = Depends(get_db),
+                                  current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    project, request = _cycle_preview_target(db, current_user, project_id, request_id, cycle_id)
+    token = cycle_request_preview.confirm(db, payload.preview_token, current_user, project, request, cycle_id)
+    db.commit()
+    return {"preview_token": token}
+
+
 @router.post("/projects/{project_id}/cycles", response_model=schemas.TestCycleOut)
 def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
@@ -1592,7 +1653,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Cycle name cannot be blank")
-    if payload.start_date > payload.end_date:
+    if payload.end_date is not None and payload.start_date > payload.end_date:
         raise HTTPException(400, "Start date cannot be after end date")
     if payload.owner_id:
         _runner_or_404(db, payload.owner_id, workspace_id=current_workspace_id(),
@@ -1614,6 +1675,9 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
         )
         if not linked_request or not linked_request.request_id:
             raise HTTPException(404, "Functional QA Request not found")
+        cycle_request_preview.refresh_parent(db, linked_request, lock=True)
+        from .functional import _require_visible
+        _require_visible(db, linked_request, current_user)
         if (project.application_master_id is not None
                 and linked_request.application_master_id != project.application_master_id):
             raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
@@ -1621,6 +1685,9 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
         if getattr(current_user, "active_qa_workspace_id", project.qa_workspace_id) != request_workspace_id:
             raise HTTPException(400, "The Test Cycle and Functional QA Request must belong to the same workspace")
         require_cycle_request_linkable(linked_request, "Draft")
+        review_id = cycle_request_preview.require_confirmed(
+            db, payload.request_preview_token, current_user, project, linked_request, None,
+        )
     obj = models.TestCycle(
         project_id=project_id, name=name, description=payload.description,
         start_date=payload.start_date, end_date=payload.end_date, created_by_id=current_user.id,
@@ -1644,6 +1711,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
             child_type="Functional", child_id=linked_request.id,
             child_key=linked_request.request_id,
         )
+        cycle_request_preview.applied(db, review_id, obj, linked_request, current_user)
     db.commit()
     db.refresh(obj)
     _attach_request_link_permissions(db, [obj], current_user)
@@ -1663,6 +1731,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                   current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     """Edit cycle metadata and enforce the controlled five-state lifecycle."""
     data = payload.model_dump(exclude_unset=True)
+    request_preview_token = data.pop("request_preview_token", None)
     # Authorize against a read-only preview before taking workflow locks, then
     # acquire the Functional parent(s), Test Cycle and link row in the same
     # order as Retest/governed unlink. The checks are repeated on the locked
@@ -1733,6 +1802,8 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                 or_(models.TestExecution.status.is_(None),
                     models.TestExecution.status.notin_(("Pass", "Retest Passed", "NA"))),
             ).all()
+            if any(execution.status == 'Retest Pending' for execution in incomplete_executions):
+                raise HTTPException(400, 'Confirm pending retest verification before completing this cycle')
             if conditional_clearance and any(execution.status not in ("Fail", "Blocked", "Not Executed")
                                              for execution in incomplete_executions):
                 raise HTTPException(400, "Conditional completion requires recognized test execution statuses")
@@ -1757,7 +1828,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                          models.Defect.resolution_type == "Fixed")),
             ).all()
             from ..defect_workflow import verified_for
-            severe = [d for d in severe if not verified_for(d, obj.environment)]
+            severe = [d for d in severe if not _verified_for_cycle(d, obj)]
             if severe and not conditional_clearance:
                 labels = ", ".join(defect.defect_key for defect in severe[:8])
                 raise HTTPException(
@@ -1787,7 +1858,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                     and_(models.Defect.workflow_json.isnot(None), models.Defect.status == "Closed",
                          models.Defect.resolution_type == "Fixed")),
             ).all()
-            residual = [d for d in residual if not verified_for(d, obj.environment)]
+            residual = [d for d in residual if not _verified_for_cycle(d, obj)]
             if residual:
                 # 2026-08 whole-module simplification: QA Lead Group system
                 # role only -- the old per-project "Project Lead"/"Owner"
@@ -1857,9 +1928,9 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         owner_reason = reassignment.require_reason(payload.reason)
     start_date = data.get("start_date", obj.start_date)
     end_date = data.get("end_date", obj.end_date)
-    if start_date is None or end_date is None:
-        raise HTTPException(400, "Start date and end date are required")
-    if start_date > end_date:
+    if start_date is None:
+        raise HTTPException(400, "Start date is required")
+    if end_date is not None and start_date > end_date:
         raise HTTPException(400, "Start date cannot be after end date")
     entering_ready = data.get("status") == "Ready" and obj.status != "Ready"
     link_type = data.pop("linked_request_type", None)
@@ -1867,10 +1938,14 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     if link_changed and link_id is not None and link_type != "Functional":
         raise HTTPException(400, "Only Functional QA Requests can be linked to Test Cycles")
     proposed_linked_request = None
+    review_id = None
     if link_changed and link_id is not None:
         proposed_linked_request = locked_functional_requests.get(link_id)
         if not proposed_linked_request or not proposed_linked_request.request_id:
             raise HTTPException(404, "Functional QA Request not found")
+        cycle_request_preview.refresh_parent(db, proposed_linked_request, lock=True)
+        from .functional import _require_visible
+        _require_visible(db, proposed_linked_request, current_user)
         if (
             obj.project.application_master_id is not None
             and proposed_linked_request.application_master_id
@@ -1894,6 +1969,10 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
             proposed_linked_request,
             data.get("status", obj.status),
         )
+        if (link_type, link_id) != (previous_link_type, obj.linked_request_id):
+            review_id = cycle_request_preview.require_confirmed(
+                db, request_preview_token, current_user, obj.project, proposed_linked_request, obj.id,
+            )
     if (link_changed and obj.child_request_link
             and (link_type, link_id) != (previous_link_type, obj.linked_request_id)):
         _require_cycle_request_link_change_allowed(db, obj.child_request_link)
@@ -1978,6 +2057,8 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                 actor_id=current_user.id, actor_role=current_user.roles_csv,
                 decision=decision, comments=comments,
             ))
+    if review_id is not None:
+        cycle_request_preview.applied(db, review_id, obj, proposed_linked_request, current_user)
     changed_labels = [
         label for field, label in tracked_fields.items()
         if field in data and previous_values[field] != getattr(obj, field)
@@ -2398,7 +2479,9 @@ def get_execution_summary(cycle_id: int, db: Session = Depends(get_db),
 
 @router.get("/executions/blocked-or-failed", response_model=List[schemas.DefectLinkableExecutionOut])
 def list_blocked_failed_executions(db: Session = Depends(get_db),
-                                    current_user: models.User = Depends(get_current_user)):
+                                    current_user: models.User = Depends(get_current_user),
+                                    include_history: bool = False, application_name: Optional[str] = None,
+                                    execution_id: Optional[int] = None):
     """2026-08 -- reported directly: on Defect Management's page load, "if
     there are 30 project[s] then 30 api call[s] ... same for cycles,
     executions." Defects.tsx used to build its "pick a Failed/Blocked Test
@@ -2427,14 +2510,20 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
         db.query(models.TestExecution)
         .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
         .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
-        .filter(models.TestProject.is_active == True)  # noqa: E712
-        .filter(models.TestExecution.status.in_(("Fail", "Blocked")))
         .options(
             joinedload(models.TestExecution.cycle).joinedload(models.TestCycle.project),
             joinedload(models.TestExecution.pinned_version),
             *_LIST_EXECUTION_EAGER_LOADS,
         )
     )
+    if include_history:
+        q = q.filter(models.TestExecution.runs.any(models.TestExecutionRun.status.in_(("Fail", "Blocked"))))
+    else:
+        q = q.filter(models.TestProject.is_active == True, models.TestExecution.status.in_(("Fail", "Blocked")))
+    if execution_id is not None:
+        q = q.filter(models.TestExecution.id == execution_id)
+    if application_name and not include_history:
+        q = q.filter(models.TestProject.application_master.has(models.ApplicationMaster.name == application_name.strip().upper()))
     project_ids = viewable_project_ids(db, current_user)
     if project_ids is not None:
         q = q.filter(models.TestProject.id.in_(project_ids))
@@ -2443,6 +2532,19 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
         execution for execution in executions
         if not execution.cycle.folder_id or can_view_cycle_folder(execution.cycle.folder, current_user)
     ]
+    if include_history:
+        from ..defect_history import require_amendment_access, execution_application
+        eligible = []
+        for execution in executions:
+            application = execution_application(db, execution)
+            if not application or (application_name and application.casefold() != application_name.strip().casefold()):
+                continue
+            try:
+                require_amendment_access(execution.cycle, current_user)
+            except HTTPException:
+                continue
+            eligible.append(execution)
+        executions = eligible
     return [
         {"project": execution.cycle.project, "cycle": execution.cycle, "execution": execution,
          "feature_area": execution.pinned_version.module_name if execution.pinned_version else None}
@@ -2681,6 +2783,19 @@ def export_test_cycle(
                     uploader_names.get(document.uploaded_by_id, "Unknown user"), document.uploaded_at,
                 ])
 
+    retest_rows=[]
+    for execution in executions:
+        for run in execution.runs:
+            if run.retest:
+                retest=run.retest
+                for outcome in retest.outcomes:
+                    retest_rows.append([execution.test_case.test_case_key,run.attempt_no,retest.observed_result,
+                        retest.environment,retest.tested_build,retest.pinned_version_id,outcome.defect_key,
+                        outcome.defect_status,outcome.outcome,outcome.notes,outcome.evidence_reference,
+                        ", ".join(doc['file_name'] for doc in outcome.evidence_documents),
+                        outcome.fix_iteration,outcome.defect_revision,outcome.verification_valid,retest.final_run_id,
+                        run.executed_by_name,run.executed_at])
+
     workbook = new_workbook()
     executed_count = sum(execution.status != "Not Executed" for execution in executions)
     pass_count = sum(execution.status in {"Pass", "Retest Passed"} for execution in executions)
@@ -2740,6 +2855,11 @@ def export_test_cycle(
         subtitle="Definition used by each testcase in this cycle.",
         wrap_headers={"Step", "Expected Result"}, widths={"Step": 52, "Expected Result": 52},
     )
+    add_table_sheet(workbook,"Retest Outcomes","Retest observations and verification",[
+        "Test Case ID","Attempt No","Observed Result","Environment","Tested Build","Pinned Version ID",
+        "Defect Key","Defect Status at Capture","Defect Outcome","Notes","Evidence Reference","Evidence Files",
+        "Fix Iteration","Defect Revision","Verification Satisfied","Final Confirmation Run ID","Recorded By","Recorded At",
+    ],retest_rows,wrap_headers={"Notes","Evidence Reference","Evidence Files"},date_headers={"Recorded At"})
     add_table_sheet(
         workbook, "Execution Attempts", "Execution Attempt History", [
             "Test Case ID", "Attempt No", "Result", "Actual Result", "Artifact",
@@ -3640,6 +3760,8 @@ def _unlink_attempt_defect(
     current_user: models.User,
 ) -> "models.Defect | None":
     """Remove one attempt link and, when internal, its governed trace."""
+    if db.query(models.TestRetestOutcome.id).filter_by(external_link_id=attempt_defect.id).first():
+        raise HTTPException(409, 'This link is retained by retest evidence and cannot be removed')
     # Internal links are written by defects.py with a portal-relative URL.
     # External-link validation accepts only absolute http(s) URLs, so this
     # marker prevents a coincidentally identical external key from detaching
@@ -3758,6 +3880,8 @@ def remove_run_defect(execution_id: int, run_id: int, defect_id: int,
     )
     if not attempt_defect:
         raise HTTPException(404, "Defect link not found")
+    if attempt_defect.is_historical:
+        raise HTTPException(400, "Historical references are append-only and cannot be unlinked")
     if not (
         current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
         or attempt_defect.linked_by_id == current_user.id
@@ -3804,6 +3928,8 @@ def delete_run_image(execution_id: int, run_id: int, document_id: int, db: Sessi
     _require_open_cycle(cycle)
     run = _run_or_404(db, obj, run_id)
     document = doc_store.get_document_or_404(db, _RESULT_IMAGE_MODULE, run.id, document_id)
+    if run.retest:
+        raise HTTPException(409, 'Retest evidence is retained in history; record a new retest to add corrected evidence')
     if not doc_store.can_delete_document(document, current_user):
         raise HTTPException(403, "Only the person who uploaded this image or an Administrator can delete it")
     doc_store.delete_document(db, document)
@@ -3852,6 +3978,8 @@ def delete_result_image(execution_id: int, document_id: int, db: Session = Depen
     _require_open_cycle(cycle)
     run = _latest_run_or_404(db, obj)
     document = doc_store.get_document_or_404(db, _RESULT_IMAGE_MODULE, run.id, document_id)
+    if run.retest:
+        raise HTTPException(409, 'Retest evidence is retained in history; record a new retest to add corrected evidence')
     if not doc_store.can_delete_document(document, current_user):
         raise HTTPException(403, "Only the person who uploaded this image or an Administrator can delete it")
     doc_store.delete_document(db, document)
@@ -4019,3 +4147,88 @@ def bulk_remove_executions(
         removed_attempt_count=removed_attempt_count,
         removed_evidence_count=len(documents_by_id),
     )
+
+
+@router.get('/executions/{execution_id}/retest-context')
+def retest_context(execution_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    from ..execution_retests import _reviewer, effective_outcomes, current_context, final_outcomes, approved_disposition, _require_evidence
+    obj=_execution_or_404(db,execution_id)
+    _require_execution_visibility(db,obj,current_user)
+    _,prior,linked=_execution_lock_state(db,obj.id)
+    rows=[]
+    for defect in linked:
+        try:
+            _reviewer(db,defect,current_user)
+            can_verify=True
+        except HTTPException: can_verify=False
+        rows.append(dict(defect_id=defect.id,defect_key=defect.defect_key,status=defect.status,
+            revision=defect.workflow_revision,can_verify=can_verify,
+            can_record_pass=(defect.status in {'Ready for QA','QA Testing','Resolved','Retest','Business Acceptance','Ready for Release','Production Verification','Closed'}),
+            can_record_failure=defect.status in {'Ready for QA','QA Testing','Resolved','Retest','Reopened'}))
+    external=db.query(models.TestRunDefect).join(models.TestExecutionRun).filter(
+        models.TestExecutionRun.execution_id==obj.id,models.TestRunDefect.is_historical==False,
+        or_(models.TestRunDefect.defect_url.is_(None),~models.TestRunDefect.defect_url.startswith('/defects'))).all()
+    rows += [dict(external_link_id=link.id,defect_key=link.defect_key,status=link.defect_status or 'Open',
+                  can_verify=False,can_record_pass=True,can_record_failure=True) for link in external]
+    observations=[]
+    saved=effective_outcomes(db,obj)
+    for row in rows:
+        internal=bool(row.get('defect_id'))
+        key=('internal',row['defect_id']) if internal else ('external',row['external_link_id'])
+        disposition=internal and approved_disposition(next(d for d in linked if d.id==row['defect_id']))
+        row['ready_for_retest']=not disposition and row['status'] in {
+            'Ready for QA','QA Testing','Resolved','Retest','Business Acceptance','Ready for Release','Production Verification','Closed'}
+        row['awaiting_fix']=not disposition and not row['ready_for_retest']
+        row['approved_disposition']=bool(disposition)
+        observation=saved.get(key)
+        if observation:
+            usable=current_context(observation,obj)
+            try: _require_evidence([observation],doc_store.list_documents(db,_RESULT_IMAGE_MODULE,observation.run_id))
+            except HTTPException: usable=False
+            observations.append(dict(schemas.RetestOutcomeOut.model_validate(observation).model_dump(),
+                run_id=observation.run_id,attempt_no=observation.retest.run.attempt_no,
+                tested_build=observation.retest.tested_build,current_context=usable,
+                can_verify=usable and row['ready_for_retest'] and bool(row.get('can_verify')) and observation.outcome=='Passed'))
+    latest=db.query(models.TestExecutionRun).filter_by(execution_id=obj.id).order_by(models.TestExecutionRun.attempt_no.desc()).first()
+    can_finalize=False
+    if latest and latest.retest and not latest.retest.final_run_id and latest.retest.observed_result=='Passed' and latest.retest.environment==obj.cycle.environment and latest.retest.pinned_version_id==obj.pinned_version_id:
+        try:
+            final_outcomes(db,obj,linked,external)
+            can_finalize=_execution_status_gate(db,obj.id,'Retest Passed',retest_run_id=latest.id) is None
+        except HTTPException: pass
+    return dict(execution_id=obj.id,run_version=obj.run_version,environment=obj.cycle.environment,
+                tested_build=obj.cycle.build,pinned_version_id=obj.pinned_version_id,has_prior_failure=prior,defects=rows,
+                observations=observations,can_finalize=can_finalize,
+                can_use_standard_results=prior and _execution_status_gate(db,obj.id,'Retest Passed') is None,
+                can_record_testcase=any(row['ready_for_retest'] for row in rows) or all(row['approved_disposition'] for row in rows))
+
+
+@router.post('/executions/{execution_id}/retests',response_model=schemas.TestExecutionOut)
+def record_execution_retest(execution_id: int,payload: schemas.ExecutionRetestCreate,
+    db: Session=Depends(get_db),current_user: models.User=Depends(require_roles(*_EXEC_ROLES))):
+    from ..execution_retests import record
+    return record(db,execution_id,payload,current_user)
+
+
+@router.post('/executions/{execution_id}/rich-retest',response_model=schemas.TestExecutionOut)
+def record_rich_retest(execution_id: int,payload: str=Form(...),files: List[UploadFile]=File(default=[]),
+    db: Session=Depends(get_db),current_user: models.User=Depends(require_roles(*_EXEC_ROLES))):
+    from pydantic import ValidationError
+    from ..execution_retests import record
+    try: parsed=schemas.ExecutionRetestCreate.model_validate_json(payload)
+    except ValidationError as error: raise HTTPException(422,error.errors(include_context=False))
+    return record(db,execution_id,parsed,current_user,files)
+
+
+@router.post('/executions/{execution_id}/retests/{run_id}/outcomes/{outcome_id}/verify',response_model=schemas.TestExecutionOut)
+def verify_execution_retest(execution_id:int,run_id:int,outcome_id:int,payload:schemas.RetestVerify,
+    db:Session=Depends(get_db),current_user:models.User=Depends(require_roles(*_EXEC_ROLES))):
+    from ..execution_retests import verify
+    return verify(db,execution_id,run_id,outcome_id,payload,current_user)
+
+
+@router.post('/executions/{execution_id}/retests/{run_id}/finalize',response_model=schemas.TestExecutionOut)
+def finalize_execution_retest(execution_id:int,run_id:int,payload:schemas.RetestFinalize,
+    db:Session=Depends(get_db),current_user:models.User=Depends(require_roles(*_EXEC_ROLES))):
+    from ..execution_retests import finalize
+    return finalize(db,execution_id,run_id,payload,current_user)

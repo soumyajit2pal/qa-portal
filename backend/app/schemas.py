@@ -1055,6 +1055,7 @@ class FunctionalUpdate(BaseModel):
     epic_number: Optional[str] = None
     cr_number: Optional[str] = None
     change_type: Optional[str] = None
+    business_defect_number: Optional[str] = Field(default=None, max_length=64)
     environment: Optional[str] = None
     target_promotion_environment: Optional[str] = None
     release_version: Optional[str] = None
@@ -1103,6 +1104,7 @@ class FunctionalListOut(ORMModel):
     epic_number: Optional[str] = None
     cr_number: Optional[str] = None
     change_description: Optional[str] = None
+    change_type: Optional[str] = None
     department: Optional[str] = None
     # Not rendered by Functional.tsx's own list table, but modules/
     # governance/SignOff.tsx's "New Sign-off Certificate" Testing Request ID
@@ -1235,6 +1237,7 @@ class AssignTesterIn(BaseModel):
 
 
 class StartFunctionalExecutionIn(BaseModel):
+    request_preview_token: Optional[str] = Field(default=None, max_length=4096)
     test_cycle_id: Optional[int] = None
 
 
@@ -2289,7 +2292,22 @@ class DefectCreate(BaseModel):
 
 
 class DefectLinkExecution(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     execution_id: int
+    link_type: Literal['ACTIVE', 'HISTORICAL'] = 'ACTIVE'
+    run_id: Optional[int] = Field(default=None, ge=1, strict=True)
+    reason: Optional[str] = Field(default=None, min_length=1, max_length=2000)
+    expected_revision: Optional[int] = Field(default=None, ge=0, strict=True)
+    confirmation: StrictBool = False
+
+    @model_validator(mode='after')
+    def historical_fields(self):
+        if self.link_type == 'HISTORICAL':
+            if self.run_id is None or not self.reason or self.expected_revision is None or not self.confirmation:
+                raise ValueError('Historical linking requires an attempt, reason, current defect revision and confirmation')
+        elif self.run_id is not None or self.reason is not None or self.expected_revision is not None or self.confirmation:
+            raise ValueError('Historical fields require HISTORICAL link type')
+        return self
 
 
 class DefectExecutionLinkOut(ORMModel):
@@ -2302,6 +2320,16 @@ class DefectExecutionLinkOut(ORMModel):
     project_id: Optional[int] = None
     test_case_key: Optional[str] = None
     status: Optional[str] = None
+
+
+class HistoricalDefectExecutionLinkOut(DefectExecutionLinkOut):
+    run_id: int
+    attempt_no: int
+    linked_by_id: Optional[int] = None
+    linked_by_name: Optional[str] = None
+    created_at: datetime.datetime
+    notes: Optional[str] = None
+    linked_workflow_revision: Optional[int] = None
 
 
 class DefectUpdate(BaseModel):
@@ -2384,9 +2412,39 @@ class DefectReassign(BaseModel):
     assignee_id: int
     assigned_team: Optional[str] = None
     reason: Optional[str] = None
+    expected_revision: int = Field(ge=0, strict=True)
+    expected_owner_id: int = Field(gt=0, strict=True)
+
+
+class DefectRoutingRecovery(BaseModel):
+    assignee_id: int = Field(gt=0, strict=True)
+    assigned_team: str = Field(min_length=1, max_length=150)
+    reason: str = Field(min_length=1, max_length=4000)
+    expected_revision: int = Field(ge=0, strict=True)
+    expected_owner_id: int = Field(gt=0, strict=True)
+    confirmation: StrictBool
+
+
+class FunctionalRequestReferenceOut(BaseModel):
+    id: int
+    request_id: str
+    sources: List[str] = []
+    linked_at: Optional[datetime.datetime] = None
+    linked_by_name: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class FunctionalRequestOptionOut(ORMModel):
+    id: int
+    request_id: str
+    application_name: str
+    module_name: Optional[str] = None
+    status: str
 
 
 class DefectOut(ORMModel):
+    functional_requests: List[FunctionalRequestReferenceOut] = []
+    resolver_department: Optional[str] = None
     cc_user_ids: List[int] = []
     cc_users: List[UserOption] = []
     workflow: Optional[dict] = None
@@ -2422,6 +2480,7 @@ class DefectOut(ORMModel):
     # Additional executions this same governed defect has also been traced
     # to, beyond its primary one above -- see models.Defect.execution_links.
     execution_links: List[DefectExecutionLinkOut] = []
+    historical_execution_links: List[HistoricalDefectExecutionLinkOut] = []
     application_name: str
     module_name: Optional[str] = None
     module_feature: str
@@ -2479,7 +2538,23 @@ class DefectOut(ORMModel):
     updated_at: datetime.datetime
 
 
+class DefectAssignmentContext(BaseModel):
+    defect: DefectOut
+    responsibility_kind: str
+    responsibility_owner_id: Optional[int] = None
+    responsibility_owner_name: Optional[str] = None
+    resolver_department_source: str
+    suggested_resolver_id: Optional[int] = None
+    can_reassign: bool
+    can_recover: bool
+    routing_recovery_needed: bool
+    reassignment_candidates: List[UserOption] = []
+    recovery_departments: List[str] = []
+    recovery_candidates: List[UserOption] = []
+
+
 class DefectListOut(ORMModel):
+    functional_requests: List[FunctionalRequestReferenceOut] = []
     modern_workflow: bool = False
     resolution_type: Optional[str] = None
     verified_builds: List[dict] = []
@@ -2506,6 +2581,7 @@ class DefectListOut(ORMModel):
     execution_id: Optional[int] = None
     execution_status: Optional[str] = None
     execution_links: List[DefectExecutionLinkOut] = []
+    historical_execution_links: List[HistoricalDefectExecutionLinkOut] = []
     application_name: str
     module_name: Optional[str] = None
     module_feature: str
@@ -3838,11 +3914,34 @@ class TestCycleFolderListOut(BaseModel):
     total: int = 0
 
 
+class CycleFunctionalRequestOptionOut(LinkedRequestRef):
+    application_name: Optional[str] = None
+    cr_number: Optional[str] = None
+    epic_number: Optional[str] = None
+    change_type: Optional[str] = None
+    business_defect_number: Optional[str] = None
+
+
+class CycleRequestPreviewOut(BaseModel):
+    request: FunctionalOut
+    preview_token: str
+
+
+class CycleRequestPreviewConfirm(BaseModel):
+    preview_token: str = Field(min_length=1, max_length=4096)
+    review_confirmed: Literal[True]
+
+
+class CycleRequestPreviewReceipt(BaseModel):
+    preview_token: str
+
+
 class TestCycleCreate(BaseModel):
     name: str
     description: Optional[str] = None
     start_date: datetime.date
-    end_date: datetime.date
+    end_date: Optional[datetime.date] = None
+    request_preview_token: Optional[str] = Field(default=None, max_length=4096)
     # Reported directly: "Create Test Cycle Folder ... Under this folder
     # create test cycle." None means Unfiled, same convention as
     # TestCaseCreate/TestCaseModal's own folder_id.
@@ -3876,6 +3975,7 @@ class TestCycleUpdate(BaseModel):
     status: Optional[str] = None
     start_date: Optional[datetime.date] = None
     end_date: Optional[datetime.date] = None
+    request_preview_token: Optional[str] = Field(default=None, max_length=4096)
     linked_request_type: Optional[Literal["Functional"]] = None
     linked_request_id: Optional[int] = None
     cycle_type: Optional[str] = None
@@ -4124,6 +4224,9 @@ class TestRunDefectOut(ORMModel):
     notes: Optional[str] = None
     linked_by_id: Optional[int] = None
     linked_by_name: Optional[str] = None
+    is_historical: bool = False
+    governed_defect_id: Optional[int] = None
+    linked_workflow_revision: Optional[int] = None
     created_at: datetime.datetime
 
 
@@ -4141,6 +4244,7 @@ class TestRunDefectStatusUpdate(BaseModel):
 
 
 class LinkedGovernedDefectRef(ORMModel):
+    requires_execution_verification: bool = False
     modern_workflow: bool = False
     verified_execution_ids: List[int] = []
     """A governed Defect (defects.py, not the free-text TestRunDefect above)
@@ -4160,7 +4264,61 @@ class LinkedGovernedDefectRef(ORMModel):
     related_cr_number: Optional[str] = None
 
 
+class RetestOutcomeIn(BaseModel):
+    defect_id: Optional[int] = Field(default=None, gt=0)
+    external_link_id: Optional[int] = Field(default=None, gt=0)
+    expected_defect_revision: Optional[int] = Field(default=None, ge=0)
+    outcome: Literal['Passed', 'Failed', 'Blocked', 'Not tested']
+    notes: Optional[str] = Field(default=None, max_length=5000)
+    evidence_reference: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ExecutionRetestCreate(BaseModel):
+    expected_run_version: int = Field(ge=0)
+    observed_result: Literal['Passed', 'Failed', 'Blocked']
+    actual_result: str = Field(min_length=1, max_length=10000)
+    tested_build: str = Field(min_length=1, max_length=150)
+    evidence_reference: Optional[str] = Field(default=None, max_length=2000)
+    outcomes: List[RetestOutcomeIn] = Field(min_length=0, max_length=100)
+
+
+class RetestVerify(BaseModel):
+    expected_defect_revision: int = Field(ge=0)
+    verification_confirmed: Literal[True]
+
+
+class RetestFinalize(BaseModel):
+    expected_run_version: int = Field(ge=0)
+    verification_confirmed: Literal[True]
+
+
+class RetestOutcomeOut(ORMModel):
+    id: int
+    defect_id: Optional[int] = None
+    external_link_id: Optional[int] = None
+    defect_key: str
+    defect_status: Optional[str] = None
+    outcome: str
+    notes: Optional[str] = None
+    evidence_reference: Optional[str] = None
+    evidence_documents: List[dict] = []
+    defect_revision: Optional[int] = None
+    fix_iteration: Optional[int] = None
+    verification_valid: bool = False
+
+
+class ExecutionRetestOut(ORMModel):
+    run_id: int
+    observed_result: str
+    environment: str
+    tested_build: str
+    pinned_version_id: int
+    final_run_id: Optional[int] = None
+    outcomes: List[RetestOutcomeOut] = []
+
+
 class TestExecutionRunOut(ORMModel):
+    retest: Optional[ExecutionRetestOut] = None
     """One immutable historical attempt -- see models.TestExecutionRun."""
     id: int
     execution_id: int
@@ -4542,3 +4700,10 @@ class DefectWorkflowAction(BaseModel):
 class DefectLinkRequest(BaseModel):
     qa_request_id: int
     revision: int
+
+
+class DefectLinkFunctionalRequest(BaseModel):
+    functional_request_id: int = Field(gt=0)
+    revision: int = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=2000)
+    confirmation: Literal[True]

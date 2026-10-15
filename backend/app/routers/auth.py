@@ -721,26 +721,12 @@ def user_options(purpose: str = "lookup", workspace_id: Optional[int] = None,
     if purpose == "defect_reassign":
         if defect_id is None:
             raise HTTPException(400, "Defect is required")
-        from .defects import _get_visible, _valid_defect_reassignment_departments
-        from ..defect_assignment import assignment_error, current_defect_responsibility
+        from .defects import _get_visible
+        from ..defect_assignment import current_defect_responsibility
+        from ..defect_routing import reassignment_error
         defect = _get_visible(defect_id, db, current_user)
         responsibility = current_defect_responsibility(defect)
-        previous = db.get(models.User, responsibility.owner_id) if responsibility.owner_id else None
-        if responsibility.field == "assignee_id":
-            rows = [
-                u for u in rows
-                if u.id != responsibility.owner_id
-                and any(
-                    assignment_error(db, defect, u, "assignee_id", destination) is None
-                    for destination in _valid_defect_reassignment_departments(defect, previous, u)
-                )
-            ]
-        else:
-            rows = [
-                u for u in rows
-                if u.id != responsibility.owner_id
-                and assignment_error(db, defect, u, responsibility.field) is None
-            ]
+        rows = [u for u in rows if u.id != responsibility.owner_id and reassignment_error(db, defect, u) is None]
     if department and (purpose != "approver" or department_scoped):
         rows = [u for u in rows if department in u.departments]
     if purpose == "approver" and department_scoped and not department:

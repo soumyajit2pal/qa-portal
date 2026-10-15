@@ -8,7 +8,7 @@ from ..defect_workflow import state, policy, transitions, environment_for, produ
 from ..defect_action_evidence import selected_evidence
 
 
-def apply_action(db, obj, payload, user):
+def apply_action(db, obj, payload, user, *, commit=True, verification_context=None, allow_failure_observation=False):
     from . import defects as d
     # Scope is checked by the caller; lock only the base table (Oracle disallows
     # FOR UPDATE on the outer-joined visibility query).
@@ -36,12 +36,10 @@ def apply_action(db, obj, payload, user):
     if responsibility.legacy_assignee_override:
         s['qa_owner_id'] = responsibility.owner_id
         s['qa_owner_reassigned_at'] = (obj.assigned_at or models.now()).isoformat()
-        resolver_event = next((
-            item for item in reversed(s.get('history', []))
-            if item.get('to') == 'Triaged' and item.get('assignee_id')
-        ), None)
-        if resolver_event:
-            resolver_id = int(resolver_event['assignee_id'])
+        from ..defect_routing import resolver_scope
+        resolver = resolver_scope(obj)
+        if resolver.source != 'current' and resolver.owner_id:
+            resolver_id = int(resolver.owner_id)
             reassignment.record_assignment_change(
                 db, 'DEFECT', obj.id, 'DEFECT_ASSIGNEE', user,
                 [obj.assignee_id], [resolver_id],
@@ -49,7 +47,7 @@ def apply_action(db, obj, payload, user):
                 previous_assigned_at=obj.assigned_at,
             )
             obj.assignee_id = resolver_id
-            obj.assigned_team = resolver_event.get('assigned_team') or obj.assigned_team
+            obj.assigned_team = resolver.department
 
     evidence_documents, evidence_reference = selected_evidence(db, obj, payload.evidence_document_ids)
     if evidence_documents:
@@ -87,6 +85,8 @@ def apply_action(db, obj, payload, user):
         observed = required(notes, 'Failure observed / reopening reason') if result == 'Failed' else notes
         event.update(kind='verification', stage=previous, environment=env, build=build,
                      result=result, reference=evidence, remarks=observed)
+        if verification_context:
+            event.update(verification_context)
         if result == 'Passed':
             event.update(verification_confirmed=True, confirmation_revision=payload.revision)
         # Regression confirmation is optional.  Retain an explicitly supplied
@@ -144,6 +144,8 @@ def apply_action(db, obj, payload, user):
             obj.assigned_by_id = user.id
             obj.assigned_at = models.now()
             obj.assignment_remarks = notes
+            s['resolver_department'] = dept
+            s['resolver_owner_id'] = person.id
             event.update(assignee_id=person.id, assignee_name=person.full_name, assigned_team=dept, production_impact=s['production_impact'])
             s['release_owner_id'] = owner(payload.release_owner_id, 'release owner').id if payload.release_owner_id else None
             if p['business_acceptance']:
@@ -213,7 +215,7 @@ def apply_action(db, obj, payload, user):
             allowed(manager or qa)
         elif target == 'Reopened':
             allowed(manager or (previous == 'Closed' and obj.reporter_id == user.id)
-                    or (previous in ('QA Testing', 'Ready for QA') and qa)
+                    or (previous in ('QA Testing', 'Ready for QA') and (qa or allow_failure_observation))
                     or (previous == 'Not a Defect Review' and qa)
                     or (previous == 'Business Acceptance' and business)
                     or (previous in ('Ready for Release', 'Production Verification') and release)
@@ -306,7 +308,7 @@ def apply_action(db, obj, payload, user):
     obj.workflow_state_json = json.dumps(s)
     obj.workflow_revision += 1
     db.query(models.TestRunDefect).filter(models.TestRunDefect.defect_key == obj.defect_key,
-        models.TestRunDefect.defect_url.startswith('/defects')).update(
+        models.TestRunDefect.defect_url.startswith('/defects'), models.TestRunDefect.is_historical == False).update(
         {models.TestRunDefect.defect_status: obj.status}, synchronize_session=False)
     summary = f'{previous} → {obj.status}' if payload.action == 'transition' else event['kind']
     comments = '\n'.join(str(x) for x in [summary, event.get('remarks') or event.get('reason'), event.get('environment'),
@@ -317,6 +319,9 @@ def apply_action(db, obj, payload, user):
                            'Fresh verification confirmed' if event.get('verification_confirmed') else None] if x)
     d._audit(db, obj, user, obj.status if payload.action == 'transition' else event['kind'],
              comments or event['kind'], previous, obj.status)
-    db.commit()
-    db.refresh(obj)
+    if commit:
+        db.commit()
+        db.refresh(obj)
+    else:
+        db.flush()
     return obj
