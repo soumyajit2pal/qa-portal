@@ -14,6 +14,7 @@ import UserAssignSelect from "../../components/UserAssignSelect";
 import ConfirmModal from "../../components/ConfirmModal";
 import BusinessDefectNumberField from "../../components/BusinessDefectNumberField";
 import CycleRequestPicker from "../../components/CycleRequestPicker";
+import FunctionalTestingProgress from "../../components/FunctionalTestingProgress";
 import JiraActivity from "../../components/JiraActivity";
 import ClearableSearchInput from "../../components/ClearableSearchInput";
 import RaisedHistoryFilter from "../../components/RaisedHistoryFilter";
@@ -948,9 +949,9 @@ export function FunctionalDetail({
   // see assignedGroupFor below). ORACLE_MIGRATION_2026-07.md section 59.
   const isQALead = workflowActors.isQaLeadGroup;
   const isAssignedQALead = isQALead;
-  const assignedTesterIds = new Set(
-    (req.assigned_tester_ids || "").split(",").filter(Boolean).map(Number)
-  );
+  const assignedTesterNames = (req.assigned_tester_ids || "")
+    .split(",").map((id) => id.trim()).filter(Boolean)
+    .map((id) => userName(users, Number(id)) || `User #${id}`).join(", ");
   const isAssignedTester = workflowActors.isAssignedTester;
 
   const canVerifyChecklist =
@@ -1364,12 +1365,7 @@ export function FunctionalDetail({
               })()}
             </DetailField>
             <DetailField label="Assigned Tester(s)">
-              {req.assigned_tester_ids
-                ? req.assigned_tester_ids
-                    .split(",")
-                    .map((id) => userName(users, Number(id)) || id)
-                    .join(", ")
-                : "—"}
+              {assignedTesterNames || "—"}
             </DetailField>
           </DetailSection>
 
@@ -1430,6 +1426,7 @@ export function FunctionalDetail({
 
           {!preview && <>
           <div className="section-title">Workflow Actions</div>
+          <FunctionalTestingProgress status={status} testerNames={assignedTesterNames} isAssignedTester={isAssignedTester} />
           {executionNotice && <div className={`execution-start-notice ${executionNotice.includes("was unlinked") ? "unlinked" : "linked"}`} role="status"><strong>{executionNotice.includes("was unlinked") ? "Test cycle unlinked" : "Execution started"}</strong><span>{executionNotice}</span></div>}
           {createdReexecutionCycle && (
             <div className="execution-start-notice linked" role="status">

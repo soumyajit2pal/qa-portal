@@ -16,4 +16,5 @@ def functional_request_condition(request_id=None):
         models.Defect.execution_links.any(models.DefectExecutionLink.execution.has(models.TestExecution.cycle.has(cycle))),
         models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(
             models.TestExecutionRun.execution.has(models.TestExecution.cycle.has(cycle)))),
+        models.Defect.execution_references.any(models.DefectExecutionReference.execution.has(models.TestExecution.cycle.has(cycle))),
     )

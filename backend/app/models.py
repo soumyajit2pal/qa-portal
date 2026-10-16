@@ -3997,6 +3997,8 @@ class TestExecution(Base):
     added_by = relationship("User", foreign_keys=[added_by_id])
     runs = relationship("TestExecutionRun", back_populates="execution",
                          cascade="all,delete-orphan", order_by="TestExecutionRun.attempt_no")
+    defect_references = relationship("DefectExecutionReference", back_populates="execution",
+                                     cascade="all,delete-orphan", order_by="DefectExecutionReference.created_at")
     # Governed defects linked through the primary FK and through the
     # additional many-to-many trace table. Keeping the two SQL relationships
     # separate makes both paths eager-loadable; linked_defects combines them
@@ -4356,6 +4358,7 @@ class Defect(Base):
     # DefectTestCaseLink's own established "primary field + separate
     # many-to-many table for extra links" pattern exactly.
     execution_links = relationship("DefectExecutionLink", back_populates="defect", cascade="all,delete-orphan")
+    execution_references = relationship("DefectExecutionReference", back_populates="defect", cascade="all,delete-orphan")
     functional_request_links = relationship("DefectFunctionalRequestLink", back_populates="defect", cascade="all,delete-orphan")
     historical_execution_links = relationship("TestRunDefect",
         primaryjoin=lambda: and_(Defect.id == foreign(TestRunDefect.governed_defect_id), TestRunDefect.is_historical == True),
@@ -4435,6 +4438,9 @@ class Defect(Base):
         for link in self.historical_execution_links:
             if link.run and link.run.execution:
                 from_cycle(link.run.execution.cycle, 'Historical execution')
+        for link in self.execution_references:
+            if link.execution:
+                from_cycle(link.execution.cycle, 'Execution reference')
         for link in self.functional_request_links:
             add(link.functional_request, 'Direct', link)
         return [refs[key] for key in sorted(refs)]
@@ -4510,6 +4516,61 @@ class DefectTestCaseLink(Base):
     test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False, index=True)
     defect = relationship("Defect", back_populates="test_case_links")
     test_case = relationship("TestCase")
+
+
+class DefectExecutionReference(Base):
+    """Closed-at-link traceability, separate from active defects and retest proof.
+
+    The optional run records the only eligible earlier failure when unambiguous.
+    An execution reference never claims that a particular attempt found or fixed
+    this defect, and reopening the defect does not change its closure snapshot.
+    """
+    __tablename__ = "qap_defect_exec_refs"
+    __table_args__ = (UniqueConstraint("defect_id", "execution_id", name="uq_qap_def_exec_ref"),)
+    id = pk_column()
+    defect_id = Column(Integer, ForeignKey("qap_defects.id"), nullable=False, index=True)
+    execution_id = Column(Integer, ForeignKey("qap_test_executions.id"), nullable=False, index=True)
+    run_id = Column(Integer, ForeignKey("qap_test_execution_runs.id"), nullable=True)
+    defect_key = Column(String(100), nullable=False)
+    title = Column(String(255), nullable=True)
+    defect_status = Column(String(40), nullable=False, default="Closed")
+    closed_at = Column(DateTime, nullable=True)
+    linked_workflow_revision = Column(Integer, nullable=False)
+    linked_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=now)
+    notes = Column(Text, nullable=True)
+    defect = relationship("Defect", back_populates="execution_references")
+    execution = relationship("TestExecution", back_populates="defect_references")
+    run = relationship("TestExecutionRun", foreign_keys=[run_id])
+    linked_by = relationship("User", foreign_keys=[linked_by_id])
+
+    @property
+    def cycle_id(self):
+        return self.execution.cycle_id
+
+    @property
+    def cycle_key(self):
+        return self.execution.cycle.cycle_key
+
+    @property
+    def project_id(self):
+        return self.execution.cycle.project_id
+
+    @property
+    def test_case_key(self):
+        return self.execution.test_case.test_case_key
+
+    @property
+    def status(self):
+        return self.execution.status
+
+    @property
+    def attempt_no(self):
+        return self.run.attempt_no if self.run else None
+
+    @property
+    def linked_by_name(self):
+        return self.linked_by.full_name if self.linked_by else None
 
 
 class DefectExecutionLink(Base):

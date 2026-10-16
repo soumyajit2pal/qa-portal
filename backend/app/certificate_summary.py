@@ -262,6 +262,17 @@ def capture(db, obj):
             models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution_id.in_(all_execution_ids))),
             models.Defect.cycle_id.in_(all_cycle_ids))).order_by(models.Defect.id).all()
     result = aggregate(executions, defects)
+    # Closed-at-link references are trace metadata, never active defect counts
+    # or verification. Issued snapshots are not rewritten by adding a link.
+    references = db.query(models.DefectExecutionReference).filter(
+        models.DefectExecutionReference.execution_id.in_(all_execution_ids),
+        models.DefectExecutionReference.defect.has(models.Defect.qa_workspace_id == obj.qa_workspace_id),
+    ).order_by(models.DefectExecutionReference.id).all()
+    result['execution_references'] = [dict(id=ref.id, execution_id=ref.execution_id,
+        defect_key=ref.defect_key, status_at_link=ref.defect_status,
+        closed_at=str(ref.closed_at) if ref.closed_at else None,
+        linked_at=str(ref.created_at), linked_by_id=ref.linked_by_id,
+        closure_revision=ref.linked_workflow_revision) for ref in references]
     result['testing_scope'] = obj.live_testing_scope
     result['assigned_testers'] = assigned_testers(db, source)
     result['certificate_fields'] = {key: str(getattr(obj, key, None) or '') for key in ('certificate_type', 'testing_type', 'testing_request_id', 'application_name', 'application_owner', 'department', 'release_version', 'build_number', 'environment_tested', 'target_promotion_environment', 'exit_criteria_notes', 'open_defect_summary', 'residual_risk_notes', 'known_limitations', 'business_acceptance_status', 'security_testing_status', 'conditional_observations', *CONDITIONAL_FIELDS)}

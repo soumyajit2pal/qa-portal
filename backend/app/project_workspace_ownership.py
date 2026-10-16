@@ -59,6 +59,7 @@ def root_for(db, obj):
         m.TestExecution: ('cycle', 'cycle_id', m.TestCycle),
         m.TestExecutionRun: ('execution', 'execution_id', m.TestExecution),
         m.TestRunDefect: ('run', 'run_id', m.TestExecutionRun),
+        m.DefectExecutionReference: ('execution', 'execution_id', m.TestExecution),
         m.TestCycleChildRequestLink: ('cycle', 'cycle_id', m.TestCycle),
         m.TestCycleFolderAccess: ('folder', 'folder_id', m.TestCycleFolder),
     }

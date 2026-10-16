@@ -1,9 +1,8 @@
 import ExecutionRetest from '../../components/ExecutionRetest'
 import ExecutionEvidenceFields from '../../components/ExecutionEvidenceFields'
-import HistoricalDefectLinkDialog from '../../components/HistoricalDefectLinkDialog'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useInternalNavigate } from '../../hooks/useRequestNavigation'
 import { api, mapWithConcurrency, waitForJob } from '../../api'
 import { formatDateTimeIST } from '../../time'
@@ -14,7 +13,7 @@ import CycleRequestPicker from '../../components/CycleRequestPicker'
 import { CycleFunctionalRequestOption } from '../../types'
 import ProjectSelect from '../../components/ProjectSelect'
 import { ENVIRONMENTS, defectBlocksExecution, activeExternalExecutionDefects, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, QA_STATUS_LABELS, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, usesRetestForm, selectionActionLabel, EXECUTION_LINKABLE_DEFECT_STATUSES } from '../../constants'
-import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOption, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
+import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOption, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, DefectOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
@@ -1298,7 +1297,6 @@ function LinkExistingDefectModal({ execution, onClose, onLinked }: {
   const [defects, setDefects] = useState<DefectListOut[]>([])
   const [defectId, setDefectId] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
-  const [historical, setHistorical] = useState<DefectListOut | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   useEffect(() => {
@@ -1323,35 +1321,37 @@ function LinkExistingDefectModal({ execution, onClose, onLinked }: {
         const latestRun = execution.runs?.[execution.runs.length - 1]
         const alreadyLinked = new Set((latestRun?.defects || [])
           .filter(link => link.defect_url?.startsWith('/defects')).map(link => link.defect_key))
+        ;(execution.defect_references || []).forEach(link => alreadyLinked.add(link.defect_key))
         setDefects(candidates.filter(defect => !alreadyLinked.has(defect.defect_key)))
         setError(null)
       }
     }
     loadCandidates().catch((reason) => { if (active) setError(reason) })
     return () => { active = false }
-  }, [execution.id, execution.runs])
+  }, [execution.id, execution.runs, execution.defect_references])
   const visibleDefects = defects.filter(defect => statusFilter === 'all' || (statusFilter === 'Closed' ? defect.status === 'Closed' : defect.status !== 'Closed'))
   async function submit(event: React.FormEvent) {
     event.preventDefault()
     if (!defectId) return
     const selected = defects.find(defect => defect.id === Number(defectId))
-    if (selected?.status === 'Closed') { setHistorical(selected); return }
     setBusy(true); setError(null)
     try {
-      await api.post(`/api/defects/${defectId}/link-execution`, { execution_id: execution.id })
+      const latest = selected?.status === 'Closed' ? await api.getFresh<DefectOut>(`/api/defects/${defectId}`) : null
+      if (latest && latest.status !== 'Closed') throw new Error('Defect status changed. Refresh before linking.')
+      await api.post(`/api/defects/${defectId}/link-execution`, { execution_id: execution.id,
+        ...(latest ? { link_type: 'HISTORICAL', expected_revision: latest.workflow_revision || 0 } : {}) })
       onLinked()
     } catch (err) { setError(err); setBusy(false) }
   }
   return <Modal title="Link existing defect" onClose={onClose} closeDisabled={busy} variant="dialog" preventBackdropClose wide>
     <form onSubmit={submit}>
-      <div className="defect-trace-banner"><strong>{execution.test_case?.test_case_key} · {execution.status}</strong><span>Select an active or Closed governed defect. Closed defects link as historical references to the original failed attempt. This execution's Cycle, Test Case, and latest attempt will be linked automatically. A defect already linked elsewhere is added as an additional trace, without disturbing its original link.</span></div>
+      <div className="defect-trace-banner"><strong>{execution.test_case?.test_case_key} · {execution.status}</strong><span>Select a defect and link it to this execution. Closed defects stay Closed and are saved as references. Existing results, evidence and retest requirements remain in place.</span></div>
       <Field label="Governed Defect *"><SearchableSelect value={defectId} onChange={setDefectId} placeholder="Select active or Closed defect…" options={visibleDefects.map((defect) => ({ value: String(defect.id), label: `${defect.defect_key} · ${defect.title} · ${defect.status} · ${defect.qa_request_key || 'QA Request'}${defect.execution_id ? ` · already linked to ${defect.cycle_key || 'a cycle'} / ${defect.test_case_key || 'a test case'}` : ''}` }))} /></Field>
       <Field label="Defect status filter"><SearchableSelect value={statusFilter} onChange={value => { setStatusFilter(value); setDefectId('') }} searchable={false} options={[{value:'all',label:'Active and Closed'},{value:'Active',label:'Active defects'},{value:'Closed',label:'Closed — historical references'}]} /></Field>
       {!visibleDefects.length && <p className="muted small">No eligible defects are available in your scope.</p>}
       <ErrorText error={error} title="Defect could not be linked" />
       <div className="modal-actions"><button className="btn btn-primary" disabled={busy || !defectId}>{busy ? 'Linking…' : 'Link Defect'}</button><button type="button" className="btn" onClick={onClose}>Cancel</button></div>
     </form>
-    {historical && <HistoricalDefectLinkDialog defectId={historical.id} defectKey={historical.defect_key} executionId={execution.id} onClose={() => setHistorical(null)} onLinked={() => onLinked()} />}
   </Modal>
 }
 
@@ -1433,7 +1433,6 @@ function DefectLinks({ executionId, run, readOnly, canLinkHistorical, canUnlinkD
   const { user } = useAuth()
   const [adding, setAdding] = useState(false)
   const [historyPicker, setHistoryPicker] = useState(false)
-  const [historical, setHistorical] = useState<DefectListOut | null>(null)
   const [linkMode, setLinkMode] = useState<'internal' | 'external' | null>(null)
   const [internalDefects, setInternalDefects] = useState<DefectListOut[]>([])
   const [internalDefectId, setInternalDefectId] = useState('')
@@ -1485,11 +1484,13 @@ function DefectLinks({ executionId, run, readOnly, canLinkHistorical, canUnlinkD
     e.preventDefault()
     if (!internalDefectId) { setError(new Error('Select an internal defect')); return }
     const selected = internalDefects.find(defect => defect.id === Number(internalDefectId))
-    if (selected?.status === 'Closed') { setHistorical(selected); return }
     setBusy(true); setError(null)
     try {
-      await api.post(`/api/defects/${internalDefectId}/link-execution`, { execution_id: executionId })
-      const refreshed = await api.get<TestExecutionOut>(`/api/test-execution/executions/${executionId}`)
+      const latest = selected?.status === 'Closed' ? await api.getFresh<DefectOut>(`/api/defects/${internalDefectId}`) : null
+      if (latest && latest.status !== 'Closed') throw new Error('Defect status changed. Refresh before linking.')
+      await api.post(`/api/defects/${internalDefectId}/link-execution`, { execution_id: executionId,
+        ...(latest ? { link_type: 'HISTORICAL', expected_revision: latest.workflow_revision || 0 } : {}) })
+      const refreshed = await api.getFresh<TestExecutionOut>(`/api/test-execution/executions/${executionId}`)
       const refreshedRun = refreshed.runs?.find((item) => item.id === run.id)
       onChanged(refreshedRun?.defects || run.defects || [])
       onExecutionChanged(refreshed)
@@ -1581,11 +1582,6 @@ function DefectLinks({ executionId, run, readOnly, canLinkHistorical, canUnlinkD
           onChanged(updated.runs?.find(item => item.id === run.id)?.defects || [])
           onExecutionChanged(updated); setEditingExternal(null)
         }} />}
-      {historical && <HistoricalDefectLinkDialog defectId={historical.id} defectKey={historical.defect_key} executionId={executionId} initialRunId={run.id} onClose={() => setHistorical(null)} onLinked={async () => {
-        const updated = await api.getFresh<TestExecutionOut>(`/api/test-execution/executions/${executionId}`)
-        onChanged(updated.runs?.find(item => item.id === run.id)?.defects || []); onExecutionChanged(updated)
-        setHistorical(null); setAdding(false); setLinkMode(null)
-      }} />}
       {pendingRemove && <ConfirmModal title="Unlink defect?" message={pendingRemove.defect_url?.startsWith('/defects')
         ? <p>Unlink governed defect <strong>{pendingRemove.defect_key}</strong> from this testcase execution? The defect and failed attempt remain in history. This testcase has a previous failed or blocked attempt. A successful retry must be recorded as <strong>Retest Passed</strong>.</p>
         : <p>Remove external defect reference <strong>{pendingRemove.defect_key}</strong> from Attempt #{run.attempt_no}? The external defect itself will not be deleted.</p>}
@@ -1919,6 +1915,14 @@ function RecordResultModal({ execution, readOnly, canLinkHistorical, canUnlinkDe
         {execution.executed_at && <span className="muted small">as of {formatDateTimeIST(execution.executed_at)}</span>}
       </div>
       <AttemptHistory executionId={execution.id} readOnly={readOnly} canLinkHistorical={canLinkHistorical} canUnlinkDefects={canUnlinkDefects} onExecutionChanged={onExecutionChanged} />
+      {!!execution.defect_references?.length && <section className="tm-linked-defects" aria-label="Closed defect references">
+        <h4>Closed defect references</h4>
+        <p className="muted small">Traceability only. These links do not verify a fix or change execution results.</p>
+        {execution.defect_references.map(reference => <div key={reference.id}>
+          <Link to={`/defects?open=${reference.defect_key}`}>{reference.defect_key}</Link>{' · '}
+          {reference.title}{' · Closed at link · '}{reference.linked_by_name || 'Recorded user'}{' · '}{formatDateTimeIST(reference.created_at)}
+        </div>)}
+      </section>}
       {usesRetestForm(execution) && <ExecutionRetest execution={execution} inline disabled={readOnly} onChanged={onExecutionChanged} />}
       {!readOnly && !usesRetestForm(execution) && (
         <form onSubmit={submit} style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #e2e2e2' }}>

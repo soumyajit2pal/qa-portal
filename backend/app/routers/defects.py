@@ -496,6 +496,10 @@ _RETEST_STATUSES = ("Resolved", "Retest", "Ready for QA", "QA Testing", "Busines
 # lazy-loading `reporter_name`/`assignee_name`/`qa_request_key`/`cycle_key`/
 # `test_case_key` (all `@property`s on `models.Defect`) once per row.
 _LIST_DEFECT_EAGER_LOADS = [
+    selectinload(models.Defect.execution_references).joinedload(models.DefectExecutionReference.execution).joinedload(models.TestExecution.cycle),
+    selectinload(models.Defect.execution_references).joinedload(models.DefectExecutionReference.execution).joinedload(models.TestExecution.test_case),
+    selectinload(models.Defect.execution_references).joinedload(models.DefectExecutionReference.run),
+    selectinload(models.Defect.execution_references).joinedload(models.DefectExecutionReference.linked_by),
     selectinload(models.Defect.historical_execution_links).joinedload(models.TestRunDefect.run).joinedload(models.TestExecutionRun.execution).joinedload(models.TestExecution.cycle),
     selectinload(models.Defect.historical_execution_links).joinedload(models.TestRunDefect.run).joinedload(models.TestExecutionRun.execution).joinedload(models.TestExecution.test_case),
     selectinload(models.Defect.historical_execution_links).joinedload(models.TestRunDefect.linked_by),
@@ -516,6 +520,7 @@ _LIST_DEFECT_EAGER_LOADS = [
 
 # Follow all exact cycle associations in a bounded number of page queries.
 for loader in (
+    selectinload(models.Defect.execution_references).joinedload(models.DefectExecutionReference.execution).joinedload(models.TestExecution.cycle),
     joinedload(models.Defect.cycle),
     joinedload(models.Defect.execution).joinedload(models.TestExecution.cycle),
     selectinload(models.Defect.execution_links).joinedload(models.DefectExecutionLink.execution).joinedload(models.TestExecution.cycle),
@@ -546,7 +551,7 @@ def _register_filters(q, db, user, params=None, severity=None, priority=None,
     elif queue == 'mine':
         q = q.filter(or_(models.Defect.assignee_id == user.id, models.Defect.reporter_id == user.id, _stage_owner_condition(db, user)))
     elif queue in ('unlinked', 'incomplete-traceability'):
-        q = q.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any(), ~models.Defect.historical_execution_links.any())
+        q = q.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any(), ~models.Defect.historical_execution_links.any(), ~models.Defect.execution_references.any())
     elif queue == 'retest':
         q = q.filter(models.Defect.status.in_(_RETEST_STATUSES))
     elif queue == 'closed':
@@ -620,15 +625,17 @@ def list_defects(severity: Optional[str] = None,
                 models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == cycle_id)
             ),
             models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution.has(models.TestExecution.cycle_id == cycle_id))),
+            models.Defect.execution_references.any(models.DefectExecutionReference.execution.has(models.TestExecution.cycle_id == cycle_id)),
         ))
     if execution_id is not None:
         q = q.filter(or_(
             models.Defect.execution_id == execution_id,
             models.Defect.execution_links.any(models.DefectExecutionLink.execution_id == execution_id),
             models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution_id == execution_id)),
+            models.Defect.execution_references.any(models.DefectExecutionReference.execution_id == execution_id),
         ))
     if test_case_id is not None:
-        q = q.filter(or_(models.Defect.test_case_links.any(models.DefectTestCaseLink.test_case_id == test_case_id), models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution.has(models.TestExecution.test_case_id == test_case_id)))))
+        q = q.filter(or_(models.Defect.test_case_links.any(models.DefectTestCaseLink.test_case_id == test_case_id), models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution.has(models.TestExecution.test_case_id == test_case_id))), models.Defect.execution_references.any(models.DefectExecutionReference.execution.has(models.TestExecution.test_case_id == test_case_id))))
     q = _register_filters(q, db, current_user, params, severity, priority, functional_request_id, without_functional_request, queue)
     q = pagination.apply_sort(
         q, params, sortable={
@@ -706,7 +713,7 @@ def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = 
         or_(models.Defect.assignee_id == current_user.id, models.Defect.reporter_id == current_user.id,
             _stage_owner_condition(db, current_user)),
     ).with_entities(func.count(models.Defect.id)).scalar() or 0
-    unlinked_count = base.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any(), ~models.Defect.historical_execution_links.any()).with_entities(func.count(models.Defect.id)).scalar() or 0
+    unlinked_count = base.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any(), ~models.Defect.historical_execution_links.any(), ~models.Defect.execution_references.any()).with_entities(func.count(models.Defect.id)).scalar() or 0
     retest_count = sum(by_status.get(s, 0) for s in _RETEST_STATUSES)
 
     return {
@@ -771,6 +778,8 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
         wrap_headers={"Title", "Resolution Summary"}, date_headers={"Created"},
         date_only_headers={"Expected Resolution"}, status_headers={"Status"},
     )
+    from ..defect_history import add_reference_export_sheet
+    add_reference_export_sheet(workbook, [ref for defect in defects for ref in defect.execution_references])
     return workbook_response(workbook, "defect-management-register.xlsx")
 
 
@@ -911,22 +920,30 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
                           db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
     obj = _get_mutable(defect_id, db, current_user)
-    execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request, historical=payload.link_type == 'HISTORICAL')
     obj = db.query(models.Defect).filter_by(id=obj.id).populate_existing().with_for_update().one()
-    if payload.link_type == 'ACTIVE' and obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised"}:
+    historical = payload.link_type == 'HISTORICAL' or (payload.link_type == 'AUTO' and obj.status == 'Closed')
+    execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request, historical=historical)
+    if not historical and obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised"}:
         raise HTTPException(400, f"A {obj.status} defect cannot be linked to a new execution")
     if obj.qa_workspace_id and (cycle.origin_workspace_id or cycle.project.qa_workspace_id) != obj.qa_workspace_id:
         raise HTTPException(400, "Test execution must belong to the defect workspace")
     if cycle.project.application_master and cycle.project.application_master.name.casefold() != obj.application_name.casefold():
         raise HTTPException(400, "Test execution must belong to the defect application")
     _require_execution_link_access(db, cycle, current_user)
-    if payload.link_type == 'HISTORICAL':
+    if historical:
         from .test_execution import _require_cycle_visibility
         _require_cycle_visibility(db, cycle, current_user)
-        from ..defect_history import append_link
-        append_link(db, obj, execution, payload, current_user)
+        from ..defect_history import append_link, append_execution_reference
+        if payload.run_id is not None:
+            append_link(db, obj, execution, payload, current_user)
+        else:
+            append_execution_reference(db, obj, execution, payload, current_user)
         db.commit(); db.refresh(obj)
         return obj
+    if payload.run_id is not None or payload.reason is not None or payload.confirmation:
+        raise HTTPException(400, 'Historical fields apply only to Closed defects')
+    if payload.expected_revision is not None and payload.expected_revision != obj.workflow_revision:
+        raise HTTPException(409, 'Defect changed. Refresh before linking.')
     if obj.execution_id and obj.execution_id != execution.id:
         # Already has a DIFFERENT primary execution -- add this as an
         # additional link instead of the 400 this used to always raise.
@@ -1535,6 +1552,7 @@ def link_defect_request(defect_id: int, payload: schemas.DefectLinkRequest,
         raise HTTPException(400, 'Request must belong to the defect application')
     executions = ([obj.execution] if obj.execution else []) + [link.execution for link in obj.execution_links if link.execution]
     executions += [link.run.execution for link in obj.historical_execution_links if link.run and link.run.execution]
+    executions += [link.execution for link in obj.execution_references if link.execution]
     for link in obj.functional_request_links:
         if link.functional_request.qa_request_id != request.id:
             raise HTTPException(400, 'A linked Functional Request belongs to a different QA request')

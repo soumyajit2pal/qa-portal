@@ -64,6 +64,8 @@ _LIST_EXECUTION_EAGER_LOADS = [
     selectinload(models.TestExecution.runs).selectinload(models.TestExecutionRun.defects),
     selectinload(models.TestExecution.primary_linked_defects),
     selectinload(models.TestExecution.additional_linked_defects),
+    selectinload(models.TestExecution.defect_references).joinedload(models.DefectExecutionReference.linked_by),
+    selectinload(models.TestExecution.defect_references).joinedload(models.DefectExecutionReference.run),
 ]
 
 router = APIRouter(prefix="/api/test-execution", tags=["test-management"])
@@ -445,6 +447,11 @@ def _reexecution_cycles_with_recorded_work(
             models.DefectExecutionLink,
             models.DefectExecutionLink.execution_id == models.TestExecution.id,
         ).filter(models.TestExecution.cycle_id.in_(batch)).distinct().all())
+        result.update(cycle_id for (cycle_id,) in db.query(
+            models.TestExecution.cycle_id,
+        ).join(models.DefectExecutionReference,
+            models.DefectExecutionReference.execution_id == models.TestExecution.id,
+        ).filter(models.TestExecution.cycle_id.in_(batch)).distinct().all())
     return result
 
 
@@ -792,6 +799,8 @@ def _execution_removal_block_reason(execution: models.TestExecution, current_use
     bulk-remove skip list)."""
     if current_user.has_role(Role.ADMIN):
         return None
+    if execution.defect_references:
+        return "has audited defect references -- only an Administrator can remove it now"
     if execution.runs:
         return "already has recorded execution history in this cycle -- only an Administrator can remove it now"
     if current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
@@ -2481,7 +2490,7 @@ def get_execution_summary(cycle_id: int, db: Session = Depends(get_db),
 def list_blocked_failed_executions(db: Session = Depends(get_db),
                                     current_user: models.User = Depends(get_current_user),
                                     include_history: bool = False, application_name: Optional[str] = None,
-                                    execution_id: Optional[int] = None):
+                                    execution_id: Optional[int] = None, include_references: bool = False):
     """2026-08 -- reported directly: on Defect Management's page load, "if
     there are 30 project[s] then 30 api call[s] ... same for cycles,
     executions." Defects.tsx used to build its "pick a Failed/Blocked Test
@@ -2516,13 +2525,15 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
             *_LIST_EXECUTION_EAGER_LOADS,
         )
     )
-    if include_history:
+    if include_references:
+        pass  # A reference may be linked without asserting a failed attempt.
+    elif include_history:
         q = q.filter(models.TestExecution.runs.any(models.TestExecutionRun.status.in_(("Fail", "Blocked"))))
     else:
         q = q.filter(models.TestProject.is_active == True, models.TestExecution.status.in_(("Fail", "Blocked")))
     if execution_id is not None:
         q = q.filter(models.TestExecution.id == execution_id)
-    if application_name and not include_history:
+    if application_name and not (include_history or include_references):
         q = q.filter(models.TestProject.application_master.has(models.ApplicationMaster.name == application_name.strip().upper()))
     project_ids = viewable_project_ids(db, current_user)
     if project_ids is not None:
@@ -2532,7 +2543,7 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
         execution for execution in executions
         if not execution.cycle.folder_id or can_view_cycle_folder(execution.cycle.folder, current_user)
     ]
-    if include_history:
+    if include_history or include_references:
         from ..defect_history import require_amendment_access, execution_application
         eligible = []
         for execution in executions:
@@ -2880,6 +2891,8 @@ def export_test_cycle(
         wrap_headers={"Title", "Notes"}, date_headers={"Linked At"},
         status_headers={"Defect Status"}, widths={"Defect URL": 42, "Notes": 48},
     )
+    from ..defect_history import add_reference_export_sheet
+    add_reference_export_sheet(workbook, [ref for execution in executions for ref in execution.defect_references])
     add_table_sheet(
         workbook, "Evidence Index", "Execution Evidence Index", [
             "Test Case ID", "Attempt No", "File Name", "Content Type", "Size (KB)",

@@ -2294,7 +2294,7 @@ class DefectCreate(BaseModel):
 class DefectLinkExecution(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     execution_id: int
-    link_type: Literal['ACTIVE', 'HISTORICAL'] = 'ACTIVE'
+    link_type: Literal['AUTO', 'ACTIVE', 'HISTORICAL'] = 'AUTO'
     run_id: Optional[int] = Field(default=None, ge=1, strict=True)
     reason: Optional[str] = Field(default=None, min_length=1, max_length=2000)
     expected_revision: Optional[int] = Field(default=None, ge=0, strict=True)
@@ -2302,10 +2302,10 @@ class DefectLinkExecution(BaseModel):
 
     @model_validator(mode='after')
     def historical_fields(self):
-        if self.link_type == 'HISTORICAL':
-            if self.run_id is None or not self.reason or self.expected_revision is None or not self.confirmation:
-                raise ValueError('Historical linking requires an attempt, reason, current defect revision and confirmation')
-        elif self.run_id is not None or self.reason is not None or self.expected_revision is not None or self.confirmation:
+        # Old clients may still send an exact historical attempt/confirmation.
+        # Normal linking needs only the execution; the locked defect determines
+        # active linking versus a closure-preserving execution reference.
+        if self.link_type == 'ACTIVE' and (self.run_id is not None or self.reason is not None or self.expected_revision is not None or self.confirmation):
             raise ValueError('Historical fields require HISTORICAL link type')
         return self
 
@@ -2330,6 +2330,21 @@ class HistoricalDefectExecutionLinkOut(DefectExecutionLinkOut):
     created_at: datetime.datetime
     notes: Optional[str] = None
     linked_workflow_revision: Optional[int] = None
+
+
+class DefectExecutionReferenceOut(DefectExecutionLinkOut):
+    defect_id: int
+    defect_key: str
+    title: Optional[str] = None
+    defect_status: str
+    closed_at: Optional[datetime.datetime] = None
+    run_id: Optional[int] = None
+    attempt_no: Optional[int] = None
+    linked_by_id: int
+    linked_by_name: Optional[str] = None
+    created_at: datetime.datetime
+    notes: Optional[str] = None
+    linked_workflow_revision: int
 
 
 class DefectUpdate(BaseModel):
@@ -2481,6 +2496,7 @@ class DefectOut(ORMModel):
     # to, beyond its primary one above -- see models.Defect.execution_links.
     execution_links: List[DefectExecutionLinkOut] = []
     historical_execution_links: List[HistoricalDefectExecutionLinkOut] = []
+    execution_references: List[DefectExecutionReferenceOut] = []
     application_name: str
     module_name: Optional[str] = None
     module_feature: str
@@ -2582,6 +2598,7 @@ class DefectListOut(ORMModel):
     execution_status: Optional[str] = None
     execution_links: List[DefectExecutionLinkOut] = []
     historical_execution_links: List[HistoricalDefectExecutionLinkOut] = []
+    execution_references: List[DefectExecutionReferenceOut] = []
     application_name: str
     module_name: Optional[str] = None
     module_feature: str
@@ -4372,6 +4389,7 @@ class TestExecutionOut(ORMModel):
     # Governed Defect(s) (defects.py) linked to this slot -- see
     # LinkedGovernedDefectRef's own docstring.
     linked_defects: List[LinkedGovernedDefectRef] = []
+    defect_references: List[DefectExecutionReferenceOut] = []
 
 
 class MyExecutionOut(BaseModel):

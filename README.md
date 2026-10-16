@@ -1434,15 +1434,15 @@ Authenticated users read `GET /api/system-settings/application-creation`; only S
 
 ### Late historical linking of Closed defects
 
-Testcase Execution's Link existing picker includes active and Closed defects, with a status filter. Closed selections use the shared historical linking dialog. Attempt History also provides Link Closed defect for history on original Failed/Blocked attempts, including older attempts followed by a successful retest. Defect Management's Closed-defect Actions menu provides Link historical testcase and uses the same dialog, validation and warning confirmation.
+Testcase Execution's Link existing picker includes active and Closed defects, with a status filter. Select a defect and click Link Defect once. Attempt History uses the same one-step linking operation. Defect Management's Link testcase action uses the shared Closed-defect reference dialog with one execution selector and one submit. Attempt selection, late-linking reasons and extra confirmation dialogs are no longer required.
 
-The caller must select an exact original Failed/Blocked attempt, provide a reason for late linking, confirm the warning and send the current defect workflow revision. Workspace, department, application, QA request and cycle-folder visibility checks remain enforced. A historical attempt must precede the recorded defect closure; recurring failures after closure require an active/reopened defect. Completed/Blocked cycles and inactive projects require a workspace QA Lead Group actor for this history amendment. Read-only grants cannot write history.
+The backend locks the defect and execution, chooses active linking or a Closed-defect reference, checks access and prevents duplicates. Workspace, department, application, QA request and cycle-folder visibility remain enforced. The UI sends the current closure revision in the background. A single eligible earlier failure may be retained automatically as context; multiple, missing, undated or later attempts produce an execution-only reference without inventing an original failure. A reference can be added after closure and does not claim that the closed defect caused a new failure. A recurring issue still needs an active/reopened defect for its current fix and verification. Completed/Blocked cycles and inactive projects continue to require workspace QA Lead Group authority. Legacy explicit-attempt API calls remain supported and enforce their original pre-closure attempt checks.
 
-Historical links retain the Closed status at linking, closure revision, reason, actor and timestamp. They are distinct from primary/additional active links: they never move the original trace, reopen the defect, change owners/results, grant verification or clear active/external blockers. A previous Failed/Blocked attempt still requires a fresh Retest Passed result. Workflow status mirrors exclude historical references, so later reopening does not rewrite their Closed snapshot. Historical references cannot be removed using ordinary Unlink, and existing Admin permanent-removal governance remains unchanged.
+Historical links and execution references retain the Closed snapshot, closure revision, actor and timestamp. The reason is optional; audit history records the association automatically. These links never move the primary trace, reopen the defect, change owners/results, grant verification or clear active/external blockers. A previous Failed/Blocked attempt still requires a fresh Retest Passed result. Later reopening does not rewrite the Closed-at-link snapshot. References cannot be removed using ordinary Unlink, and existing Admin permanent-removal governance remains unchanged.
 
-The attempt history and Defect Management linked-execution directory identify Historical references and their original attempt. Unlinked/incomplete queues and execution/cycle/testcase filters recognize these associations. Historical references do not enter active cycle completion/clearance gates or current defect retest aggregates. Audit events on the defect, testcase and cycle record the association without altering frozen issued certificates, cycle data or original approval history.
+The execution drawer and Defect Management linked-execution directory display Closed references with their provenance. Unlinked/incomplete queues, Functional Request filters and execution/cycle/testcase filters recognize these associations. Defect and cycle exports include a separate Closed Defect References sheet. References do not enter active cycle completion/clearance gates or current defect retest aggregates. Future certificate captures retain them as reference metadata, separate from active defect counts. Audit events on the defect, testcase and cycle preserve frozen issued certificates, cycle data and original approval history.
 
-Apply migration `c58f3b7a2d91_closed_defect_historical_links.py` after `b47e2a9c6d13` before starting the updated backend, then publish the frontend alongside it. The restartable migration adds `is_historical` (default false), the governed defect reference/FK and closure revision to `qap_test_run_defects`, retaining existing links. Downgrade preserves reference data. Regression evidence is in `validation/closed-defect-history-validation-2026-10-14.json`; tests use isolated SQLite and validate Oracle DDL offline, without applying the migration to a live database.
+The original historical-attempt migration `c58f3b7a2d91` remains part of the migration chain. Simplified linking adds restartable migration `f81b2c6d9a30` after `e7a91c4d8b20`, creating `qap_defect_exec_refs` without changing existing attempt or defect records. Downgrade retains reference data. Apply the latest migration before deploying matching frontend/backend versions. This workspace's configured Oracle database was upgraded to `f81b2c6d9a30`; full regression evidence and live validation limits are in `validation/simplified-defect-linking-2026-10-15/report.json`.
 
 
 ### Department-only defect reassignment and routing recovery (2026-10-14)
@@ -1551,3 +1551,14 @@ request link and immutable lineage. Existing workspace/application/stage/owner,
 retest, completion and certificate checks remain enforced. Deploy matching
 frontend/backend versions together. Regression evidence and scope limits are in
 `validation/cycle-preview-2026-10-15/report.json`.
+
+### Functional testing handoff visibility (2026-10-15)
+
+After tester assignment, the normal Functional Request drawer shows the testing
+path through Test Design, Execution, QA Completed and Clearance. At Tester
+Assigned and Test Design it names the assigned testers and the next action.
+Start Test Design and Start Execution remain available to the current assigned
+testers; QA managers retain their existing reassignment and clearance authority.
+The cycle request preview stays read-only. No backend permission or lifecycle
+transition was changed. Regression evidence and the read-only inspection of
+`TQA-FUNC-02` are in `validation/functional-testing-handoff-2026-10-15/report.json`.

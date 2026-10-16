@@ -2022,6 +2022,7 @@ export interface TestExecutionRunOut {
 }
 
 export interface TestExecutionOut {
+  defect_references?: DefectExecutionReferenceOut[]
   id: number
   cycle_id: number
   test_case_id: number
@@ -2268,6 +2269,21 @@ export interface HistoricalDefectExecutionLinkOut extends DefectExecutionLinkOut
   linked_workflow_revision?: number | null
 }
 
+export interface DefectExecutionReferenceOut extends DefectExecutionLinkOut {
+  defect_id: number
+  defect_key: string
+  title?: string | null
+  defect_status: string
+  closed_at?: string | null
+  run_id?: number | null
+  attempt_no?: number | null
+  linked_by_id: number
+  linked_by_name?: string | null
+  created_at: string
+  notes?: string | null
+  linked_workflow_revision: number
+}
+
 export interface FunctionalRequestReference {
   id: number
   request_id: string
@@ -2318,6 +2334,7 @@ export interface DefectOut {
   // picker (TestExecution.tsx), widened to offer already-linked defects too.
   execution_links: DefectExecutionLinkOut[]
   historical_execution_links?: HistoricalDefectExecutionLinkOut[]
+  execution_references?: DefectExecutionReferenceOut[]
   application_name: string
   module_name?: string | null
   module_feature: string
@@ -2403,6 +2420,7 @@ export interface DefectListOut {
   execution_status?: string | null
   execution_links: DefectExecutionLinkOut[]
   historical_execution_links?: HistoricalDefectExecutionLinkOut[]
+  execution_references?: DefectExecutionReferenceOut[]
   application_name: string
   module_name?: string | null
   module_feature: string

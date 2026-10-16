@@ -129,7 +129,7 @@ type DefectTraceRow = {
   project_id?: number | null
   test_case_key?: string | null
   status?: string | null
-  relationship: 'Primary' | 'Additional' | 'Historical'
+  relationship: 'Primary' | 'Additional' | 'Historical' | 'Reference'
   attempt_no?: number
   linked_at?: string
   reason?: string | null
@@ -164,6 +164,11 @@ function defectTraceRows(defect: DefectOut): DefectTraceRow[] {
     trace_key:`historical-${link.id}`, execution_id:link.execution_id, cycle_id:link.cycle_id,
     cycle_key:link.cycle_key, project_id:link.project_id, test_case_key:link.test_case_key,
     status:link.status, relationship:'Historical', attempt_no:link.attempt_no, linked_at:link.created_at, reason:link.notes, linked_by:link.linked_by_name,
+  }))
+  ;(defect.execution_references || []).forEach(link => rows.push({
+    trace_key:`reference-${link.id}`, execution_id:link.execution_id, cycle_id:link.cycle_id,
+    cycle_key:link.cycle_key, project_id:link.project_id, test_case_key:link.test_case_key,
+    status:link.status, relationship:'Reference', linked_at:link.created_at, reason:link.notes || 'Closed at link; traceability only', linked_by:link.linked_by_name,
   }))
   return rows
 }
@@ -202,7 +207,7 @@ function LinkedTestExecutionsModal({ defect, onClose, onOpen }: {
         { key: 'cycle', header: 'Test cycle', render: (row) => row.cycle_key || '—', filterValue: (row) => row.cycle_key || 'Unspecified' },
         { key: 'result', header: 'Result', render: (row) => row.status ? <Badge status={row.status} /> : <span className="muted">—</span>, filterValue: (row) => row.status || 'Not recorded' },
         { key: 'relationship', header: 'Trace type', render: (row) => <span className={`defect-trace-type ${row.relationship.toLowerCase()}`}>{row.relationship}{row.attempt_no ? ` · Attempt #${row.attempt_no}` : ''}</span>, filterValue: (row) => row.relationship },
-        { key: 'late_link', header: 'Historical association', render: (row) => row.relationship === 'Historical' ? <span>{row.linked_at ? formatDateTimeIST(row.linked_at) : ''}<small>{row.linked_by || 'Unknown actor'} · {row.reason}</small></span> : '—' },
+        { key: 'late_link', header: 'Link details', render: (row) => row.relationship === 'Historical' || row.relationship === 'Reference' ? <span>{row.linked_at ? formatDateTimeIST(row.linked_at) : ''}<small>{row.linked_by || 'Unknown actor'} · {row.reason}</small></span> : '—' },
         { key: 'action', header: '', filterable: false, render: (row) => <button type="button" className="btn btn-sm" onClick={(event) => { event.stopPropagation(); onOpen(row) }}>Open</button> },
       ]}
     />
@@ -1036,7 +1041,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
             {(canEdit || canLinkExecution || canReassignDefect || canRecoverRouting) && <div className="defect-actions-group">
               <span>Issue actions</span>
               {canEdit && <button type="button" role="menuitem" onClick={() => runAction(() => setEditMode(true))}><strong>Edit details</strong><small>Update the defect information</small></button>}
-              {canLinkExecution && <button type="button" role="menuitem" onClick={() => runAction(() => setShowLinkExecution(true))}><strong>{defect.status === 'Closed' ? 'Link historical testcase' : 'Link another testcase'}</strong><small>{defect.status === 'Closed' ? 'Add a missed original execution attempt' : 'Add another affected Failed or Blocked execution'}</small></button>}
+              {canLinkExecution && <button type="button" role="menuitem" onClick={() => runAction(() => setShowLinkExecution(true))}><strong>Link testcase</strong><small>{defect.status === 'Closed' ? 'Add an execution reference; defect stays Closed' : 'Add another affected Failed or Blocked execution'}</small></button>}
               {canReassignDefect && <button type="button" role="menuitem" onClick={() => runAction(() => setShowReassign(true))}><strong>Reassign</strong><small>{stageOwnership.kind === 'resolver' ? 'Change owner within the responsible department' : 'Change the current stage owner'}</small></button>}
               {canRecoverRouting && <button type="button" role="menuitem" onClick={() => runAction(() => setShowRoutingRecovery(true))}><strong>Recover resolver routing</strong><small>Correct a misrouted defect with an audit reason</small></button>}
             </div>}
@@ -1143,12 +1148,12 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
           additional execution and overwhelmed the detail page at realistic
           volumes. This summary remains constant-height; the complete set is
           searchable and paginated in LinkedTestExecutionsModal. */}
-      {defect.execution_links.length > 0 && (
+      {traceRows.length > 0 && (
         <div className="defect-linked-summary">
           <div className="defect-linked-summary-count"><strong>{traceRows.length}</strong><span>linked<br />testcases</span></div>
           <div className="defect-linked-summary-copy">
             <strong>Test execution coverage</strong>
-            <span>Across {traceCycleCount || 1} test cycle{traceCycleCount === 1 ? '' : 's'} · Primary trace and {defect.execution_links.length} additional · {defect.historical_execution_links?.length || 0} historical</span>
+            <span>Across {traceCycleCount || 1} test cycle{traceCycleCount === 1 ? '' : 's'} · {defect.execution_links.length} additional · {defect.historical_execution_links?.length || 0} historical · {defect.execution_references?.length || 0} reference</span>
             <small>{traceRows.slice(0, 3).map((row) => row.test_case_key || `Execution #${row.execution_id}`).join(' · ')}{traceRows.length > 3 ? ` · +${traceRows.length - 3} more` : ''}</small>
           </div>
           <button type="button" className="btn" onClick={() => setShowLinkedExecutions(true)}>View all linked testcases</button>
@@ -1441,7 +1446,7 @@ export default function Defects() {
         { key: 'application_name', header: 'Application / Module', render: (defect) => <span className="defect-application-cell"><strong>{defect.application_name}</strong><small>{defect.module_name || 'Module not specified'}</small></span>, filterValue: (defect) => `${defect.application_name} ${defect.module_name || ''}` },
         { key: 'severity', header: 'Risk', render: (defect) => <span className="defect-risk-cell"><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><small>{defect.priority}</small></span> },
         { key: 'status', header: 'Workflow', render: (defect) => <span className="defect-workflow-cell"><Badge status={defect.status} />{defect.status === 'Duplicate' && <small className="defect-canonical-reference">Canonical: {defect.duplicate_of_key || (defect.duplicate_of_id ? `Defect #${defect.duplicate_of_id}` : 'Not recorded')}</small>}<small>{defect.assignee_name || 'Unassigned'}</small><small className="defect-workflow-department">{defect.assigned_team || 'Department not assigned'}</small></span> },
-        { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${!defect.execution_id && !defect.execution_links.length && !defect.historical_execution_links?.length ? 'incomplete' : ''}`}>{defect.functional_requests?.length ? defect.functional_requests.map(request => <button key={request.id} type="button" className="link-btn" title={request.sources.join(' · ')} onClick={event => { event.stopPropagation(); navigate(`/functional-requests?open=${request.id}`) }}>{request.request_id} ↗</button>) : <strong>No Functional Request linked</strong>}<small>{defect.qa_request_key ? `QA request: ${defect.qa_request_key}` : 'No parent QA request linked'}</small>{defect.execution_id ? <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small> : defect.historical_execution_links?.length ? <small>Historical: {defect.historical_execution_links[0].cycle_key} · {defect.historical_execution_links[0].test_case_key} · Attempt #{defect.historical_execution_links[0].attempt_no}</small> : <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small>}</span> },
+        { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${!defect.execution_id && !defect.execution_links.length && !defect.historical_execution_links?.length && !defect.execution_references?.length ? 'incomplete' : ''}`}>{defect.functional_requests?.length ? defect.functional_requests.map(request => <button key={request.id} type="button" className="link-btn" title={request.sources.join(' · ')} onClick={event => { event.stopPropagation(); navigate(`/functional-requests?open=${request.id}`) }}>{request.request_id} ↗</button>) : <strong>No Functional Request linked</strong>}<small>{defect.qa_request_key ? `QA request: ${defect.qa_request_key}` : 'No parent QA request linked'}</small>{defect.execution_id ? <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small> : defect.execution_references?.length ? <small>Reference: {defect.execution_references[0].cycle_key} · {defect.execution_references[0].test_case_key} · Closed at link</small> : defect.historical_execution_links?.length ? <small>Historical: {defect.historical_execution_links[0].cycle_key} · {defect.historical_execution_links[0].test_case_key} · Attempt #{defect.historical_execution_links[0].attempt_no}</small> : <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small>}</span> },
         { key: 'reported_at', header: 'Reported / Age', render: (defect) => <span className="defect-age-cell"><strong>{formatDateIST(defect.reported_at)}</strong><small>{ageInDays(defect.reported_at)}d since reported · {defect.reporter_name}</small></span> },
       ]} />
       {!defects.length && <div className="tm-empty"><strong>{dashboard?.total ? 'No defects match this view' : 'No governed defects yet'}</strong><span>{dashboard?.total ? 'Change the queue or clear filters to see more records.' : 'Open a defect now, or report one directly from a Failed/Blocked execution.'}</span></div>}
