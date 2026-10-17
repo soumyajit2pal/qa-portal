@@ -169,3 +169,15 @@
   .clearance-action-row { flex-basis:100%; }
   .clearance-frozen-badge { white-space:normal; }
 }
+
+.certificate-preparer { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; margin:16px 0; padding:17px 19px; border:1px solid #d6e5e9; border-radius:10px; background:#f8fbfc; }
+.certificate-preparer-person { display:grid; gap:4px; min-width:0; overflow-wrap:anywhere; }
+.certificate-preparer-label { color:#627b87; font-size:11px; font-weight:700; }
+.certificate-preparer-person strong { color:#244b5b; font-size:15px; line-height:1.45; }
+.certificate-preparer-username { color:#637a85; font-size:12px; }
+.certificate-preparer-organization { color:#3e5c69; font-size:13px; font-weight:600; }
+.certificate-preparer-person small { margin-top:3px; color:#657c87; font-size:11px; line-height:1.5; }
+.certificate-preparer-badge { flex:none; padding:5px 10px; border:1px solid #d9e2e7; border-radius:6px; color:#52636c; background:#edf1f3; font-size:11px; font-weight:700; line-height:1.5; }
+.certificate-preparer-bank_staff { color:#185b68; border-color:#c4e0e3; background:#e7f3f4; }
+.certificate-preparer-vendor { color:#62439a; border-color:#dfd5f1; background:#f0edfa; }
+@media (max-width:540px) { .certificate-preparer { flex-wrap:wrap; gap:12px; padding:15px; } }

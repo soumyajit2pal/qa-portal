@@ -194,6 +194,17 @@ def enforce_admin_workflow_department(db, flush_context, instances):
         for obj in set(db.new) | set(db.dirty) | set(db.deleted):
             if obj in db.dirty and not db.is_modified(obj, include_collections=False):
                 continue
+            # Dedicated admin recovery validates its exact record set before
+            # opening this transaction-local scope; ordinary APIs never set it.
+            if (type(obj).__name__, getattr(obj, 'id', None)) in db.info.get('validated_admin_recovery_records', set()):
+                continue
+            from .project_workspace_ownership import root_for, admin_recovery_root_allowed
+            recovery_root = root_for(db, obj)
+            if recovery_root is not None and admin_recovery_root_allowed(db, recovery_root, user):
+                continue
+            from .models import ApprovalAction
+            if isinstance(obj, ApprovalAction) and (obj.entity_type, obj.entity_id) in db.info.get('validated_admin_recovery_audits', set()):
+                continue
             applicable, department = record_department(db, obj, user)
             if not applicable:
                 continue

@@ -123,13 +123,16 @@ def _refresh(db, obj, resume_stage=None):
         obj.status = obstacle_state(active_obstacles(obj)[0])
 
 
-def _save(db, obj, user):
-    db.commit()
-    db.refresh(obj)
+def _save(db, obj, user, *, commit=True):
+    if commit:
+        db.commit()
+        db.refresh(obj)
+    else:
+        db.flush()
     return _workflow()._dast_out(obj, user) if isinstance(obj, models.DASTRequest) else schemas.SASTOut.model_validate(obj)
 
 
-def create_obstacle(db, cls, req_id, payload, user):
+def create_obstacle(db, cls, req_id, payload, user, *, commit=True):
     obj = _load(db, cls, req_id, user)
     _require_reviewer(obj, user)
     if obj.status not in ACTIVE_STAGES:
@@ -163,7 +166,7 @@ def create_obstacle(db, cls, req_id, payload, user):
     _refresh(db, obj)
     permission = "\nQA permits repository additions within this return." if row.allow_scope_additions else ""
     _audit(db, obj, row, user, "Obstacle returned to requester" if row.kind == "REQUESTER" else "Internal hold opened", "", payload.reason + "\nRequired action: " + payload.requested_correction + permission)
-    return _save(db, obj, user)
+    return _save(db, obj, user, commit=commit)
 
 
 def set_scope_permission(db, cls, req_id, obstacle_id, payload, user):

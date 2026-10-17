@@ -22,6 +22,8 @@ const forbiddenText = [
 // test, deprecated, or unrelated backend family from silently entering a
 // production bundle during a future change.
 const allowedApiFamilies = new Set([
+  'admin-recovery',
+  'vendor-organizations',
   'application-names', 'applications', 'approvals', 'audit', 'auth', 'checklist-config',
   'dashboard', 'dast-requests', 'defects', 'departments', 'document-portal',
   'export', 'functional-requests', 'jobs', 'pending-approvals',

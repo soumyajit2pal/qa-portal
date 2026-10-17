@@ -454,6 +454,9 @@ interface ModalProps {
   // Prevent an explicit header close while a non-interruptible operation is
   // running. The disabled control makes the lock visible and accessible.
   closeDisabled?: boolean;
+  // Required setup flows provide an explicit logout action in their footer.
+  hideClose?: boolean;
+  className?: string;
   tone?: "warning" | "danger";
 }
 
@@ -467,6 +470,8 @@ export function Modal({
   variant = "drawer",
   preventBackdropClose,
   closeDisabled,
+  hideClose,
+  className = "",
   tone,
 }: ModalProps) {
   const [shake, setShake] = useState(false);
@@ -569,14 +574,14 @@ export function Modal({
           aria-modal="true"
           aria-labelledby={titleId}
           tabIndex={-1}
-          className={`dialog ${tone ? `modal-tone-${tone}` : ""} ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${fitContent ? "dialog-fit-content" : ""} ${
+          className={`dialog ${className} ${tone ? `modal-tone-${tone}` : ""} ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${fitContent ? "dialog-fit-content" : ""} ${
             shake ? "modal-shake" : ""
           }`}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="drawer-header">
             {heading}
-            <button
+            {!hideClose && <button
               type="button"
               className="modal-close-btn"
               onClick={handleExplicitClose}
@@ -585,7 +590,7 @@ export function Modal({
               disabled={closeDisabled}
             >
               ×
-            </button>
+            </button>}
           </div>
           <div className="drawer-body">{children}</div>
         </div>
@@ -604,7 +609,7 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className={`drawer ${tone ? `modal-tone-${tone}` : ""} ${wide ? "drawer-wide" : ""} ${expanded ? "drawer-expanded" : ""} ${
+        className={`drawer ${className} ${tone ? `modal-tone-${tone}` : ""} ${wide ? "drawer-wide" : ""} ${expanded ? "drawer-expanded" : ""} ${
           shake ? "modal-shake" : ""
         }`}
         onClick={(e) => e.stopPropagation()}
@@ -625,7 +630,7 @@ export function Modal({
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 21h5v-5M3 8l6-5M21 16l-6 5" /></svg>
               )}
             </button>
-            <button
+            {!hideClose && <button
               type="button"
               className="modal-close-btn"
               onClick={handleExplicitClose}
@@ -634,7 +639,7 @@ export function Modal({
               disabled={closeDisabled}
             >
               ×
-            </button>
+            </button>}
           </div>
         </div>
         <div className="drawer-body">{children}</div>

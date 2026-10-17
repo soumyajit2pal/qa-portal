@@ -17,6 +17,8 @@ import UserAssignSelect from '../../components/UserAssignSelect'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import TestProjectAdmin from './TestProjectAdmin'
 import ApplicationCreationSettings from './ApplicationCreationSettings'
+import AdminRecovery from './AdminRecovery'
+import VendorOrganizations, { VendorProfileEditor, USER_TYPE_LABELS } from './VendorOrganizations'
 import { formatDateTimeIST, portalDate } from '../../time'
 import { hasOtherActiveWorkspace } from '../../workspaceMembership'
 import {
@@ -72,10 +74,10 @@ function CoordinatorRolePolicy() {
   </section>
 }
 
-type AdminSection = 'users' | 'departments' | 'workspaces' | 'projects' | 'applications' | 'email' | 'ldap' | 'downtime'
+type AdminSection = 'users' | 'departments' | 'workspaces' | 'projects' | 'applications' | 'email' | 'ldap' | 'downtime' | 'recovery' | 'vendors'
 type WorkspacePanel = 'members' | 'administrators' | 'settings'
 type WorkspaceMemberView = 'current' | 'add'
-const ADMIN_SECTIONS: AdminSection[] = ['users', 'departments', 'workspaces', 'projects', 'applications', 'email', 'ldap', 'downtime']
+const ADMIN_SECTIONS: AdminSection[] = ['users', 'departments', 'workspaces', 'projects', 'applications', 'email', 'ldap', 'downtime', 'recovery', 'vendors']
 
 // Shared by every page that needs a department picker -- departments are
 // DB-backed now (see backend app/models.py Department / routers/departments.py)
@@ -247,6 +249,7 @@ function CreateUserModal({ onClose, onCreated, departmentOptions, departmentRows
           <p className="muted small">
             This account authenticates against the configured LDAP / Active Directory server —
             no local password is stored; the username must match their LDAP identity.
+            {' '}User Type: {form.username.trim().toLowerCase().startsWith('b') ? 'Bank Staff' : 'Vendor'}. Vendor organization can be assigned from Vendor profile after creation, or selected by the user at sign-in.
           </p>
         )}
         <ErrorText error={error} />
@@ -1924,10 +1927,12 @@ export default function Admin() {
   const [showCreate, setShowCreate] = useState(false)
   const [resetTarget, setResetTarget] = useState<UserOut | null>(null)
   const [accessTarget, setAccessTarget] = useState<UserOut | null>(null)
+  const [vendorTarget, setVendorTarget] = useState<UserOut | null>(null)
   const [savingId, setSavingId] = useState<number | null>(null)
   const [userSearch, setUserSearch] = useState('')
   const [accountFilter, setAccountFilter] = useState<'ALL' | 'ACTIVE' | 'DISABLED' | 'REVIEW'>('ALL')
   const [loginFilter, setLoginFilter] = useState<'ALL' | 'STANDARD' | 'LDAP'>('ALL')
+  const [userTypeFilter, setUserTypeFilter] = useState('ALL')
   const [workspaceRevision, setWorkspaceRevision] = useState(0)
 
   // SRS 7.2 pagination rollout -- the user directory is now server-paginated
@@ -1944,6 +1949,7 @@ export default function Admin() {
     extra: {
       account_filter: accountFilter === 'ALL' ? undefined : accountFilter.toLowerCase(),
       login_type: loginFilter === 'ALL' ? undefined : loginFilter,
+      user_type: userTypeFilter === 'ALL' ? undefined : userTypeFilter,
     },
   })
   const loadSummary = useCallback(() => {
@@ -1965,7 +1971,7 @@ export default function Admin() {
   const activeCount = summary?.active_count || 0
   const ldapCount = summary?.ldap_count || 0
   const departmentOptions = departments.filter((d) => d.is_active).map((d) => d.name)
-  const hasUserFilters = !!userSearch.trim() || accountFilter !== 'ALL' || loginFilter !== 'ALL'
+  const hasUserFilters = !!userSearch.trim() || accountFilter !== 'ALL' || loginFilter !== 'ALL' || userTypeFilter !== 'ALL'
   const requestedSection = searchParams.get('section') as AdminSection | null
   const section: AdminSection = requestedSection && ADMIN_SECTIONS.includes(requestedSection) ? requestedSection : 'users'
   const sectionMeta: Record<AdminSection, { title: string; subtitle: string; count?: number }> = {
@@ -1977,6 +1983,8 @@ export default function Admin() {
     email: { title: 'Email diagnostics', subtitle: 'Send a test message to verify the configured email service.' },
     ldap: { title: 'LDAP configuration', subtitle: 'Manage the directory connection used for LDAP authentication.' },
     downtime: { title: 'Planned downtime', subtitle: 'Schedule the system-wide maintenance notice shown before and during a planned service window.' },
+    recovery: { title: 'Recovery & Corrections', subtitle: 'Move misplaced testing work and recover request routing within the selected workspace, with preserved history.' },
+    vendors: { title: 'Vendor organizations', subtitle: 'Manage vendor organization names and availability for user profiles.' },
   }
   function setSection(next: AdminSection) {
     const nextParams = new URLSearchParams(searchParams)
@@ -2033,11 +2041,13 @@ export default function Admin() {
           <button type="button" className={section === 'departments' ? 'active' : ''} aria-current={section === 'departments' ? 'page' : undefined} onClick={() => setSection('departments')}><IconPlus /><span><strong>Organization</strong><small>Department directory</small></span><em>{departments.length}</em></button>
           <button type="button" className={section === 'workspaces' ? 'active' : ''} aria-current={section === 'workspaces' ? 'page' : undefined} onClick={() => setSection('workspaces')}><IconUsers /><span><strong>Workspaces</strong><small>Hierarchy and data access</small></span></button>
           <button type="button" className={section === 'projects' ? 'active' : ''} aria-current={section === 'projects' ? 'page' : undefined} onClick={() => setSection('projects')}><IconShield /><span><strong>Test projects</strong><small>Ownership and sharing</small></span></button>
+          <button type="button" className={section === 'recovery' ? 'active' : ''} aria-current={section === 'recovery' ? 'page' : undefined} onClick={() => setSection('recovery')}><IconWarning /><span><strong>Recovery & Corrections</strong><small>Move work and recover requests</small></span></button>
         </nav>
         <div className="admin-system-tools">
           <span><strong>System tools</strong><small>Occasional setup and checks</small></span>
-          <SearchableSelect ariaLabel="Choose a system administration tool" searchable={false} value={section === 'applications' || section === 'email' || section === 'ldap' || section === 'downtime' ? section : ''} onChange={(value) => value && setSection(value as AdminSection)} placeholder="Choose a tool…" options={[
+          <SearchableSelect ariaLabel="Choose a system administration tool" searchable={false} value={['applications', 'email', 'ldap', 'downtime', 'vendors'].includes(section) ? section : ''} onChange={(value) => value && setSection(value as AdminSection)} placeholder="Choose a tool…" options={[
             { value: 'applications', label: 'Application directory' },
+            { value: 'vendors', label: 'Vendor organizations' },
             { value: 'email', label: 'Email diagnostics' },
             { value: 'ldap', label: 'LDAP configuration' },
             { value: 'downtime', label: 'Planned downtime' },
@@ -2075,7 +2085,8 @@ export default function Admin() {
           <SearchableSelect ariaLabel="Filter by login type" value={loginFilter} onChange={(value) => setLoginFilter(value as typeof loginFilter)} searchable={false} style={{ minWidth: 150 }} options={[
             { value: 'ALL', label: 'All login types' }, { value: 'STANDARD', label: 'Standard' }, { value: 'LDAP', label: 'LDAP' },
           ]} />
-          {hasUserFilters && <button type="button" className="btn btn-sm" onClick={() => { setUserSearch(''); setAccountFilter('ALL'); setLoginFilter('ALL') }}>Clear filters</button>}
+          <SearchableSelect ariaLabel="Filter by user type" value={userTypeFilter} onChange={setUserTypeFilter} searchable={false} options={[{ value: 'ALL', label: 'All user types' }, ...Object.entries(USER_TYPE_LABELS).map(([value, label]) => ({ value, label }))]} />
+          {hasUserFilters && <button type="button" className="btn btn-sm" onClick={() => { setUserSearch(''); setAccountFilter('ALL'); setLoginFilter('ALL'); setUserTypeFilter('ALL') }}>Clear filters</button>}
         </div>
         <Table
           rowKey="id"
@@ -2110,10 +2121,12 @@ export default function Admin() {
                 {u.login_type === 'LDAP' ? 'LDAP' : 'Standard'}
               </span>
             ) },
+            { key: 'user_type', header: 'User Type', render: (u) => USER_TYPE_LABELS[u.user_type || 'STANDARD'] || 'Standard account' },
+            { key: 'vendor_organization_name', header: 'Vendor Organization', render: (u) => u.user_type === 'VENDOR' ? <div>{u.vendor_organization_name || 'Not provided'}{u.vendor_profile_exempt && <small> · System/test exemption</small>}</div> : '—' },
             { key: 'is_active', header: 'Status', render: (u) => (
               <div className="access-status-summary"><span className={`badge ${u.is_active ? 'badge-green' : 'badge-red'}`}>{u.is_active ? 'Active' : 'Disabled'}</span>{u.admin_managed_only && <small>Admin managed</small>}</div>
             ), filterValue: (u) => u.is_active ? 'Active' : 'Disabled' },
-            { key: 'actions', header: 'Actions', filterable: false, render: (u) => <div className="access-row-actions"><button className="btn btn-sm btn-primary" onClick={() => setAccessTarget(u)}>Manage access</button>{u.login_type === 'STANDARD' && <button className="btn btn-sm" onClick={() => setResetTarget(u)}><IconLock width={13} height={13} /> Reset password</button>}</div> },
+            { key: 'actions', header: 'Actions', filterable: false, render: (u) => <div className="access-row-actions"><button className="btn btn-sm btn-primary" onClick={() => setAccessTarget(u)}>Manage access</button>{u.user_type === 'VENDOR' && <button className="btn btn-sm" onClick={() => setVendorTarget(u)}>Vendor profile</button>}{u.login_type === 'STANDARD' && <button className="btn btn-sm" onClick={() => setResetTarget(u)}><IconLock width={13} height={13} /> Reset password</button>}</div> },
           ]}
           rows={rows}
         />
@@ -2121,7 +2134,7 @@ export default function Admin() {
           <div className="access-empty-search">
             <strong>No users match these filters</strong>
             <span>Try another name, username, email, department, role, or account status.</span>
-            <button type="button" className="btn" onClick={() => { setUserSearch(''); setAccountFilter('ALL'); setLoginFilter('ALL') }}>Clear filters</button>
+            <button type="button" className="btn" onClick={() => { setUserSearch(''); setAccountFilter('ALL'); setLoginFilter('ALL'); setUserTypeFilter('ALL') }}>Clear filters</button>
           </div>
         )}
       </div>
@@ -2138,6 +2151,9 @@ export default function Admin() {
       {section === 'projects' && <div className="access-workspace-panel access-departments-section">
         <TestProjectAdmin />
       </div>}
+      {section === 'recovery' && <div className="access-workspace-panel"><AdminRecovery /></div>}
+      {section === 'vendors' && <div className="access-workspace-panel"><VendorOrganizations /></div>}
+      {vendorTarget && <VendorProfileEditor user={vendorTarget} onClose={() => setVendorTarget(null)} onDone={() => { setVendorTarget(null); refreshUsers() }} />}
 
       {section === 'applications' && <div className="access-workspace-panel access-departments-section">
         <ApplicationCreationSettings />

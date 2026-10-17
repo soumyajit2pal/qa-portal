@@ -101,7 +101,7 @@ def user_access_workbook(db: Session, actor: models.User) -> io.BytesIO:
     for user in users:
         roles = {assignment.role for assignment in user.role_assignments}
         usable = bool(user.is_active and roles and not user.needs_role_review
-                      and not user.needs_department_selection)
+                      and not user.needs_department_selection and not user.needs_vendor_organization)
         accessible_ids = selectable_workspace_ids(db, user) if usable else set()
         accessible_ids = {workspace_id for workspace_id in accessible_ids
                           if workspace_id in workspaces and workspaces[workspace_id].is_active}
@@ -116,6 +116,9 @@ def user_access_workbook(db: Session, actor: models.User) -> io.BytesIO:
             "Yes" if user.show_in_user_dropdowns else "No",
             preferred.name if preferred else "", len(accessible_ids),
             format_datetime_ist(user.created_at) if user.created_at else "",
+            {'STANDARD': 'Standard account', 'BANK_STAFF': 'Bank Staff', 'VENDOR': 'Vendor'}[user.user_type],
+            user.vendor_organization_name or '', 'Yes' if user.vendor_profile_exempt else 'No',
+            'Yes' if user.needs_vendor_organization else 'No',
         ])
         for workspace_id in sorted(accessible_ids, key=lambda value: (workspaces[value].name.casefold(), value)):
             workspace = workspaces[workspace_id]
@@ -156,6 +159,7 @@ def user_access_workbook(db: Session, actor: models.User) -> io.BytesIO:
         "Role review pending", "Department selection pending", "Departments", "Assigned roles",
         "Admin managed", "Shown in user pickers", "Preferred workspace",
         "Accessible workspace count", "Created at",
+        "User type", "Vendor organization", "System/test profile exemption", "Vendor organization pending",
     ], accounts, generated_at, actor.username)
     _sheet(workbook, "Effective Workspace Access", [
         "User ID", "Username", "Workspace ID", "Workspace key", "Workspace name", "Parent workspace",

@@ -1227,6 +1227,16 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
   unresolved Critical/High defects. At least one result must be recorded. Existing
   defect Target Release requirements remain in force. This action is audited,
   freezes the cycle, and does not issue a certificate or bypass its approvals.
+- QA certificates show **Prepared by**, with a Bank Staff, Vendor, or Standard
+  account badge and the vendor organization where applicable. Final Executive
+  approval saves the current certificate owner's name, username, account type,
+  and organization in the existing certificate snapshot envelope. Issued,
+  held, and superseded certificates retain these values after profile or
+  organization changes. Each revised certificate captures its own preparer.
+  PDFs separately identify **PDF exported by**, including the exporting user's
+  account type, organization where applicable, and export time. Older terminal
+  certificates without captured identity display **Not recorded on this
+  certificate**. No backfill or schema migration is required.
 - Testcase/repository and execution lists use primary-key cursor pagination;
   cycle candidates are evaluated with SQL `NOT EXISTS` and are loaded only
   when the Add Test Cases dialog opens. Apply every versioned schema/index
@@ -1562,3 +1572,95 @@ testers; QA managers retain their existing reassignment and clearance authority.
 The cycle request preview stays read-only. No backend permission or lifecycle
 transition was changed. Regression evidence and the read-only inspection of
 `TQA-FUNC-02` are in `validation/functional-testing-handoff-2026-10-15/report.json`.
+
+### Admin Recovery & Corrections (2026-10-16)
+
+Open **Admin → Recovery & Corrections** in the owning workspace. System
+Administrators can preview and apply a same-workspace project migration or a
+named request recovery, with a required reason and an atomic recovery receipt.
+The request picker opens the existing shared request viewer for full context.
+
+Project migration **relocates existing records**, rather than creating copies
+or merely adding destination references. Moved testcases and cycles disappear
+from the source project's content lists and appear only in the destination.
+IDs, testcase versions, pinned versions, execution slots, attempts, retest
+outcomes, attachments, defect links, closure and stage owners are preserved.
+Whole-project migration also moves repository/cycle folders and their existing
+access rules. Partial selections expand to include connected cases, cycles and
+re-execution lineage. Restricted cycle folders move with all their cycles and
+access rules. Other partial selections become Unfiled in the destination, with
+original folder locations retained in the receipt.
+
+The preview rejects foreign-workspace content, inactive projects, destination
+duplicates, shared records outside the connected move, incompatible request
+applications and reviewed/issued certificate dependencies. Correcting an
+application classification requires an explicit acknowledgement that the
+recorded testing was performed for the destination application. It does not
+turn testing performed against another application into valid evidence. The
+utility supports up to 5,000 connected testcases and 25,000 watched records in
+one interactive operation; larger populations need independent selections.
+
+Request recovery offers **Return to requester**, **Recover responsible owner**,
+**Return to fresh QA review**, and SAST/DAST **Internal hold**, only at eligible
+stages. The Raised gateway retains its child workflows. Recovery uses their
+existing return/resubmit and security-obstacle flows, preserves analyst/tester
+assignments and evidence, and resets applicable readiness verification for
+fresh review. It cannot fabricate approvals or set arbitrary completion,
+closure or certificate states. Active security obstacles use their existing
+review/routing controls. Certificates remain subject to the established
+clearance review/amendment process.
+
+Previews expire after 30 minutes. Applying requires the original administrator,
+current workspace authorization and an unchanged dependency fingerprint. Row
+locks fail promptly when work is busy; retries cannot apply a committed job
+twice. History records the administrator, reason, impact and before/after
+classification or stage values. An applied migration can be reversed only
+while its affected project records remain unchanged; reversal is also audited.
+Ordinary project ownership and business workflow permissions remain enforced.
+
+Deploy matching frontend/backend versions and apply additive, restartable
+migration `a41d9e7c2b60` after `f81b2c6d9a30`. Migration rollback retains recovery
+receipts. Validation evidence is in `validation/admin-recovery-2026-10-16/`.
+
+### Bank Staff and vendor organization profiles
+
+User type is derived on the server: LDAP login IDs beginning with `b` (case
+insensitive) are **Bank Staff**; other LDAP identities are **Vendor**. Standard
+local accounts, including existing QA and Administrator test accounts, retain
+their existing login and profile behavior and display **Standard account**.
+Classification is identity metadata and grants no roles, approval authority or
+workspace access. No existing usernames, passwords, roles or assignments are
+rewritten by migration `b72e6a9c4d30` (after `a41d9e7c2b60`).
+
+Vendors without an organization complete profile setup after the existing email
+and department steps, before entering the portal. The shared picker shows a
+searchable list of active organizations and a separate **Add organization**
+action. An empty directory opens the organization-name field directly, with
+guidance that the name is added when the profile is saved. Setup keeps its save
+action in the form and provides explicit logout. New names are normalized for
+Unicode, capitalization and whitespace to avoid duplicate organizations.
+Selection/creation and the profile audit commit
+together. Reloading an established profile does not prompt again. Logout and
+retry remain available during setup. The core API and separate Document Portal
+enforce the same setup boundary while leaving self-service setup reachable.
+
+Admin → People shows **User Type** and **Vendor Organization**, supports user type
+filtering and organization-name search, and offers **Vendor profile** corrections
+for vendor LDAP users only. Reasons and original profile values are required for
+audited corrections, clearing an organization or granting/removing a system/test
+profile exemption. This exemption affects only organization setup. Standard
+accounts and Bank Staff cannot be changed through this endpoint. LDAP user
+creation and first-login provisioning otherwise retain their existing access
+review policies.
+
+Admin → System tools → **Vendor organizations** creates, renames, deactivates or
+reactivates organization names. Rename/status changes require a reason and the
+current revision; stale edits are rejected. Deactivation prevents new selection
+while retaining existing affiliations and audit history. Organizations are not
+deleted. The user access workbook includes user type, organization and pending
+setup/exemption metadata. The directory starts empty; no vendor names are seeded.
+
+API routes: `/api/vendor-organizations`,
+`PATCH /api/auth/me/vendor-organization`, and admin-only
+`PATCH /api/auth/users/{user_id}/vendor-profile`. Validation evidence is in
+`validation/vendor-profiles-2026-10-16/`.

@@ -43,7 +43,7 @@ from .routers import (
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, test_reports, audit, checklist_config, request_type_config,
     pending_approvals, defects, jobs, qa_workspaces, system_settings, signatures,
-    operations, global_search,
+    operations, global_search, admin_recovery, vendor_organizations,
 )
 
 
@@ -399,6 +399,8 @@ _DOCUMENT_PORTAL_ALLOWED_API_PATHS = {
     "/api/auth/renew",
     "/api/auth/me",
     "/api/auth/me/email",
+    "/api/auth/me/vendor-organization",
+    "/api/vendor-organizations",
     "/api/system-settings/maintenance-window/current",
     "/api/health",
 }
@@ -444,6 +446,7 @@ def _session_guard_identity(request: Request) -> dict | None:
                 "login_type": user.login_type,
                 "email": user.email,
                 "ldap_email_completion_required": _ldap_email_completion_required(user),
+                "needs_vendor_organization": user.needs_vendor_organization,
             }
     request.state.session_guard_identity = identity
     if identity:
@@ -512,6 +515,20 @@ async def ldap_email_completion_api_guard(request, call_next):
             "status_code": 403,
         },
     )
+
+
+@app.middleware("http")
+async def vendor_profile_api_guard(request, call_next):
+    path = request.url.path
+    if not path.startswith('/api') or path in _DOCUMENT_PORTAL_ALLOWED_API_PATHS:
+        return await call_next(request)
+    identity = _session_guard_identity(request)
+    if identity and identity['is_active'] and identity.get('needs_vendor_organization'):
+        # The existing email and department steps remain reachable in order.
+        if (path != '/api/departments' or not identity['needs_department_selection']
+                or request.method.upper() not in {'GET', 'HEAD', 'OPTIONS'}):
+            return JSONResponse(status_code=403, content={'detail': 'Select your vendor organization before using QualityOps.', 'status_code': 403})
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -708,6 +725,8 @@ app.include_router(pending_approvals.router)
 app.include_router(jobs.router)
 app.include_router(system_settings.router)
 app.include_router(operations.router)
+app.include_router(admin_recovery.router)
+app.include_router(vendor_organizations.router)
 if DOCUMENT_PORTAL_EMBEDDED:
     app.include_router(document_portal.router)
     logger.warning(

@@ -43,6 +43,11 @@ export interface UserOut {
   department_unit_ids?: number[]
   roles: string[]
   login_type: string
+  user_type?: 'STANDARD' | 'BANK_STAFF' | 'VENDOR'
+  vendor_organization_id?: number | null
+  vendor_organization_name?: string | null
+  vendor_profile_exempt?: boolean
+  needs_vendor_organization?: boolean
   is_active: boolean
   needs_role_review: boolean
   needs_email_confirmation: boolean
@@ -62,6 +67,13 @@ export interface UserOut {
   active_workspace_id?: number | null
   workspace_access: QAWorkspaceAccessOut[]
   department_coordinator_access: DepartmentCoordinatorOut[]
+}
+
+export interface VendorOrganizationOut {
+  id: number
+  name: string
+  is_active: boolean
+  revision: number
 }
 
 export interface LocalAdminWorkspaceCandidateOut {
@@ -1203,7 +1215,19 @@ export interface CertificateSummary {
   module_name?: string | null
 }
 
+export interface CertificatePreparer {
+  user_id: number
+  full_name: string
+  username: string
+  user_type: 'BANK_STAFF' | 'VENDOR' | 'STANDARD'
+  vendor_organization_id?: number | null
+  vendor_organization_name?: string | null
+  captured_at?: string | null
+  is_frozen: boolean
+}
+
 export interface SignOffOut {
+  prepared_by?: CertificatePreparer | null
   qa_workspace_id?: number | null
   known_limitations?: string | null
   business_acceptance_status?: string | null

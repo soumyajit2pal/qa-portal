@@ -1,0 +1,13 @@
+.admin-recovery .recovery-fields { display: grid; gap: 16px; border: 0; padding: 0; margin: 0; min-width: 0; }
+.admin-recovery .recovery-fields > .btn { justify-self: start; }
+.admin-recovery .recovery-fields > label, .recovery-impact label { display: flex; gap: 10px; align-items: flex-start; }
+.admin-recovery input[type=checkbox] { width: auto; margin-top: 4px; flex: 0 0 auto; }
+.recovery-impact { display: grid; gap: 12px; margin: 20px 0; overflow-wrap: anywhere; }
+.recovery-impact p { margin: 0; }
+.recovery-impact details { border-bottom: 1px solid var(--border, #d6e4e8); padding: 10px 0; }
+.recovery-impact details p { margin-top: 10px; }
+.recovery-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin: 0; }
+.recovery-counts > div { padding: 12px; border: 1px solid var(--border, #d6e4e8); border-radius: 10px; }
+.recovery-counts dt { text-transform: capitalize; }
+.recovery-counts dd { font-size: 1.4rem; font-weight: 700; margin: 4px 0 0; }
+.admin-recovery [aria-label="Reviewed recovery preview"] { margin-top: 24px; border-top: 1px solid var(--border, #d6e4e8); }

@@ -20,6 +20,32 @@ def pk_column():
     return Column(Integer, Identity(start=1, increment=1), primary_key=True)
 
 
+class AdminRecoveryJob(Base):
+    """Durable reviewed recovery plan; application and receipt commit together.
+
+    JSON contains record identities and classification changes only, never
+    credentials or attachment bodies. Evidence and business IDs stay in place.
+    """
+    __tablename__ = 'qap_admin_recoveries'
+    __table_args__ = (Index('ix_qap_recovery_workspace', 'qa_workspace_id'),)
+    id = pk_column()
+    recovery_key = Column(String(40), nullable=False, unique=True)
+    qa_workspace_id = Column(Integer, ForeignKey('qap_qa_workspaces.id'), nullable=False)
+    actor_id = Column(Integer, ForeignKey('qap_users.id'), nullable=False)
+    kind = Column(String(20), nullable=False)
+    status = Column(String(20), nullable=False, default='PREVIEWED')
+    reason = Column(String(2000), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    preview_json = Column(Text, nullable=False)
+    state_hash = Column(String(64), nullable=False)
+    after_hash = Column(String(64), nullable=True)
+    changes_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: now())
+    applied_at = Column(DateTime, nullable=True)
+    reversed_at = Column(DateTime, nullable=True)
+    actor = relationship('User', foreign_keys=[actor_id])
+
+
 class BackgroundJobReceipt(Base):
     """Commit the durable job result in the same transaction as its writes.
 
@@ -207,6 +233,18 @@ def gen_defect_id(db):
     return f"TQA-DEF-{n:05d}"
 
 
+class VendorOrganization(Base):
+    __tablename__ = 'qap_vendor_organizations'
+    id = pk_column()
+    name = Column(String(150), nullable=False)
+    normalized_name = Column(String(300), nullable=False, unique=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default=text('1'))
+    revision = Column(Integer, nullable=False, default=1, server_default=text('1'))
+    created_by_id = Column(Integer, ForeignKey('qap_users.id'), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=now)
+    updated_at = Column(DateTime, nullable=False, default=now)
+
+
 class User(Base):
     __tablename__ = "qap_users"
     id = pk_column()
@@ -228,6 +266,26 @@ class User(Base):
     # `.departments` (the full list) or `.has_department(...)` instead.
     department = Column(String(150))
     login_type = Column(String(16), nullable=False, default=LoginType.STANDARD)
+    vendor_organization_id = Column(Integer, ForeignKey('qap_vendor_organizations.id', use_alter=True, name='fk_qap_user_vendor_org'), nullable=True)
+    vendor_profile_exempt = Column(Boolean, nullable=False, default=False, server_default=text('0'))
+    vendor_organization = relationship('VendorOrganization', foreign_keys=[vendor_organization_id], lazy='selectin')
+
+    @property
+    def user_type(self):
+        # Standard/local accounts (including existing QA and admin test users)
+        # keep their existing behavior. Classification never confers a role.
+        if self.login_type != LoginType.LDAP:
+            return 'STANDARD'
+        return 'BANK_STAFF' if (self.username or '').strip().lower().startswith('b') else 'VENDOR'
+
+    @property
+    def vendor_organization_name(self):
+        return self.vendor_organization.name if self.vendor_organization else None
+
+    @property
+    def needs_vendor_organization(self):
+        return self.user_type == 'VENDOR' and not self.vendor_profile_exempt and self.vendor_organization_id is None
+
     # Nullable because LDAP-type accounts authenticate against the directory
     # server and never store a local password hash.
     hashed_password = Column(String(255), nullable=True)
@@ -2664,6 +2722,11 @@ class QASignOff(Base):
         return json.loads(self.certificate_data_json or '{}').get('current')
 
     @property
+    def prepared_by(self):
+        from .certificate_identity import preparer_for
+        return preparer_for(self)
+
+    @property
     def module_name(self):
         snapshot = self.certificate_summary
         if snapshot is not None:
@@ -2725,6 +2788,7 @@ class QASignOff(Base):
     # migration, see ORACLE_MIGRATION_2026-07.md.
     status = Column(String(32), default="DRAFT")
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)   # Requested By (QA Team)
+    requester = relationship("User", foreign_keys=[requester_id])
     reviewed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Approved By (QA Lead)
     approved_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Approved By (Executive )
     # Vestigial -- left in place (unused going forward) rather than dropped,

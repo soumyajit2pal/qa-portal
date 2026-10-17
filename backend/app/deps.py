@@ -11,7 +11,7 @@ from .session_security import resolve_session
 from .constants import Role, format_role_labels
 
 _SAFE_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
-_VIEW_ONLY_SELF_SERVICE_PATHS = {"/api/auth/logout", "/api/auth/renew", "/api/auth/me/email"}
+_VIEW_ONLY_SELF_SERVICE_PATHS = {"/api/auth/logout", "/api/auth/renew", "/api/auth/me/email", "/api/auth/me/vendor-organization", "/api/vendor-organizations"}
 _SIGNATURE_READ_OPERATION_POST_PATHS = {"/api/signatures/check", "/api/signatures/verify-pdf"}
 _VIEW_ONLY_READ_OPERATION_POST_PATHS = {"/api/document-portal/download-selection"} | _SIGNATURE_READ_OPERATION_POST_PATHS
 _VIEW_ONLY_ROLE_GATED_READ_PREFIXES = (
@@ -38,6 +38,8 @@ _VIEW_ONLY_ROLE_GATED_READ_PREFIXES = (
 _NO_WORKSPACE_SELF_SERVICE_PATHS = {
     "/api/auth/me",
     "/api/auth/me/email",
+    "/api/auth/me/vendor-organization",
+    "/api/vendor-organizations",
     "/api/auth/logout",
     "/api/auth/renew",
     "/api/system-settings/maintenance-window/current",
@@ -412,6 +414,8 @@ def _require_ldap_notification_email(current_user: models.User) -> None:
     access dependencies closes the direct-URL bypass until email setup is
     complete. Department selection and role review retain their own controls.
     """
+    if current_user.needs_vendor_organization:
+        raise HTTPException(status_code=403, detail='Select your vendor organization before using QualityOps.')
     if ldap_email_completion_required(current_user):
         raise HTTPException(
             status_code=403,

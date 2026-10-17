@@ -81,11 +81,23 @@ def root_for(db, obj):
 
 def assert_owned(db, root, user):
     from . import models
+    if admin_recovery_root_allowed(db, root, user):
+        return
     workspace_id = getattr(user, 'active_qa_workspace_id', None)
     project = db.get(models.TestProject, root.project_id)
     owner = root.origin_workspace_id or (project.qa_workspace_id if project else None)
     if workspace_id is None or owner != workspace_id or not workspace_can_contribute(db, root.project_id, user):
         raise HTTPException(403, 'This record belongs to another workspace and is read-only. Create a test case or cycle in your own workspace.')
+
+
+def admin_recovery_root_allowed(db, root, user):
+    """A transaction-local exception for precisely reviewed root relocations."""
+    from .workflow_authority import is_system_admin
+    allowed = db.info.get('validated_admin_recovery_roots', {}).get((root.__tablename__, root.id))
+    return bool(allowed and is_system_admin(user)
+                and root.project_id == allowed[1]
+                and getattr(user, 'active_qa_workspace_id', None) == allowed[2]
+                and (root.origin_workspace_id or allowed[2]) == allowed[2])
 
 
 def assert_project_owned(db, project, user):
@@ -168,8 +180,26 @@ def enforce_workspace_ownership(db, flush_context, instances):
                         if (key == 'project_id' and isinstance(obj, TestCase) and allowed
                                 and (old[0], obj.project_id, obj.folder_id) == allowed):
                             continue
+                        recovery = db.info.get('validated_admin_recovery_roots', {}).get((obj.__tablename__, obj.id))
+                        if (key == 'project_id' and recovery and old[0] == recovery[0]
+                                and admin_recovery_root_allowed(db, obj, user)):
+                            continue
                         raise HTTPException(403, 'Content cannot be moved between ownership containers')
             assert_owned(db, root, user)
+        # Serialize a newly added cycle slot against an administrative case
+        # relocation. A concurrent move cannot leave this slot pointing at a
+        # testcase that now belongs to a different project.
+        from . import models as m
+        for slot in [row for row in db.new if isinstance(row, m.TestExecution)]:
+            cycle = slot.cycle or db.get(m.TestCycle, slot.cycle_id)
+            case = slot.test_case or db.get(m.TestCase, slot.test_case_id)
+            case_id = slot.test_case_id or (case.id if case else None)
+            project_id = case.project_id if case else None
+            if case_id is not None and case not in db.new:
+                persisted = db.query(m.TestCase.project_id).filter(m.TestCase.id == case_id).with_for_update().one_or_none()
+                project_id = persisted[0] if persisted else None
+            if not cycle or project_id != cycle.project_id:
+                raise HTTPException(409, 'The testcase project changed. Refresh the cycle selection before adding it; nothing was added.')
 
 
 def guard_request(db, user, request):

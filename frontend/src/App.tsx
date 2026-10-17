@@ -7,6 +7,7 @@ import { internalNavigationPath } from './requestNavigation'
 import RequestViewer from './components/RequestViewer'
 import DepartmentPrompt from './components/DepartmentPrompt'
 import EmailCompletionPrompt from './components/EmailCompletionPrompt'
+import VendorOrganizationPrompt from './components/VendorOrganizationPrompt'
 import { LoginNoticeCoordinator, MaintenanceWindowBanner, MaintenanceWindowProvider } from './components/MaintenanceWindowNotice'
 import { UserOut } from './types'
 import { hasWorkspaceRole, isViewOnly, uniqueWorkspaceAccess } from './constants'
@@ -228,6 +229,9 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
   }
   else if (user.needs_department_selection) {
     onboarding = <main className="access-pending-page" aria-label="Complete account setup"><DepartmentPrompt /></main>
+  }
+  else if (user.needs_vendor_organization) {
+    onboarding = <main className="access-pending-page" aria-label="Select vendor organization"><VendorOrganizationPrompt /></main>
   }
   else if (isWorkspaceAccessMissing(user)) onboarding = <WorkspaceAccessRequired />
   else if (isAccessApprovalPending(user)) onboarding = <AccessApprovalPending />

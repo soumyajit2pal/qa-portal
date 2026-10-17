@@ -7,7 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from .. import models, schemas, certificate_summary, certificate_revisions
+from .. import models, schemas, certificate_summary, certificate_revisions, certificate_identity
 from ..database import get_db
 from ..pagination import Page, PageParams, apply_search, apply_status_filter, apply_sort, paginate, to_page_response
 from ..deps import (get_workflow_user as get_current_user, require_workflow_roles as require_roles,
@@ -997,6 +997,7 @@ def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, d
     if payload.decision == "Approved":
         _validate_rich_text_before_progress(obj)
         certificate_summary.validate(obj, db)
+        certificate_identity.freeze_preparer(db, obj)
         obj.status = "ISSUED"
         obj.approved_by_id = current_user.id
         _sync_linked_functional_request(db, obj, current_user)
@@ -1132,7 +1133,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         # Mandatory on a fully-Issued certificate -- one name per approval
         # stage of the QA Team -> QA Lead -> Executive  chain.
         ("Requested / Reviewed / Approved", [
-            ("Requested By (QA Team)", uname(obj.requester_id)),
+            ("Prepared By (QA Team)", (obj.prepared_by or {}).get('full_name') or 'Not recorded on this certificate'),
             ("Approved By (QA Lead)", uname(obj.reviewed_by_id)),
             ("Approved By (Executive)", uname(obj.approved_by_id)),
         ]),
@@ -1193,8 +1194,10 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         subtitle="Bank of Maharashtra · Quality Assurance Certificate",
         sections=sections, history=history,
         history_title=None,
-        generated_by=current_user.full_name,
-        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
+        generated_by=certificate_identity.export_identity_label(current_user),
+        generated_at=models.now().isoformat(),
+        generated_by_label="PDF exported by",
+        certificate_preparer=obj.prepared_by or {},
         verification_context=(db, "SIGNOFF", signoff_id),
     )
     return StreamingResponse(

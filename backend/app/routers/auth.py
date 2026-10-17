@@ -762,6 +762,7 @@ def list_users(all_workspaces: bool = False, db: Session = Depends(get_db),
 def list_all_users(
     account_filter: Optional[str] = Query(None, description="'active'|'disabled'|'review', omitted for all"),
     login_type: Optional[str] = None,
+    user_type: Optional[str] = None,
     params: pagination.PageParams = Depends(),
     db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(Role.ADMIN)),
 ):
@@ -789,6 +790,14 @@ def list_all_users(
         q = q.filter(models.User.needs_role_review == True)  # noqa: E712
     if login_type:
         q = q.filter(models.User.login_type == login_type)
+    if user_type:
+        if user_type not in {'STANDARD', 'BANK_STAFF', 'VENDOR'}:
+            raise HTTPException(422, 'Invalid user type')
+        bank_id = func.lower(func.trim(models.User.username)).like('b%')
+        if user_type == 'STANDARD':
+            q = q.filter(models.User.login_type == 'STANDARD')
+        else:
+            q = q.filter(models.User.login_type == 'LDAP', bank_id if user_type == 'BANK_STAFF' else ~bank_id)
     # Search deliberately doesn't cover role labels (unlike Admin.tsx's old
     # client-side search) -- `roles` is a many-to-many join, not a plain
     # column, and role-name search is a small enough slice of this box's
@@ -797,7 +806,8 @@ def list_all_users(
     # column (kept in sync with each user's PRIMARY department), not every
     # secondary department -- a minor, deliberate gap, not a join over
     # department_assignments, for the same low-value-vs-complexity reason.
-    q = pagination.apply_search(q, params, models.User.full_name, models.User.username, models.User.email, models.User.department)
+    q = q.outerjoin(models.VendorOrganization, models.User.vendor_organization_id == models.VendorOrganization.id)
+    q = pagination.apply_search(q, params, models.User.full_name, models.User.username, models.User.email, models.User.department, models.VendorOrganization.name)
     # Reported directly: "Surface accounts awaiting review first" -- a
     # two-column order (needs_role_review desc, then name) that doesn't map
     # onto apply_sort's single-column + id-secondary shape, so it's kept as

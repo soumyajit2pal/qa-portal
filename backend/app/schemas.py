@@ -156,6 +156,11 @@ class UserOut(ORMModel):
     department_unit_ids: List[int] = []
     roles: List[str]
     login_type: str
+    user_type: str = 'STANDARD'
+    vendor_organization_id: Optional[int] = None
+    vendor_organization_name: Optional[str] = None
+    vendor_profile_exempt: bool = False
+    needs_vendor_organization: bool = False
     is_active: bool
     needs_role_review: bool = False
     # True right after first-ever LDAP login until the person picks their own
@@ -2766,7 +2771,19 @@ class SignOffListOut(ORMModel):
     created_at: datetime.datetime
 
 
+class CertificatePreparerOut(BaseModel):
+    user_id: int
+    full_name: str
+    username: str
+    user_type: Literal['BANK_STAFF', 'VENDOR', 'STANDARD']
+    vendor_organization_id: Optional[int] = None
+    vendor_organization_name: Optional[str] = None
+    captured_at: Optional[datetime.datetime] = None
+    is_frozen: bool
+
+
 class SignOffOut(ORMModel):
+    prepared_by: Optional[CertificatePreparerOut] = None
     known_limitations: Optional[str] = None
     business_acceptance_status: Optional[str] = None
     security_testing_status: Optional[str] = None
@@ -3497,6 +3514,44 @@ class TestCaseBulkUpdate(BaseModel):
 
 class TestCaseBulkDelete(BaseModel):
     ids: List[int]
+
+
+class AdminRecoveryPreviewIn(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    kind: Literal['MIGRATION', 'WORKFLOW']
+    reason: str = Field(min_length=5, max_length=2000)
+    source_project_id: Optional[int] = Field(default=None, gt=0)
+    target_project_id: Optional[int] = Field(default=None, gt=0)
+    whole_project: StrictBool = True
+    case_ids: List[int] = Field(default_factory=list, max_length=500)
+    cycle_ids: List[int] = Field(default_factory=list, max_length=500)
+    classification_correction: StrictBool = False
+    request_type: Optional[Literal['FUNCTIONAL', 'SAST', 'DAST', 'PERFORMANCE', 'SUPPRESSION']] = None
+    request_id: Optional[int] = Field(default=None, gt=0)
+    action: Optional[Literal['RETURN_TO_REQUESTER', 'REASSIGN_OWNER', 'REVIEW_READINESS', 'INTERNAL_HOLD']] = None
+    owner_ids: List[int] = Field(default_factory=list, max_length=30)
+    requested_correction: str = Field(default='', max_length=2000)
+    require_dept_head_reapproval: StrictBool = False
+
+
+class AdminRecoveryOut(BaseModel):
+    id: int
+    recovery_key: str
+    kind: str
+    status: str
+    reason: str
+    actor_name: str
+    created_at: str
+    applied_at: Optional[str] = None
+    reversed_at: Optional[str] = None
+    preview: dict
+    changes: List[dict] = Field(default_factory=list)
+    can_reverse: bool = False
+
+
+class AdminRecoveryReverseIn(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    reason: str = Field(min_length=5, max_length=2000)
 
 
 class TestCaseMoveTarget(BaseModel):
