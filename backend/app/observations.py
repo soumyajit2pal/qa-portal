@@ -1,5 +1,8 @@
-"""Observation lifecycle and in-place, audited conversion to a governed defect."""
+"""Independent observation lifecycle and audited creation of a linked defect."""
 import json
+import shutil
+import uuid
+from pathlib import Path
 
 from fastapi import HTTPException
 
@@ -14,7 +17,7 @@ def is_observation(record):
 
 def require_defect(record):
     if is_observation(record):
-        raise HTTPException(400, 'This is an observation. Use its observation workflow or Convert to Defect.')
+        raise HTTPException(400, 'This is an observation. Use its observation workflow or Create defect from observation.')
 
 
 def writable(db, record, user):
@@ -141,32 +144,98 @@ def action(db, obj, payload, user):
 
 def convert(db, obj, payload, user):
     from .routers import defects as d
-    locked(db, obj, payload.revision, user)
+    # Serialize creation on the source. A unique source PK and target unique
+    # constraint also protect against duplicate requests across processes.
+    db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()
+    writable(db, obj, user)
     if not qa_reviewer(user):
-        raise HTTPException(403, 'Only QA can convert an observation to a defect')
+        raise HTTPException(403, 'Only QA can create a defect from an observation')
+    if not is_observation(obj):
+        raise HTTPException(409, 'Select the original observation to create or open its linked defect')
+    existing = db.get(models.ObservationDefectLink, obj.id)
+    if existing:
+        # Idempotent retries return the same DEF, even if the response to the
+        # original request was lost. Never update either workflow on retry.
+        return existing.defect
+    if obj.workflow_revision != payload.revision:
+        raise HTTPException(409, 'Observation changed. Refresh and review before retrying.')
     if payload.environment not in ENVIRONMENTS:
         raise HTTPException(400, 'Select a valid defect environment')
-    reason = d._required(payload.reason, 'Conversion reason')
-    previous, old_key = obj.status, obj.defect_key
-    observation = {'key': old_key, 'status': previous, 'category': obj.observation_category,
-        'outcome': obj.observation_outcome, 'closure_remarks': obj.closure_remarks,
-        'closed_at': obj.closed_at.isoformat() if obj.closed_at else None,
-        'history': obj.workflow_state.get('observation_history', [])}
-    for field in ('severity', 'priority', 'environment', 'module_feature', 'steps_to_reproduce', 'expected_result', 'actual_result'):
-        setattr(obj, field, d._required(getattr(payload, field), field.replace('_', ' ').title()))
-    obj.record_type = 'Defect'
-    obj.defect_key = models.gen_defect_id(db)
-    obj.observation_converted_at = models.now()
-    obj.status = 'New'; obj.closed_at = None; obj.closure_remarks = None
+    reason = d._required(payload.reason, 'Reason for creating a defect')
+    values = {field: d._required(getattr(payload, field), field.replace('_', ' ').title()) for field in
+        ('severity', 'priority', 'environment', 'module_feature', 'steps_to_reproduce', 'expected_result', 'actual_result')}
+    copied = ('title', 'description', 'qa_request_id', 'qa_workspace_id', 'department', 'application_name',
+        'module_name', 'reporter_id', 'execution_id', 'cycle_id', 'primary_test_case_id', 'build_version',
+        'device_details', 'api_endpoint', 'request_response_details', 'log_details', 'related_cr_number',
+        'external_defect_id', 'remarks', 'labels')
     workspace = db.get(models.QAWorkspace, obj.qa_workspace_id)
-    obj.workflow_json = json.dumps(policy(workspace.defect_workflow_json if workspace else None))
-    obj.workflow_state_json = json.dumps({'production_impact': 'Affected' if obj.environment == 'Production' else 'Unknown',
-        'iteration': 0, 'history': [], 'observation': observation,
-        'occurrences': [{'environment': obj.environment, 'build': obj.build_version, 'remarks': f'Converted from {old_key}'}]})
-    obj.workflow_revision += 1
-    # Existing links remain on this same ID. Conversion never rewrites a
-    # testcase result or an earlier attempt's immutable evidence.
-    d._audit(db, obj, user, 'Converted to Defect', f'{old_key} → {obj.defect_key}. Reason: {reason}. Links, documents, comments and observation history retained.',
-        previous_state=previous, new_state='New', step_name='Observation conversion')
-    db.commit(); db.refresh(obj)
-    return obj
+    target = models.Defect(**{field: getattr(obj, field) for field in copied}, **values,
+        record_type='Defect', defect_key=models.gen_defect_id(db), status='New',
+        workflow_json=json.dumps(policy(workspace.defect_workflow_json if workspace else None)),
+        workflow_state_json=json.dumps({'production_impact': 'Affected' if values['environment'] == 'Production' else 'Unknown',
+            'iteration': 0, 'history': [], 'occurrences': [{'environment': values['environment'], 'build': obj.build_version,
+                'remarks': f'Created from {obj.defect_key}'}]}))
+    activity = db.query(models.ApprovalAction).filter_by(entity_type='DEFECT', entity_id=obj.id).order_by(
+        models.ApprovalAction.created_at, models.ApprovalAction.id).all()
+    snapshot = dict(id=obj.id, key=obj.defect_key, title=obj.title, description=obj.description,
+        status=obj.status, category=obj.observation_category, outcome=obj.observation_outcome,
+        revision=obj.workflow_revision, workflow_state=obj.workflow_state,
+        activity=[dict(id=item.id, entity_type=item.entity_type, entity_id=item.entity_id, actor_id=item.actor_id,
+            decision=item.decision, comments=item.comments, actor_name=item.actor_name, actor_role=item.actor_role,
+            created_at=item.created_at.isoformat() if item.created_at else '', step_name=item.step_name,
+            previous_state=item.previous_state, new_state=item.new_state) for item in activity])
+    created_paths = []
+    from . import documents
+    from .storage_config import get_upload_root
+    try:
+        db.add(target); db.flush()
+        db.add(models.ObservationDefectLink(observation=obj, defect=target, created_by_id=user.id,
+            reason=reason, source_snapshot_json=json.dumps(snapshot)))
+        for link in obj.test_case_links:
+            db.add(models.DefectTestCaseLink(defect_id=target.id, test_case_id=link.test_case_id))
+        for link in obj.execution_links:
+            db.add(models.DefectExecutionLink(defect_id=target.id, execution_id=link.execution_id,
+                linked_by_id=link.linked_by_id, created_at=link.created_at))
+        for link in obj.functional_request_links:
+            db.add(models.DefectFunctionalRequestLink(defect_id=target.id, functional_request_id=link.functional_request_id,
+                linked_by_id=link.linked_by_id, linked_at=link.linked_at, reason=link.reason, linked_workflow_revision=0))
+        for entry in obj.cc_entries:
+            db.add(models.DefectCCUser(defect_id=target.id, user_id=entry.user_id,
+                added_by_id=entry.added_by_id, added_at=entry.added_at))
+        # Separate document rows AND bytes keep later attachment deletion on
+        # one record from damaging the other. Original filenames preserve
+        # embedded rich-text image resolution. Comments stay on their OBS.
+        for document in documents.list_documents(db, 'DEFECT', obj.id):
+            relative = str(Path(target.defect_key) / 'DEFECT' / (uuid.uuid4().hex + Path(document.file_name).suffix))
+            destination = Path(get_upload_root()) / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            created_paths.append(destination)
+            try:
+                shutil.copy2(documents.full_path(document), destination)
+            except OSError as error:
+                raise HTTPException(409, f'Could not copy attachment {document.file_name}. Restore its file and retry; the observation is unchanged.') from error
+            db.add(models.RequestDocument(module='DEFECT', request_id=target.id, file_name=document.file_name,
+                stored_path=relative, content_type=document.content_type, file_size=document.file_size,
+                uploaded_by_id=document.uploaded_by_id, uploaded_at=document.uploaded_at))
+        obj.observation_converted_at = models.now()
+        obj.workflow_revision += 1
+        d._audit(db, obj, user, 'Defect Created from Observation',
+            f'Created {target.defect_key} from {obj.defect_key}. Reason: {reason}. Observation status unchanged.',
+            previous_state=obj.status, new_state=obj.status, step_name='Observation escalation')
+        # Use the normal creation event so named participants (including a
+        # reporter who is also the actor) retain the standard notification and
+        # delivery-permission contract. Provenance stays in its audit text.
+        d._audit(db, target, user, 'Created',
+            f'Created from {obj.defect_key}. Reason: {reason}. Details, attachments and links copied; original history retained on the observation.',
+            new_state='New', step_name='Observation escalation')
+        db.commit(); db.refresh(target)
+    except Exception:
+        db.rollback()
+        # An uncertain commit may have succeeded. Only remove bytes that have
+        # no committed document row, using the existing storage convention.
+        for path in created_paths:
+            relative = str(path.relative_to(get_upload_root()))
+            if db.query(models.RequestDocument).filter_by(stored_path=relative).first() is None:
+                path.unlink(missing_ok=True)
+        raise
+    return target

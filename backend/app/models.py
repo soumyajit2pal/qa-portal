@@ -3988,6 +3988,11 @@ class TestCycleChildRequestLink(Base):
 
 
 class TestExecution(Base):
+    @property
+    def verification_gaps(self):
+        from .execution_verification import gaps
+        return gaps(self)
+
     """One test case's *slot* within one cycle -- created (status defaults to
     Not Executed) the moment a test case is added to a cycle. A case is very
     often run more than once before it's genuinely done (e.g. Fail with
@@ -4152,7 +4157,11 @@ class TestExecutionRun(Base):
 
 
 class TestRetest(Base):
-    """Observed attempt, with an append-only final confirmation attempt."""
+    """Frozen attempt context; new results are saved in one action.
+
+    final_run_id points to this run for new saves. Older pending/final
+    confirmation pairs retain their original identifiers and evidence.
+    """
     __tablename__ = 'qap_test_retests'
     run_id = Column(Integer, ForeignKey('qap_test_execution_runs.id'), primary_key=True)
     observed_result = Column(String(20), nullable=False)
@@ -4261,8 +4270,7 @@ class Defect(Base):
     __tablename__ = "qap_defects"
     id = pk_column()
     defect_key = Column(String(40), unique=True, nullable=False, index=True)
-    # Conversion changes classification and business key, never the record ID.
-    # Documents, comments, audit actions and every trace link keep their FK.
+    # Observations keep their own identity when a separate defect is created.
     record_type = Column(String(20), nullable=False, default='Defect', server_default='Defect', index=True)
     observation_key = Column(String(40), nullable=True, unique=True, index=True)
     observation_category = Column(String(60), nullable=True)
@@ -4435,6 +4443,26 @@ class Defect(Base):
         viewonly=True, order_by="TestRunDefect.created_at")
     cc_entries = relationship("DefectCCUser", back_populates="defect", cascade="all,delete-orphan",
                               order_by="DefectCCUser.user_id")
+    observation_escalation = relationship('ObservationDefectLink', foreign_keys='ObservationDefectLink.observation_id',
+        back_populates='observation', uselist=False)
+    defect_origin = relationship('ObservationDefectLink', foreign_keys='ObservationDefectLink.defect_id',
+        back_populates='defect', uselist=False)
+
+    @staticmethod
+    def _record_reference(record):
+        return dict(id=record.id, defect_key=record.defect_key, status=record.status)
+
+    @property
+    def created_defect(self):
+        return self._record_reference(self.observation_escalation.defect) if self.observation_escalation else None
+
+    @property
+    def source_observation(self):
+        return self._record_reference(self.defect_origin.observation) if self.defect_origin else None
+
+    @property
+    def source_observation_history(self):
+        return json.loads(self.defect_origin.source_snapshot_json).get('activity', []) if self.defect_origin else []
 
     @property
     def cc_user_ids(self):
@@ -4550,6 +4578,20 @@ class Defect(Base):
     @property
     def linked_test_case_keys(self):
         return [link.test_case.test_case_key for link in self.test_case_links if link.test_case]
+
+
+class ObservationDefectLink(Base):
+    """One durable, audited escalation; neither record owns the other's workflow."""
+    __tablename__ = 'qap_observation_defect_links'
+    __table_args__ = (UniqueConstraint('defect_id', name='uq_qap_obs_link_target'),)
+    observation_id = Column(Integer, ForeignKey('qap_defects.id', name='fk_qap_obs_link_source'), primary_key=True)
+    defect_id = Column(Integer, ForeignKey('qap_defects.id', name='fk_qap_obs_link_target'), nullable=False)
+    created_by_id = Column(Integer, ForeignKey('qap_users.id', name='fk_qap_obs_link_actor'), nullable=False)
+    created_at = Column(DateTime, default=now, nullable=False)
+    reason = Column(Text, nullable=False)
+    source_snapshot_json = Column(Text, nullable=False)
+    observation = relationship('Defect', foreign_keys=[observation_id], back_populates='observation_escalation')
+    defect = relationship('Defect', foreign_keys=[defect_id], back_populates='defect_origin')
 
 
 class DefectFunctionalRequestLink(Base):

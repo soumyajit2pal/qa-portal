@@ -2514,7 +2514,16 @@ class FunctionalRequestOptionOut(ORMModel):
     status: str
 
 
+class FindingRecordReference(BaseModel):
+    id: int
+    defect_key: str
+    status: str
+
+
 class DefectOut(ORMModel):
+    created_defect: Optional[FindingRecordReference] = None
+    source_observation: Optional[FindingRecordReference] = None
+    source_observation_history: List[dict] = []
     record_type: str = 'Defect'
     observation_key: Optional[str] = None
     observation_category: Optional[str] = None
@@ -2632,6 +2641,8 @@ class DefectAssignmentContext(BaseModel):
 
 
 class DefectListOut(ORMModel):
+    created_defect: Optional[FindingRecordReference] = None
+    source_observation: Optional[FindingRecordReference] = None
     record_type: str = 'Defect'
     observation_key: Optional[str] = None
     observation_category: Optional[str] = None
@@ -4456,7 +4467,7 @@ class RetestOutcomeIn(BaseModel):
 
 class ExecutionRetestCreate(BaseModel):
     expected_run_version: int = Field(ge=0)
-    observed_result: Literal['Passed', 'Failed', 'Blocked']
+    observed_result: Literal['Passed', 'Failed', 'Blocked', 'NA']
     actual_result: str = Field(min_length=1, max_length=10000)
     tested_build: str = Field(min_length=1, max_length=150)
     evidence_reference: Optional[str] = Field(default=None, max_length=2000)
@@ -4515,6 +4526,7 @@ class TestExecutionRunOut(ORMModel):
 
 
 class TestExecutionOut(ORMModel):
+    verification_gaps: List[dict] = []
     id: int
     cycle_id: int
     test_case_id: int
@@ -4722,6 +4734,7 @@ class VersionImpactOut(BaseModel):
 
 
 class RequirementTraceabilityRowOut(ISTResponseModel):
+    verification_gaps: List[dict] = []
     """One repository testcase in one cycle, or its uncovered repository row."""
     row_id: str
     test_case_id: int

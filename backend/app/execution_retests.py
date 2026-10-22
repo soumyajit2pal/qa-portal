@@ -127,122 +127,107 @@ def _act(db, defect, user, status, reference, build, notes=None, context=None):
         verification_confirmed=status == 'Closed'), db, user, commit=False)
 
 
+def _receipt(db, defect, obj, retest, outcome, user):
+    """Record QA coverage without changing a defect's lifecycle or owners."""
+    from .routers import defects
+    state = defect.workflow_state
+    event = dict(kind='verification', stage='Execution retest', result='Passed',
+        execution_id=obj.id, run_id=retest.run_id, retest_outcome_id=outcome.id,
+        pinned_version_id=obj.pinned_version_id, iteration=_iteration(defect),
+        environment=retest.environment, build=retest.tested_build,
+        reference=outcome.evidence_reference, evidence_documents=outcome.evidence_documents,
+        at=models.now().isoformat(), user_id=user.id, user_name=user.full_name,
+        verification_confirmed=True, confirmation_revision=defect.workflow_revision)
+    state.setdefault('history' if defect.modern_workflow else 'execution_verifications', []).append(event)
+    defect.workflow_state_json=json.dumps(state)
+    defect.workflow_revision += 1
+    outcome.defect_revision = defect.workflow_revision
+    defects._audit(db, defect, user, 'Retest Verified',
+        f'Passed execution #{obj.id}, attempt #{retest.run.attempt_no} in {retest.environment}. Defect status remains {defect.status}.',
+        step_name='Traceability')
+
+
 def record(db, execution_id, payload, user, files=()):
     from .routers import test_execution as execution, defects
     obj = _context(db, execution_id, user)
     if obj.run_version != payload.expected_run_version:
-        raise HTTPException(409, 'Execution changed. Refresh before recording a retest.')
+        raise HTTPException(409, 'Execution changed. Refresh before saving the result.')
     _, prior, _ = execution._execution_lock_state(db, obj.id)
     if not prior:
         raise HTTPException(400, 'A retest requires an earlier Failed or Blocked attempt')
     if not payload.actual_result.strip() or not payload.tested_build.strip():
-        raise HTTPException(400, 'Observed result and tested build are required')
+        raise HTTPException(400, 'Actual result and tested build are required')
     execution._validate_result_evidence(list(files))
-    # Deterministic row-lock ordering serializes against workflow actions.
-    governed = {d.id:d for d in db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(or_(models.Defect.execution_id==obj.id,
-        models.Defect.execution_links.any(models.DefectExecutionLink.execution_id==obj.id))).order_by(models.Defect.id).with_for_update().populate_existing().all()}
+    governed = {d.id:d for d in db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(or_(
+        models.Defect.execution_id == obj.id,
+        models.Defect.execution_links.any(models.DefectExecutionLink.execution_id == obj.id)
+    )).order_by(models.Defect.id).with_for_update().populate_existing().all()}
     external = {link.id:link for link in db.query(models.TestRunDefect).join(models.TestExecutionRun).filter(
         models.TestExecutionRun.execution_id == obj.id, models.TestRunDefect.is_historical == False,
         or_(models.TestRunDefect.defect_url.is_(None), ~models.TestRunDefect.defect_url.startswith('/defects'))).all()}
-    seen=set(); selected=[]
+    seen, selected = set(), []
     for item in payload.outcomes:
         if bool(item.defect_id) == bool(item.external_link_id):
-            raise HTTPException(400, 'Select exactly one linked internal or external defect per outcome')
-        key=('internal',item.defect_id) if item.defect_id else ('external',item.external_link_id)
-        if key in seen: raise HTTPException(409, 'A defect outcome was supplied twice')
+            raise HTTPException(400, 'Select exactly one internal or external finding per outcome')
+        key = ('internal', item.defect_id) if item.defect_id else ('external', item.external_link_id)
+        if key in seen:
+            raise HTTPException(409, 'A finding outcome was supplied twice')
         seen.add(key)
-        defect=governed.get(item.defect_id) if item.defect_id else None
-        link=external.get(item.external_link_id) if item.external_link_id else None
-        if not defect and not link: raise HTTPException(404, 'The selected defect is not actively linked to this execution')
-        # The attempt's actual result and evidence are shared unless a finding
-        # has specific details. Omitted findings are not recorded as Not tested.
-        if item.outcome in {'Failed', 'Blocked'} and not (item.notes or payload.actual_result).strip():
-            raise HTTPException(400, 'Failed and Blocked outcomes need an observed reason')
-        if item.outcome in {'Passed','Failed'} and not (item.evidence_reference or payload.evidence_reference or '').strip() and not files:
-            raise HTTPException(400, 'Passed and Failed defect outcomes need evidence or a reference')
+        defect = governed.get(item.defect_id) if item.defect_id else None
+        link = external.get(item.external_link_id) if item.external_link_id else None
+        if not defect and not link:
+            raise HTTPException(404, 'The selected finding is not actively linked to this execution')
         if defect:
-            defects._get_mutable(defect.id,db,user)
+            defects._get_mutable(defect.id, db, user)
             if item.expected_defect_revision != defect.workflow_revision:
-                raise HTTPException(409, f'{defect.defect_key} changed. Refresh the retest.')
-            if item.outcome in {'Passed','Failed'}:
-                stages={'Ready for QA','QA Testing'} if defect.modern_workflow else {'Resolved','Retest'}
-                later={'Business Acceptance','Ready for Release','Production Verification','Closed'} if defect.modern_workflow else {'Closed'}
-                if item.outcome == 'Passed' and defect.status not in stages | later and execution._defect_blocks_execution(defect,obj.cycle,execution_id=obj.id):
-                    raise HTTPException(400, f'{defect.defect_key}: submit the fix for QA before recording Passed')
-                if item.outcome == 'Failed' and defect.status not in stages | {'Reopened'}:
-                    raise HTTPException(400, f'{defect.defect_key}: use its lifecycle action to reopen this finding before recording failed verification')
-        selected.append((item,defect,link))
-    if not selected:
-        if payload.observed_result != 'Passed':
-            raise HTTPException(400, 'Select at least one finding that was retested')
-        final_outcomes(db, obj, governed.values(), external.values())
-        if not (payload.evidence_reference or '').strip() and not files:
-            raise HTTPException(400, 'A fresh testcase pass needs evidence or a reference')
-    elif not any(item.outcome in {'Passed','Failed','Blocked'} for item,_,_ in selected):
-        approved_exceptions=payload.observed_result=='Passed' and all(defect and (
-            defect.status in execution._DEFECT_UNCONDITIONAL_CLEAR_STATUSES or
-            (defect.status=='Closed' and defect.resolution_type=='Accepted Risk')) for _,defect,_ in selected)
-        if not approved_exceptions:
-            raise HTTPException(400, 'Record at least one tested or blocked finding')
-    status={'Passed':'Retest Pending','Failed':'Fail','Blocked':'Blocked'}[payload.observed_result]
-    if payload.observed_result=='Passed' and any(item.outcome in {'Failed','Blocked'} for item,_,_ in selected):
-        raise HTTPException(400, 'A passing observation cannot contain a Failed or Blocked finding')
-    run=execution._record_attempt(db,obj,status,payload.actual_result.strip(),
-        (payload.evidence_reference or '').strip()[:255] or None,None,user)
-    retest=models.TestRetest(run=run,observed_result=payload.observed_result,environment=obj.cycle.environment,
-        tested_build=payload.tested_build.strip(),pinned_version_id=obj.pinned_version_id)
-    db.add(retest);db.flush()
-    created=[]
+                raise HTTPException(409, f'{defect.defect_key} changed. Refresh the result form.')
+        selected.append((item, defect, link))
+    if payload.observed_result == 'Passed' and any(item.outcome in {'Failed', 'Blocked'} for item, _, _ in selected):
+        raise HTTPException(400, 'A passing testcase result cannot contain a Failed or Blocked finding')
+    status = {'Passed':'Retest Passed', 'Failed':'Fail', 'Blocked':'Blocked', 'NA':'NA'}[payload.observed_result]
+    run = execution._record_attempt(db, obj, status, payload.actual_result.strip(),
+        (payload.evidence_reference or '').strip()[:255] or None, None, user, capture_context=False)
+    retest = models.TestRetest(run=run, observed_result=payload.observed_result,
+        environment=obj.cycle.environment, tested_build=payload.tested_build.strip(),
+        pinned_version_id=obj.pinned_version_id, final_run_id=run.id)
+    db.add(retest); db.flush()
+    created = []
     try:
         if files:
-            created=documents.save_documents(db,execution._RESULT_IMAGE_MODULE,run.id,
-                f'execution-{obj.id}-attempt-{run.attempt_no}',list(files),user.id,commit=False)
-        snapshot=[{'id':doc.id,'file_name':doc.file_name,'module':doc.module,'request_id':run.id} for doc in created]
-        for item,defect,link in selected:
-            reference=(item.evidence_reference or payload.evidence_reference or '').strip() or (f'Execution #{obj.id}, attempt #{run.attempt_no} evidence' if snapshot else None)
-            notes=(item.notes or (payload.actual_result if item.outcome in {'Failed','Blocked'} else '')).strip() or None
-            captured_iteration=_iteration(defect) if defect else None
-            captured_status=defect.status if defect else link.defect_status
-            if defect and item.outcome in {'Passed','Failed'}:
-                try:
-                    _reviewer(db,defect,user);can_review=True
-                except HTTPException:
-                    can_review=False
-                matching_qa_environment=not defect.modern_workflow or defect.workflow['qa_environment']==retest.environment
-                if defect.status in {'Ready for QA','Resolved'} and (can_review or not defect.modern_workflow) and matching_qa_environment:
-                    _act(db,defect,user,'QA Testing' if defect.modern_workflow else 'Retest',reference,retest.tested_build)
-                captured_status=defect.status
-                before_revision=defect.workflow_revision
-                if item.outcome=='Failed' and defect.status in {'Ready for QA','QA Testing','Retest'}:
-                    _act(db,defect,user,'Reopened',reference,retest.tested_build,notes,
-                         {'execution_id':obj.id,'run_id':run.id,'pinned_version_id':obj.pinned_version_id})
-            else: before_revision=defect.workflow_revision if defect else None
-            if link and item.outcome=='Failed':
-                link.defect_status='Reopened'
-                db.add(models.ApprovalAction(entity_type='TEST_CASE',entity_id=obj.test_case_id,step_name='External Retest Observation',
-                    actor_id=user.id,actor_role=user.roles_csv,decision='External Retest Failed',
-                    comments=f'{link.defect_key}: local reference marked Reopened after attempt #{run.attempt_no}. Tracker status must be checked separately. {notes} Evidence: {reference}.',
-                    previous_state=captured_status,new_state='Reopened'))
-            outcome=models.TestRetestOutcome(retest=retest,defect_id=defect.id if defect else None,
-                external_link_id=link.id if link else None,defect_key=defect.defect_key if defect else link.defect_key,
-                defect_status=captured_status,
-                outcome=item.outcome,notes=notes,evidence_reference=reference,
-                evidence_documents_json=json.dumps(snapshot),defect_revision=before_revision,
-                fix_iteration=captured_iteration)
-            db.add(outcome)
+            created = documents.save_documents(db, execution._RESULT_IMAGE_MODULE, run.id,
+                f'execution-{obj.id}-attempt-{run.attempt_no}', list(files), user.id, commit=False)
+        snapshot = [{'id':doc.id, 'file_name':doc.file_name, 'module':doc.module, 'request_id':run.id} for doc in created]
+        for item, defect, link in selected:
+            reference = (item.evidence_reference or payload.evidence_reference or '').strip() or (
+                f'Execution #{obj.id}, attempt #{run.attempt_no} evidence' if snapshot else None)
+            outcome = models.TestRetestOutcome(retest=retest, defect_id=defect.id if defect else None,
+                external_link_id=link.id if link else None, defect_key=defect.defect_key if defect else link.defect_key,
+                defect_status=defect.status if defect else link.defect_status, outcome=item.outcome,
+                notes=(item.notes or '').strip() or None, evidence_reference=reference,
+                evidence_documents_json=json.dumps(snapshot), defect_revision=defect.workflow_revision if defect else None,
+                fix_iteration=_iteration(defect) if defect else None)
+            db.add(outcome); db.flush()
             if defect:
-                defects._audit(db,defect,user,'Retest Observed',
-                    f'Execution #{obj.id}, attempt #{run.attempt_no}: {item.outcome}. {notes or ""} Evidence: {reference}.',
-                    step_name='Traceability')
+                defects._audit(db, defect, user, 'Retest Observed',
+                    f'Execution #{obj.id}, attempt #{run.attempt_no}: {item.outcome} in {retest.environment}. '
+                    f'Defect status retained as {defect.status}. Evidence: {reference or "Not supplied"}.', step_name='Traceability')
+                if item.outcome == 'Passed' and (reference or snapshot) and defect.status in {
+                        'Ready for QA', 'QA Testing', 'Resolved', 'Retest', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'Closed'}:
+                    try:
+                        _reviewer(db, defect, user)
+                    except HTTPException:
+                        pass
+                    else:
+                        _receipt(db, defect, obj, retest, outcome, user)
         db.commit()
     except Exception:
         db.rollback()
-        # Commit outcome may be uncertain: remove only unreferenced new bytes.
         for doc in created:
             try:
                 if db.query(models.RequestDocument.id).filter_by(stored_path=doc.stored_path).first() is None:
                     os.remove(documents.full_path(doc))
-            except Exception: pass
+            except Exception:
+                pass
         raise
     db.refresh(obj)
     return obj
@@ -252,10 +237,10 @@ def verify(db,execution_id,run_id,outcome_id,payload,user):
     from .routers import test_execution as execution, defects
     obj=_context(db,execution_id,user,require_runner=False)
     run=execution._run_or_404(db,obj,run_id)
-    if not run.retest or run.retest.final_run_id: raise HTTPException(409,'This retest is not awaiting verification')
+    if not run.retest: raise HTTPException(409,'This attempt has no retained retest evidence')
     latest=execution._latest_run_or_404(db,obj)
-    if not latest.retest or latest.retest.final_run_id:
-        raise HTTPException(409,'Record a current retest before verification')
+    if latest.id != run.id:
+        raise HTTPException(409,'Review the latest saved result instead')
     retest=run.retest
     if retest.environment!=obj.cycle.environment or retest.pinned_version_id!=obj.pinned_version_id:
         raise HTTPException(409,'Execution context changed; record a fresh retest')
@@ -273,34 +258,7 @@ def verify(db,execution_id,run_id,outcome_id,payload,user):
     if payload.expected_defect_revision!=defect.workflow_revision or outcome.fix_iteration!=_iteration(defect):
         raise HTTPException(409,'The defect or fix changed; record a fresh retest')
     if outcome_verified(outcome): raise HTTPException(409,'This observed fix is already verified')
-    context={'execution_id':obj.id,'run_id':run.id,'retest_outcome_id':outcome.id,'pinned_version_id':obj.pinned_version_id,
-             'evidence_documents':outcome.evidence_documents,'reference':outcome.evidence_reference}
-    if defect.modern_workflow:
-        if defect.workflow['qa_environment']!=retest.environment: raise HTTPException(400,'Retest environment does not match QA verification')
-        if defect.status=='Ready for QA':
-            _act(db,defect,user,'QA Testing',outcome.evidence_reference,retest.tested_build)
-        if defect.status=='QA Testing':
-            _act(db,defect,user,defect.workflow_transitions[0],outcome.evidence_reference,retest.tested_build,outcome.notes,context)
-        elif defect.status in {'Business Acceptance','Ready for Release','Production Verification','Closed'} and defect.resolution_type=='Fixed':
-            state=defect.workflow_state
-            state.setdefault('history',[]).append(dict(context,kind='verification',result='Passed',
-                iteration=_iteration(defect),environment=retest.environment,build=retest.tested_build,
-                at=models.now().isoformat(),user_id=user.id,user_name=user.full_name,verification_confirmed=True,
-                stage='QA Testing',confirmation_revision=payload.expected_defect_revision,
-                reference=outcome.evidence_reference))
-            defect.workflow_state_json=json.dumps(state);defect.workflow_revision+=1
-            defects._audit(db,defect,user,'Retest Verified',f'Passed execution #{obj.id}, attempt #{run.attempt_no}.',step_name='Traceability')
-        else: raise HTTPException(400,'This defect is not at QA verification; preserve later lifecycle ownership')
-    else:
-        if defect.status=='Resolved': _act(db,defect,user,'Retest',outcome.evidence_reference,retest.tested_build)
-        if defect.status=='Retest': _act(db,defect,user,'Closed',outcome.evidence_reference,retest.tested_build,outcome.notes)
-        elif defect.status!='Closed': raise HTTPException(400,'The defect is not awaiting retest verification')
-        else: defect.workflow_revision+=1
-        state=defect.workflow_state
-        state.setdefault('execution_verifications',[]).append(dict(context,result='Passed',iteration=_iteration(defect),
-            environment=retest.environment,build=retest.tested_build,at=models.now().isoformat(),user_id=user.id,verification_confirmed=True))
-        defect.workflow_state_json=json.dumps(state)
-        defects._audit(db,defect,user,'Retest Verified',f'Passed execution #{obj.id}, attempt #{run.attempt_no}; evidence: {outcome.evidence_reference}.',step_name='Traceability')
+    _receipt(db, defect, obj, retest, outcome, user)
     db.commit();db.refresh(obj)
     return obj
 
@@ -321,11 +279,9 @@ def finalize(db,execution_id,run_id,payload,user):
     external=db.query(models.TestRunDefect).join(models.TestExecutionRun).filter(
         models.TestExecutionRun.execution_id==obj.id,models.TestRunDefect.is_historical==False,
         or_(models.TestRunDefect.defect_url.is_(None),~models.TestRunDefect.defect_url.startswith('/defects'))).all()
-    reused=final_outcomes(db,obj,governed,external)
-    violation=execution._execution_status_gate(db,obj.id,'Retest Passed',retest_run_id=run.id)
-    if violation: raise HTTPException(400,violation)
+    reused=[]  # Legacy pending attempts can finish without linked-defect locks.
     final=execution._record_attempt(db,obj,'Retest Passed',
-        f'Confirmed retest attempt #{run.attempt_no}.\n{run.actual_result}',run.test_run_artifacts,None,user)
+        f'Confirmed retest attempt #{run.attempt_no}.\n{run.actual_result}',run.test_run_artifacts,None,user,capture_context=False)
     retest.final_run_id=final.id
     db.add(models.ApprovalAction(entity_type='TEST_CASE',entity_id=obj.test_case_id,step_name='Retest Confirmation',
         actor_id=user.id,actor_role=user.roles_csv,decision='Retest Confirmed',comments=f'Attempt #{run.attempt_no} confirmed as final attempt #{final.attempt_no}. Original observations and evidence retained. Outcome receipts: {", ".join(str(row.id) for row in reused)}.'))

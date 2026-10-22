@@ -1159,21 +1159,28 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     else:
         sections.append(('Sections B–D – Evidence snapshot', [('Availability', 'Legacy certificate: no frozen automatic summary. Refresh requires full reapproval.')]))
     sections.append(('Section E – QA Clearance Remarks', remarks))
+    gap_fields = [('Assessment', 'Not captured in this certificate revision')]
+    if snapshot and 'verification_gaps' in snapshot:
+        gaps = snapshot['verification_gaps']
+        gap_fields = [('Summary', f"{len(gaps)} verification gaps. Execution results and defect workflow statuses are recorded separately.")]
+        gap_fields += [(f"{row.get('test_case_key') or row['execution_id']} · {row['defect_key']}",
+                        f"Result: {row['result']} | Tested environment: {row['environment']} | Defect: {row['defect_status']}. {row['message']}") for row in gaps]
+    sections.append(('Execution Verification Gaps', gap_fields))
     if snapshot and 'recorded_observations' in snapshot:
         recorded = snapshot['recorded_observations']
         observation_rows = [('Summary', f"{snapshot['observation_summary']['total']} observations · {snapshot['observation_summary']['open']} open · {snapshot['observation_summary']['closed']} closed. Recorded separately from defects and frozen at evidence capture.")]
         for row in recorded:
-            observation_rows.extend([
-                (row['observation_key'], f"{row['title']} | Category: {row['category']} | Status: {row['status']} | Outcome: {row.get('outcome') or 'Pending review'}"),
-                ('Observation details', RichTextValue(row['description'])),
-            ])
-            if row.get('closure_remarks'):
-                observation_rows.append(('Closure reason', row['closure_remarks']))
+            observation_rows.append((row['observation_key'], row['title']))
         if not recorded:
             observation_rows.append(('Observations', 'No linked observation records at evidence capture.'))
     else:
         observation_rows = [('Availability', 'Observation records were not captured in this certificate revision.')]
     sections.append(('Recorded Observations', observation_rows))
+    escalation_rows = [(f"{row['observation']['defect_key']} → {row['defect']['defect_key']}",
+        f"Observation: {row['observation']['status']} | Defect: {row['defect']['status']}. {row['reason']}")
+        for row in (snapshot or {}).get('observation_defect_links', [])]
+    sections.append(('Defects Created from Observations', escalation_rows or [('Availability',
+        'No linked escalations at evidence capture.' if 'observation_defect_links' in (snapshot or {}) else 'Not captured in this certificate revision.')]))
     observations = snapshot.get('observations', []) if snapshot else []
     manual_observations = (snapshot.get('conditional_observations', '') if snapshot else obj.conditional_observations) or ''
     observation_fields = [('User-entered observations', RichTextValue(manual_observations))] if manual_observations.strip() else [

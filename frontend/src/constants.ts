@@ -933,8 +933,10 @@ export const REPORTS: ReportDef[] = [
   { key: 'functional-request-register', label: 'Functional Request Register', group: 'Operational', description: 'Functional workflow status, change/release context, QA Lead and tester assignments.' },
   { key: 'test-cycle-summary', label: 'Test Cycle Execution Summary', group: 'Operational', description: 'Cycle scope, assignment coverage, completion and latest execution results.' },
   { key: 'testcase-register', label: 'Testcase Register', group: 'Operational', description: 'Every current testcase with requirement IDs, project, status, version, creator and created/imported date.' },
+  { key: 'execution-verification-gaps', label: 'Execution Verification Gaps', group: 'Operational', description: 'Recorded results with pending QA coverage, environment differences and linked defect warnings.' },
   { key: 'execution-attempt-register', label: 'Execution Attempt History', group: 'Operational', description: 'Each immutable test run, including failures followed by retests, runner, result and linked defects.' },
   { key: 'defect-retest-register', label: 'Defect & Retest Register', group: 'Operational', description: 'Governed defect lifecycle, ownership, resolution and retest evidence.' },
+  { key: 'observation-register', label: 'Observation Register', group: 'Operational', description: 'Observations, review outcomes and linked defects with independent statuses and separate counts.' },
   { key: 'performance-testing', label: 'Performance Testing Register', group: 'Operational', description: 'Performance requests, workload target, environment, assignment and report state.' },
   { key: 'sast-scan', label: 'SAST Scan Register', group: 'Security', description: 'SAST requests, application/build, workflow state and finding volume.' },
   { key: 'dast-scan', label: 'DAST Scan Register', group: 'Security', description: 'DAST requests, target environment, workflow state and finding volume.' },
@@ -1082,88 +1084,24 @@ export function activeExternalExecutionDefects(runs: { defects?: AttemptDefectRe
     && !['RESOLVED', 'CLOSED'].includes((defect.defect_status || 'Open').trim().toUpperCase()))
 }
 
-// Mirrors the backend's own _execution_status_gate (test_execution.py)
-// exactly -- see that function's docstring for the full reasoning. Purely
-// for disabling the blocked option and explaining why before the user even
-// submits -- the backend enforces the same rule regardless of what this
-// returns, so a stale/unrefreshed row can't bypass it.
-//
-// Two layers:
-// 1. While any governed Defect linked to this slot is still active (not
-//    Deferred/Closed), every status is blocked -- the execution is fully
-//    locked until the defect(s) clear.
-// 2. Once clear (or nothing was ever linked), but this slot has EVER
-//    recorded a 'Fail' or 'Blocked': 'Pass' remains blocked for the rest of
-//    its history -- a defect-corrected pass is always 'Retest Passed'. 'NA'
-//    is permitted only for a Change Request Raised outcome carrying a CR reference.
-//    'Fail' (failed again on retest) requires a Defect Key to be entered
-//    (defectKeyInput) -- the backend additionally verifies that key
-//    resolves to an existing, currently-active governed Defect, which this
-//    client-side check can't do without a round trip.
+// Verification coverage is shown as a warning, independently of result entry.
 export function usesRetestForm(execution: {
   id?: number; status: string; linked_defects?: ExecutionLinkedDefect[]; runs?: { status: string; retest?: { final_run_id?: number | null } | null; defects?: AttemptDefectReference[] }[]
 }): boolean {
-  // Preserve the existing governed NA path for a converted Change Request.
-  if (execution.linked_defects?.some(defect => defect.status === 'Change Request Raised' && !!defect.related_cr_number?.trim())
-      && execution.linked_defects.every(defect => !defectBlocksExecution(defect, execution.id))
-      && !activeExternalExecutionDefects(execution.runs).length) return false
-  if (!hasRetestEligibleHistory(execution.runs, execution.status)) return false
-  const latest = execution.runs?.at(-1)
-  // An observation still awaiting confirmation must finish its recorded flow.
-  if ((latest?.retest && !latest.retest.final_run_id) || execution.status === 'Retest Pending') return true
-  // Cleared findings use the ordinary Run result buttons, including Retest Passed.
-  return !!execution.linked_defects?.some(defect => defectBlocksExecution(defect, execution.id))
-    || !!activeExternalExecutionDefects(execution.runs).length
+  return hasRetestEligibleHistory(execution.runs, execution.status)
 }
 
 export function executionStatusGate(
   linkedDefects: ExecutionLinkedDefect[] | undefined,
   runs: { status: string; defects?: AttemptDefectReference[] }[] | undefined,
-  status: string,
-  defectKeyInput?: string,
-  currentStatus?: string,
-  executionId?: number,
+  status: string, defectKeyInput?: string, currentStatus?: string, executionId?: number,
 ): string | null {
-  if (!['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed'].includes(status)) return null
-  if (currentStatus === 'Retest Pending' && ['Pass', 'Retest Passed'].includes(status)) return 'Use Confirm final retest after the per-defect verification checks are satisfied.'
-  const activeDefects = (linkedDefects || []).filter((defect) => defectBlocksExecution(defect, executionId))
-  if (activeDefects.length) {
-    const names = activeDefects.map((d) => `${d.defect_key} (${d.status})`).join(', ')
-    return `Final passing result requires linked defect verification (${names}). Use the execution form to record ready fixes and evidence before verification. Check the actual cycle environment. Build numbers remain visible as audit evidence, but do not need to match the cycle build.`
-  }
-  const externalDefects = activeExternalExecutionDefects(runs)
-  if (externalDefects.length) {
-    const names = externalDefects.map(defect => `${defect.defect_key} (${defect.defect_status || 'Open'})`).join(', ')
-    return `External defects are still unresolved (${names}). Confirm the fix in the external tracker and update each recorded status to Resolved or Closed before retesting.`
-  }
-  // currentStatus is a compatibility fallback for executions recorded
-  // before immutable attempt history existed. A genuinely new slot is
-  // 'Not Executed', so it cannot satisfy this condition.
-  const hasPriorFailedOrBlocked = (runs || []).some((run) => ['Fail', 'Blocked'].includes(run.status))
-    || ((runs || []).length === 0 && ['Fail', 'Blocked'].includes(currentStatus || ''))
-  if (status === 'Retest Passed' && !hasPriorFailedOrBlocked) {
-    return "'Retest Passed' is available only after this testcase has a previous Failed or Blocked execution attempt."
-  }
-  const changeRequestDefects = (linkedDefects || []).filter((defect) => defect.status === 'Change Request Raised')
-  if (status === 'NA' && changeRequestDefects.length) {
-    const missingReference = changeRequestDefects.filter((defect) => !(defect.related_cr_number || '').trim())
-    if (missingReference.length) {
-      return `NA cannot be recorded because the linked Change Request Raised defect(s) do not have a CR/enhancement reference: ${missingReference.map((defect) => defect.defect_key).join(', ')}. Update the defect decision first.`
-    }
-    return null
-  }
-  if (!hasPriorFailedOrBlocked) return null
-  if (status === 'Pass' || status === 'NA') {
-    return `this test case failed or was blocked earlier in its history -- '${status}' is no longer available. Select 'Retest Passed' after a delivered fix, or 'NA' only when the finding was converted to a Change Request Raised defect with a valid CR reference.`
-  }
-  if (status === 'Fail' && !(defectKeyInput || '').trim()) {
-    return 'this test case is failing again after a resolved defect -- reopen the existing defect, link another active defect, or create a new defect in Defect Management, then reference its Defect Key here before recording this Fail.'
+  if (status === 'Retest Passed' && !hasRetestEligibleHistory(runs, currentStatus)) {
+    return "Use Pass for a first success; Retest Passed follows an earlier Failed or Blocked attempt."
   }
   return null
 }
 
-// Used to remove Retest Passed from result pickers until it is a valid
-// transition. The backend independently enforces the same rule.
 export function hasRetestEligibleHistory(
   runs: { status: string }[] | undefined,
   currentStatus?: string,

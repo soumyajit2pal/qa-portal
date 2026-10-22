@@ -1015,17 +1015,10 @@ def _verified_for_cycle(defect, cycle):
 
 
 def _execution_lock_state(db: Session, execution_id: int):
-    """Returns (active_defects, has_prior_failed_or_blocked, defects) for the status gate.
-    active_defects -- every governed Defect (defects.py) linked to this slot
-    through its primary execution or an additional execution trace, whose
-    own status is not yet Deferred/Duplicate/QA-confirmed Not a Defect/
-    Change Request Raised, or a properly verified Closed status; a
-    non-empty list here is what drives the full lock. The second value is True
-    if any attempt ever recorded on this slot (TestExecutionRun.status) was
-    'Fail' or 'Blocked'. It enables Retest Passed and drives the permanent
-    'Pass'/'NA' block for the rest of this slot's history, regardless of
-    whether a defect is linked right now. The mirrored current status is a
-    compatibility fallback for results saved before run history existed."""
+    """Return findings lacking coverage, previous failure history and linked records.
+
+    Coverage gaps are reporting warnings; result entry never depends on them.
+    """
     defects = db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(or_(
         models.Defect.execution_id == execution_id,
         models.Defect.execution_links.any(models.DefectExecutionLink.execution_id == execution_id),
@@ -1047,16 +1040,9 @@ def _execution_lock_state(db: Session, execution_id: int):
 
 
 def _defect_blocks_execution(defect, cycle, verification_check=None, execution_id=None) -> bool:
-    """Return whether one governed defect still locks a linked execution.
+    """Compatibility coverage predicate used by warnings and workflow reporting.
 
-    Non-remediation outcomes short-circuit before environment verification. This is
-    particularly important for Duplicate: a duplicate has no fix or
-    verification of its own, so ``verified_for`` can never clear it. The same
-    applies to a modern Accepted Risk closure. Legacy Closed defects retain
-    their historic clear behavior, while modern Fixed closures still need
-    verification for the execution's environment.
-    Any active canonical defect remains independently authoritative when
-    linked.
+    Missing coverage does not prevent recording an execution result.
     """
     if getattr(defect, 'record_type', None) == 'Observation':
         return False
@@ -1083,111 +1069,11 @@ def _defect_blocks_execution(defect, cycle, verification_check=None, execution_i
 
 def _execution_status_gate(db: Session, execution_id: int, status_value: str,
                            defect_key: str = "", retest_run_id=None) -> "str | None":
-    """Reported directly, in two parts, in this order:
-
-    1. "testcase already failed, and defect also linked, then why again
-       allowing to marked failed" -- clarified into a full spec: while ANY
-       governed Defect linked to this slot is still active (not Deferred,
-       Duplicate, another terminal disposition, or verified Closed), the
-       execution is completely locked -- no new attempt of any
-       status (Pass/Fail/Blocked/NA/Retest Passed) may be recorded through
-       any endpoint, matching the earlier-reported "keep the execution
-       status as Fail... prevent status modification through the UI/APIs/
-       bulk updates" requirement. There is deliberately no exception here,
-       including for a fresh 'Fail' -- while a defect is open, the defect is
-       what needs attention, not another execution attempt.
-
-    2. 'Retest Passed' is never a first-attempt/general result. It requires
-       at least one earlier 'Fail' or 'Blocked' attempt on the same slot.
-
-    3. Once every linked defect clears (or none was ever linked), but this
-       slot has EVER recorded a 'Fail' or 'Blocked': 'Pass' remains permanently blocked
-       for the rest of this slot's history (a defect-corrected pass is
-       always 'Retest Passed', never 'Pass' -- keeps "clean first try" and
-       "passed after a fix" distinguishable in reporting). 'NA' is allowed
-       only when a linked defect is Change Request Raised with a populated
-       CR/enhancement reference. 'Retest Passed'
-       and 'Blocked' are available. A fresh 'Fail' (failed again on retest)
-       requires a defect_key that resolves to an existing, currently-active
-       governed Defect -- reopen the existing one, link a different active
-       one, or create a new one in Defect Management first, then reference
-       its key here. This is deliberately NOT auto-reopened from here: doing
-       so would mutate defects.py's own Defect.status state machine (and its
-       audit trail) as a side effect of a Test Execution save, which is a
-       bigger, riskier change than this endpoint owning -- the tester takes
-       that action explicitly in Defect Management, then comes back here.
-
-    Returns a human-readable reason, or None if nothing blocks status_value."""
-    if status_value not in ("Pass", "Fail", "Blocked", "NA", "Retest Passed"):
-        return None
-    latest = db.query(models.TestExecutionRun).filter_by(execution_id=execution_id).order_by(models.TestExecutionRun.attempt_no.desc()).first()
-    if latest and latest.retest and not latest.retest.final_run_id and latest.status == 'Retest Pending' and status_value in {'Pass','Retest Passed'} and retest_run_id != latest.id:
-        return 'Use Confirm final retest after the per-defect verification checks are satisfied.'
-    active_defects, has_prior_failed_or_blocked, linked_defects = _execution_lock_state(db, execution_id)
-    if active_defects:
-        names = ", ".join(f"{d.defect_key} ({d.status})" for d in active_defects)
-        return (
-            f"Linked defect verification does not cover this execution ({names}). "
-            "Check the environment in Edit Cycle. A Closed workflow defect needs verification in that same "
-            "environment, regardless of build number."
-        )
-    external_defects = _active_external_defects(db, execution_id)
-    if external_defects:
-        names = ', '.join(f'{link.defect_key} ({link.defect_status or "Open"})' for link in external_defects)
-        return (f'External defects are still unresolved ({names}). Confirm the fix in the external tracker '
-                'and update each recorded status to Resolved or Closed before retesting.')
-    if status_value == "Retest Passed" and not has_prior_failed_or_blocked:
-        return (
-            "'Retest Passed' is available only after this testcase has a previous Failed or "
-            "Blocked execution attempt."
-        )
-    change_request_defects = [d for d in linked_defects if d.status == "Change Request Raised"]
-    if status_value == "NA" and change_request_defects:
-        missing_reference = [d for d in change_request_defects if not (d.related_cr_number or "").strip()]
-        if missing_reference:
-            names = ", ".join(d.defect_key for d in missing_reference)
-            return (
-                "NA cannot be recorded because the linked Change Request Raised defect(s) "
-                f"do not have a CR/enhancement reference: {names}. Update the defect decision first."
-            )
-        return None
-    if not has_prior_failed_or_blocked:
-        return None
-    if status_value in ("Pass", "NA"):
-        return (
-            f"this test case failed or was blocked earlier in its history -- '{status_value}' is no longer available. "
-            "Select 'Retest Passed' after a delivered fix, or 'NA' only when the finding was converted to a "
-            "Change Request Raised defect with a valid CR reference."
-        )
-    if status_value == "Fail":
-        if not defect_key:
-            return (
-                "this test case is failing again after a resolved defect -- reopen the existing defect, "
-                "link another active defect, or create a new defect in Defect Management, then reference "
-                "its Defect Key here before recording this Fail."
-            )
-        governed = db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(models.Defect.defect_key == defect_key).first()
-        if not governed:
-            return (
-                f"'{defect_key}' is not a known governed defect -- create it in Defect Management first, "
-                "then reference its Defect Key here."
-            )
-        if governed.status == "Duplicate":
-            canonical = getattr(governed, "duplicate_of", None)
-            canonical_hint = (
-                f"its canonical defect '{canonical.defect_key}'"
-                if canonical else "its canonical defect"
-            )
-            return (
-                f"defect '{defect_key}' is marked Duplicate and cannot own a repeat failure -- "
-                f"reference/link {canonical_hint} if it is active (reopen the canonical defect first if needed), "
-                "or link/create another active defect."
-            )
-        if governed.status in _DEFECT_RETEST_CLEAR_STATUSES:
-            return (
-                f"defect '{defect_key}' is still {governed.status} -- reopen it in Defect Management "
-                "before referencing it here."
-            )
+    """Validate result semantics; linked findings and verification never lock entry."""
+    if status_value == 'Retest Passed':
+        _, prior, _ = _execution_lock_state(db, execution_id)
+        if not prior:
+            return "'Retest Passed' requires an earlier Failed or Blocked attempt; use Pass for a first success."
     return None
 
 
@@ -1314,13 +1200,16 @@ def _migrate_legacy_result_if_needed(db: Session, obj: models.TestExecution) -> 
 
 def _record_attempt(db: Session, obj: models.TestExecution, status_value: str,
                      actual_result, test_run_artifacts, defect_id,
-                     current_user: models.User) -> models.TestExecutionRun:
+                     current_user: models.User, *, capture_context=True) -> models.TestExecutionRun:
     """Records a new attempt instead of overwriting the last one -- see
     models.TestExecutionRun's own docstring for why. TestExecution's own
     columns are then updated to mirror this newest attempt, purely so every
     existing list/filter/report that reads those columns directly keeps
     working unchanged."""
     _migrate_legacy_result_if_needed(db, obj)
+    if status_value == 'Pass' and (obj.status in {'Fail', 'Blocked', 'Retest Pending'} or any(
+            run.status in {'Fail', 'Blocked'} for run in obj.runs)):
+        status_value = 'Retest Passed'
     next_attempt_no = (db.query(func.max(models.TestExecutionRun.attempt_no))
                        .filter_by(execution_id=obj.id).scalar() or 0) + 1
     executed_at = models.now()
@@ -1331,6 +1220,10 @@ def _record_attempt(db: Session, obj: models.TestExecution, status_value: str,
     )
     db.add(run)
     db.flush()
+    if capture_context and obj.pinned_version_id and status_value in {'Pass', 'Retest Passed', 'Fail', 'Blocked', 'NA'}:
+        db.add(models.TestRetest(run=run, observed_result={'Pass':'Passed', 'Retest Passed':'Passed', 'Fail':'Failed', 'Blocked':'Blocked', 'NA':'NA'}[status_value],
+            environment=obj.cycle.environment or 'Not recorded', tested_build=obj.cycle.build or 'Not recorded',
+            pinned_version_id=obj.pinned_version_id, final_run_id=run.id))
     obj.status = status_value
     obj.actual_result = actual_result
     obj.test_run_artifacts = test_run_artifacts
@@ -1887,9 +1780,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                 or_(models.Defect.cycle_id == obj.id,
                     models.Defect.execution_links.any(models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == obj.id))),
                 models.Defect.severity.in_(("Critical", "High")),
-                or_(models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
-                    and_(models.Defect.workflow_json.isnot(None), models.Defect.status == "Closed",
-                         models.Defect.resolution_type == "Fixed")),
+                models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
             ).all()
             from ..defect_workflow import verified_for
             severe = [d for d in severe if not _verified_for_cycle(d, obj)]
@@ -1918,9 +1809,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                 or_(models.Defect.cycle_id == obj.id,
                     models.Defect.execution_links.any(models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == obj.id))),
                 models.Defect.severity.in_(("Medium", "Low")),
-                or_(models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
-                    and_(models.Defect.workflow_json.isnot(None), models.Defect.status == "Closed",
-                         models.Defect.resolution_type == "Fixed")),
+                models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
             ).all()
             residual = [d for d in residual if not _verified_for_cycle(d, obj)]
             if residual:
@@ -2950,6 +2839,12 @@ def export_test_cycle(
         subtitle="Definition used by each testcase in this cycle.",
         wrap_headers={"Step", "Expected Result"}, widths={"Step": 52, "Expected Result": 52},
     )
+    gap_rows = [gap for execution in executions for gap in execution.verification_gaps]
+    add_table_sheet(workbook, 'Verification Gaps', 'Execution verification gaps', [
+        'Test Case ID', 'Cycle', 'Recorded Result', 'Defect', 'Defect Status', 'Tested Environment', 'Configured QA Environment', 'Verification Gaps',
+    ], [[gap['test_case_key'], gap['cycle_key'], gap['result'], gap['defect_key'], gap['defect_status'],
+         gap['environment'], gap['expected_environment'], gap['message']] for gap in gap_rows],
+        subtitle='Results remain as recorded. Verification and environment gaps are warnings for review.', wrap_headers={'Verification Gaps'})
     add_table_sheet(workbook,"Retest Outcomes","Retest observations and verification",[
         "Test Case ID","Attempt No","Observed Result","Environment","Tested Build","Pinned Version ID",
         "Defect Key","Defect Status at Capture","Defect Outcome","Notes","Evidence Reference","Evidence Files",
@@ -4025,7 +3920,7 @@ def delete_run_image(execution_id: int, run_id: int, document_id: int, db: Sessi
     _require_open_cycle(cycle)
     run = _run_or_404(db, obj, run_id)
     document = doc_store.get_document_or_404(db, _RESULT_IMAGE_MODULE, run.id, document_id)
-    if run.retest:
+    if run.retest and any(document.id == evidence['id'] for outcome in run.retest.outcomes for evidence in outcome.evidence_documents):
         raise HTTPException(409, 'Retest evidence is retained in history; record a new retest to add corrected evidence')
     if not doc_store.can_delete_document(document, current_user):
         raise HTTPException(403, "Only the person who uploaded this image or an Administrator can delete it")
@@ -4075,7 +3970,7 @@ def delete_result_image(execution_id: int, document_id: int, db: Session = Depen
     _require_open_cycle(cycle)
     run = _latest_run_or_404(db, obj)
     document = doc_store.get_document_or_404(db, _RESULT_IMAGE_MODULE, run.id, document_id)
-    if run.retest:
+    if run.retest and any(document.id == evidence['id'] for outcome in run.retest.outcomes for evidence in outcome.evidence_documents):
         raise HTTPException(409, 'Retest evidence is retained in history; record a new retest to add corrected evidence')
     if not doc_store.can_delete_document(document, current_user):
         raise HTTPException(403, "Only the person who uploaded this image or an Administrator can delete it")
@@ -4248,56 +4143,36 @@ def bulk_remove_executions(
 
 @router.get('/executions/{execution_id}/retest-context')
 def retest_context(execution_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    from ..execution_retests import _reviewer, effective_outcomes, current_context, final_outcomes, approved_disposition, _require_evidence
-    obj=_execution_or_404(db,execution_id)
-    _require_execution_visibility(db,obj,current_user)
-    _,prior,linked=_execution_lock_state(db,obj.id)
-    rows=[]
+    from ..execution_retests import _reviewer, effective_outcomes, current_context
+    obj = _execution_or_404(db, execution_id)
+    _require_execution_visibility(db, obj, current_user)
+    _, prior, linked = _execution_lock_state(db, obj.id)
+    rows = []
     for defect in linked:
         try:
-            _reviewer(db,defect,current_user)
-            can_verify=True
-        except HTTPException: can_verify=False
-        rows.append(dict(defect_id=defect.id,defect_key=defect.defect_key,status=defect.status,
-            revision=defect.workflow_revision,can_verify=can_verify,
-            can_record_pass=(defect.status in {'Ready for QA','QA Testing','Resolved','Retest','Business Acceptance','Ready for Release','Production Verification','Closed'}),
-            can_record_failure=defect.status in {'Ready for QA','QA Testing','Resolved','Retest','Reopened'}))
-    external=db.query(models.TestRunDefect).join(models.TestExecutionRun).filter(
-        models.TestExecutionRun.execution_id==obj.id,models.TestRunDefect.is_historical==False,
-        or_(models.TestRunDefect.defect_url.is_(None),~models.TestRunDefect.defect_url.startswith('/defects'))).all()
-    rows += [dict(external_link_id=link.id,defect_key=link.defect_key,status=link.defect_status or 'Open',
-                  can_verify=False,can_record_pass=True,can_record_failure=True) for link in external]
-    observations=[]
-    saved=effective_outcomes(db,obj)
-    for row in rows:
-        internal=bool(row.get('defect_id'))
-        key=('internal',row['defect_id']) if internal else ('external',row['external_link_id'])
-        disposition=internal and approved_disposition(next(d for d in linked if d.id==row['defect_id']))
-        row['ready_for_retest']=not disposition and row['status'] in {
-            'Ready for QA','QA Testing','Resolved','Retest','Business Acceptance','Ready for Release','Production Verification','Closed'}
-        row['awaiting_fix']=not disposition and not row['ready_for_retest']
-        row['approved_disposition']=bool(disposition)
-        observation=saved.get(key)
-        if observation:
-            usable=current_context(observation,obj)
-            try: _require_evidence([observation],doc_store.list_documents(db,_RESULT_IMAGE_MODULE,observation.run_id))
-            except HTTPException: usable=False
-            observations.append(dict(schemas.RetestOutcomeOut.model_validate(observation).model_dump(),
-                run_id=observation.run_id,attempt_no=observation.retest.run.attempt_no,
-                tested_build=observation.retest.tested_build,current_context=usable,
-                can_verify=usable and row['ready_for_retest'] and bool(row.get('can_verify')) and observation.outcome=='Passed'))
-    latest=db.query(models.TestExecutionRun).filter_by(execution_id=obj.id).order_by(models.TestExecutionRun.attempt_no.desc()).first()
-    can_finalize=False
-    if latest and latest.retest and not latest.retest.final_run_id and latest.retest.observed_result=='Passed' and latest.retest.environment==obj.cycle.environment and latest.retest.pinned_version_id==obj.pinned_version_id:
-        try:
-            final_outcomes(db,obj,linked,external)
-            can_finalize=_execution_status_gate(db,obj.id,'Retest Passed',retest_run_id=latest.id) is None
-        except HTTPException: pass
-    return dict(execution_id=obj.id,run_version=obj.run_version,environment=obj.cycle.environment,
-                tested_build=obj.cycle.build,pinned_version_id=obj.pinned_version_id,has_prior_failure=prior,defects=rows,
-                observations=observations,can_finalize=can_finalize,
-                can_use_standard_results=prior and _execution_status_gate(db,obj.id,'Retest Passed') is None,
-                can_record_testcase=any(row['ready_for_retest'] for row in rows) or all(row['approved_disposition'] for row in rows))
+            _reviewer(db, defect, current_user)
+            can_verify = True
+        except HTTPException:
+            can_verify = False
+        rows.append(dict(defect_id=defect.id, defect_key=defect.defect_key, status=defect.status,
+            revision=defect.workflow_revision, can_verify=can_verify, can_record_pass=True, can_record_failure=True,
+            ready_for_retest=True, awaiting_fix=False, approved_disposition=False))
+    external = db.query(models.TestRunDefect).join(models.TestExecutionRun).filter(
+        models.TestExecutionRun.execution_id == obj.id, models.TestRunDefect.is_historical == False,
+        or_(models.TestRunDefect.defect_url.is_(None), ~models.TestRunDefect.defect_url.startswith('/defects'))).all()
+    rows += [dict(external_link_id=link.id, defect_key=link.defect_key, status=link.defect_status or 'Open',
+        can_verify=False, can_record_pass=True, can_record_failure=True, ready_for_retest=True,
+        awaiting_fix=False, approved_disposition=False) for link in external]
+    saved = effective_outcomes(db, obj)
+    observations = [dict(schemas.RetestOutcomeOut.model_validate(outcome).model_dump(),
+        run_id=outcome.run_id, attempt_no=outcome.retest.run.attempt_no, tested_build=outcome.retest.tested_build,
+        current_context=current_context(outcome, obj), can_verify=False) for outcome in saved.values()]
+    latest = max(obj.runs, key=lambda run:run.attempt_no, default=None)
+    can_finalize = bool(latest and latest.retest and not latest.retest.final_run_id and latest.retest.observed_result == 'Passed')
+    return dict(execution_id=obj.id, run_version=obj.run_version, environment=obj.cycle.environment,
+        tested_build=obj.cycle.build, pinned_version_id=obj.pinned_version_id, has_prior_failure=prior,
+        defects=rows, observations=observations, verification_gaps=obj.verification_gaps,
+        can_finalize=can_finalize, can_record_testcase=True, can_use_standard_results=False)
 
 
 @router.post('/executions/{execution_id}/retests',response_model=schemas.TestExecutionOut)

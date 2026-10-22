@@ -265,6 +265,9 @@ def capture(db, obj):
     recorded_observations = [item for item in defects if is_observation(item)]
     defects = [item for item in defects if not is_observation(item)]
     result = aggregate(executions, defects)
+    from .execution_verification import summary as verification_summary
+    result['verification_gaps'] = [gap for execution in latest_testcase_executions(executions) for gap in execution.verification_gaps]
+    result['verification_gap_summary'] = verification_summary(result['verification_gaps'])
     result['recorded_observations'] = [dict(id=item.id, observation_key=item.observation_key or item.defect_key,
         title=item.title, description=item.description, category=item.observation_category,
         status=item.status, outcome=item.observation_outcome, closure_remarks=item.closure_remarks,
@@ -274,6 +277,14 @@ def capture(db, obj):
     result['observation_summary'] = dict(total=len(recorded_observations),
         open=sum(item.status != 'Closed' for item in recorded_observations),
         closed=sum(item.status == 'Closed' for item in recorded_observations))
+    # Freeze both identifiers and independent statuses. A link is traceability,
+    # never a second defect or a reason to move either workflow.
+    population_ids = [item.id for item in [*recorded_observations, *defects]]
+    links = db.query(models.ObservationDefectLink).filter(or_(
+        models.ObservationDefectLink.observation_id.in_(population_ids),
+        models.ObservationDefectLink.defect_id.in_(population_ids))).order_by(models.ObservationDefectLink.observation_id).all()
+    result['observation_defect_links'] = [dict(observation=link.observation._record_reference(link.observation),
+        defect=link.defect._record_reference(link.defect), reason=link.reason, created_at=link.created_at.isoformat()) for link in links]
     # Closed-at-link references are trace metadata, never active defect counts
     # or verification. Issued snapshots are not rewritten by adding a link.
     references = db.query(models.DefectExecutionReference).filter(
@@ -378,9 +389,14 @@ def validate(obj, db=None):
         for field in ('assigned_testers', 'execution_population_basis', 'execution', 'defects', 'severity', 'execution_ids', 'defect_ids', 'defect_scope_cycle_ids', 'observations', 'security', 'execution_results', 'cycle_results', 'defect_results', 'change_request_ids', 'change_description', 'conditional_observations'):
             if live.get(field) != snapshot.get(field):
                 raise HTTPException(409, 'Linked evidence changed since capture. Refresh the certificate and obtain full reapproval.')
+        for field in ('verification_gaps', 'verification_gap_summary'):
+            if (field in snapshot or live.get('verification_gaps')) and live.get(field) != snapshot.get(field):
+                raise HTTPException(409, 'Execution verification evidence changed since capture. Refresh the certificate and obtain full reapproval.')
         for field in ('recorded_observations', 'observation_summary'):
             if (field in snapshot or live.get('recorded_observations')) and live.get(field) != snapshot.get(field):
                 raise HTTPException(409, 'Linked observations changed since capture. Refresh the certificate and obtain full reapproval.')
+        if ('observation_defect_links' in snapshot or live.get('observation_defect_links')) and live.get('observation_defect_links') != snapshot.get('observation_defect_links'):
+            raise HTTPException(409, 'Observation / defect links changed since capture. Refresh the certificate and obtain full reapproval.')
         for field in ('change_type', 'business_defect_number', 'previous_request_id'):
             if field in snapshot and live.get(field) != snapshot[field]:
                 raise HTTPException(409, 'Linked change details changed since capture. Refresh the certificate and obtain full reapproval.')
@@ -508,7 +524,9 @@ def markdown_tables(snapshot):
     execution_title = ('Section B – QA Unique Test Case Execution Summary' if unique_population
                        else 'Section B – QA Test Case Execution Summary (Legacy Slot-Based)')
     population_header = 'Unique test cases' if unique_population else 'Execution slots'
-    return [
+    tables = [
         (execution_title, table([population_header, *EXECUTION_STATUSES, 'Pass %'], [[e['total'], *[e['counts'].get(s, 0) for s in EXECUTION_STATUSES], e['pass_pct'] if e['pass_pct'] is not None else 'NA']])),
-        ('Section C – QA Defect Status Summary', table(['Status', 'Count'], [(s, snapshot['defects']['counts'].get(s, 0)) for s in DEFECT_BUCKETS if snapshot['defects']['counts'].get(s, 0) > 0] + [('Total', snapshot['defects']['total'])])),
-        ('Defect Severity-wise Breakdown', table(['Severity', 'Open', 'Closed', 'Total'], [[r['severity'], r['open'], r['closed'], r['total']] for r in snapshot['severity']]))]
+        ('Section C – QA Defect Status Summary', table(['Status', 'Count'], [(s, snapshot['defects']['counts'].get(s, 0)) for s in DEFECT_BUCKETS if snapshot['defects']['counts'].get(s, 0) > 0] + [('Total', snapshot['defects']['total'])]))]
+    if snapshot['defects']['total'] > 0:
+        tables.append(('Defect Severity-wise Breakdown', table(['Severity', 'Open', 'Closed', 'Total'], [[r['severity'], r['open'], r['closed'], r['total']] for r in snapshot['severity']])))
+    return tables

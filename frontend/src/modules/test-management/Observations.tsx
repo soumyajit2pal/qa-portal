@@ -50,6 +50,7 @@ function CreateObservationContent({ requests, onClose, onCreated }: { requests: 
   const executions = useExecutionOptions(form.application_name)
   const set = (key: keyof typeof form, value: string) => setForm(current => ({ ...current, [key]: value }))
   const done = (record: DefectOut) => { work?.clear(); onCreated(record) }
+  const close = () => { if (submitting.current) return; work?.clear(); onClose() }
   async function save(event: React.FormEvent) {
     event.preventDefault()
     if (submitting.current) return
@@ -73,9 +74,9 @@ function CreateObservationContent({ requests, onClose, onCreated }: { requests: 
       done(record)
     } catch (reason) { setError(reason) } finally { submitting.current = false; setBusy(false) }
   }
-  return <Modal title="Add Observation" onClose={onClose} closeDisabled={busy} workView wide className="observation-dialog">
+  return <Modal title="Add Observation" onClose={close} closeDisabled={busy} workView wide className="observation-dialog">
     <form onSubmit={save}>
-      <p className="observation-intro">Record a suggestion, clarification or finding for review. Confirmed failures can be converted to defects by QA.</p>
+      <p className="observation-intro">Record a suggestion, clarification or finding for review. QA can create a linked defect for a confirmed failure while keeping the observation.</p>
       {created && <p role="status">{created.defect_key} is saved. Retry the pending attachments or open the observation.</p>}
       <fieldset disabled={busy || !!created} className="observation-fields">
         <Field label="Title *"><input required maxLength={255} value={form.title} onChange={event => set('title', event.target.value)} placeholder="Describe the observation briefly" /></Field>
@@ -92,12 +93,12 @@ function CreateObservationContent({ requests, onClose, onCreated }: { requests: 
         </div>
         <Field label="Test execution (optional)"><SearchableSelect value={form.execution_id} disabled={!form.application_name} ariaLabel="Observation test execution" onChange={value => set('execution_id', value)} options={[{ value: '', label: 'No execution linked' }, ...executions.rows.map(row => ({ value: String(row.execution.id), label: `${row.cycle.cycle_key} · ${row.execution.test_case?.test_case_key || `Execution #${row.execution.id}`} · ${row.execution.status}` }))]} /></Field>
         {!!executions.error && <button type="button" className="btn btn-sm" onClick={executions.retry}>Retry loading executions</button>}
-        <Field label="Observation details *"><JiraRichTextField value={form.description} onChange={value => set('description', value)} onImagesChange={setImages} disabled={busy || !!created} ariaLabel="Observation details" placeholder="Explain what you noticed, its context, and any suggested improvement…" /></Field>
+        <Field label="Observation details *"><JiraRichTextField value={form.description} onChange={value => set('description', value)} initialImages={images} onImagesChange={setImages} disabled={busy || !!created} ariaLabel="Observation details" placeholder="Explain what you noticed, its context, and any suggested improvement…" /></Field>
         <Field label="Attachments (optional)"><input type="file" multiple accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')} onChange={event => { if (event.target.files) setFiles(current => [...current, ...Array.from(event.target.files!)]); event.target.value = '' }} /></Field>
         {!!files.length && <ul className="observation-files">{files.map((file, index) => <li key={`${index}-${file.name}`}><span>{file.name}</span><button type="button" className="link-btn" onClick={() => setFiles(current => current.filter((_, item) => item !== index))}>Remove</button></li>)}</ul>}
       </fieldset>
       <ErrorText error={error || executions.error} />
-      <div className="modal-actions"><button className="btn btn-primary" disabled={busy || (!created && (!form.title.trim() || !form.description.trim() || !form.observation_category))}>{busy ? 'Saving…' : created ? 'Retry attachments' : 'Create observation'}</button>{created && <button type="button" className="btn" disabled={busy} onClick={() => done(created)}>Open saved observation</button>}<button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button></div>
+      <div className="modal-actions"><button className="btn btn-primary" disabled={busy || (!created && (!form.title.trim() || !form.description.trim() || !form.observation_category))}>{busy ? 'Saving…' : created ? 'Retry attachments' : 'Create observation'}</button>{created && <button type="button" className="btn" disabled={busy} onClick={() => done(created)}>Open saved observation</button>}<button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button></div>
     </form>
   </Modal>
 }
@@ -130,13 +131,14 @@ export function ObservationDetail({ record, onClose, onChanged }: { record: Defe
   }
   return <>
     <Modal title={`${record.defect_key} · ${record.title}`} onClose={onClose} closeDisabled={busy} workView wide className="observation-dialog">
-      <div className="observation-heading"><div><span className="observation-badge">Observation</span><Badge status={record.status} /><p>{record.observation_category} · {record.application_name}{record.module_name ? ` · ${record.module_name}` : ''}</p><p className="muted small">Observations are counted separately from defects. QA can convert a confirmed failure to a defect.</p></div>
-        {qa && <div className="observation-actions"><button type="button" className="btn" onClick={() => setAction(record.status === 'New' ? 'Under Review' : record.status === 'Under Review' ? 'Closed' : 'New')}>{record.status === 'New' ? 'Start review' : record.status === 'Under Review' ? 'Close observation' : 'Reopen observation'}</button><button type="button" className="btn btn-primary" onClick={() => setAction('convert')}>Convert to Defect</button></div>}
+      <div className="observation-heading"><div><span className="observation-badge">Observation</span><Badge status={record.status} /><p>{record.observation_category} · {record.application_name}{record.module_name ? ` · ${record.module_name}` : ''}</p><p className="muted small">Observations and defects have independent workflows and separate counts.</p>
+        {record.created_defect && <p role="status">Escalated to <RecordNumberLink kind="defect" id={record.created_defect.id} recordKey={record.created_defect.defect_key} onOpen={() => navigate(`/defects?open=${record.created_defect!.id}`)} /> · {record.created_defect.status}</p>}</div>
+        <div className="observation-actions">{qa && <button type="button" className="btn" onClick={() => setAction(record.status === 'New' ? 'Under Review' : record.status === 'Under Review' ? 'Closed' : 'New')}>{record.status === 'New' ? 'Start review' : record.status === 'Under Review' ? 'Close observation' : 'Reopen observation'}</button>}{record.created_defect ? <button type="button" className="btn btn-primary" onClick={() => navigate(`/defects?open=${record.created_defect!.id}`)}>Open linked defect</button> : qa && <button type="button" className="btn btn-primary" onClick={() => setAction('convert')}>Create defect from observation</button>}</div>
       </div>
       <div className="observation-tabs" role="tablist" aria-label="Observation sections">{[['details', 'Details'], ['links', 'Linked work'], ['activity', 'Activity & history']].map(([key, label]) => <button type="button" key={key} role="tab" aria-selected={tab === key} onClick={() => setTab(key)}>{label}</button>)}</div>
       <section hidden={tab !== 'details'}>
         <div className="observation-section-head"><h3>Observation details</h3>{canEdit && <button type="button" className="btn btn-sm" onClick={() => setEdit(true)}>Edit observation</button>}</div>
-        <AuthenticatedMarkdown value={record.description} basePath={`/api/defects/${record.id}/attachments`} />
+        <AuthenticatedMarkdown key={record.workflow_revision} value={record.description} basePath={`/api/defects/${record.id}/attachments`} />
         {record.observation_outcome && <div className="observation-outcome"><strong>{record.observation_outcome}</strong><p>{record.closure_remarks}</p></div>}
         <p className="muted small">Reported by {record.reporter_name || 'Unknown'} · Environment: {record.environment} · Feature / Area: {record.module_feature}</p>
         <div className="observation-section-head"><h3>Evidence & attachments ({documents.length})</h3>{writable && (qa || record.reporter_id === user?.id) && <label className="btn btn-sm">{busy ? 'Uploading…' : 'Add attachments'}<input hidden type="file" multiple accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')} disabled={busy} onChange={event => { void upload(event.target.files); event.target.value = '' }} /></label>}</div>
@@ -163,24 +165,45 @@ export function ObservationDetail({ record, onClose, onChanged }: { record: Defe
 }
 
 function EditObservationModal({ record, onClose, onChanged }: { record: DefectOut; onClose: () => void; onChanged: (record: DefectOut) => void }) {
+  const work = useWorkView()
   const [form, setForm] = useWorkState('observation.edit', { title: record.title, description: record.description, observation_category: record.observation_category || 'Other' })
+  const [images, setImages] = useWorkState<File[]>('observation.edit.images', [])
+  const [saved, setSaved] = useWorkState<DefectOut | null>('observation.edit.saved', null)
   const [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null)
+  const submitting = useRef(false)
   useWorkBusy(busy)
+  const clear = () => { if (work) for (const key of ['observation.edit', 'observation.edit.images', 'observation.edit.saved']) delete work.data[key] }
+  const done = (updated: DefectOut) => { clear(); onChanged(updated) }
+  const close = () => { if (submitting.current) return; clear(); if (saved) onChanged(saved); else onClose() }
   async function save(event: React.FormEvent) {
-    event.preventDefault(); if (busy) return; setBusy(true); setError(null)
-    try { onChanged(await api.patch<DefectOut>(`/api/defects/${record.id}/observation`, { ...form, revision: record.workflow_revision || 0 })) }
-    catch (reason) { setError(reason) } finally { setBusy(false) }
+    event.preventDefault()
+    if (submitting.current) return
+    if (!form.title.trim() || !form.description.trim()) { setError(new Error('Title and observation details are required.')); return }
+    const validation = defectEvidenceError(images)
+    if (validation) { setError(new Error(validation)); return }
+    submitting.current = true; setBusy(true); setError(null)
+    try {
+      let updated = saved
+      if (!updated) {
+        updated = await api.patch<DefectOut>(`/api/defects/${record.id}/observation`, { ...form, revision: record.workflow_revision || 0 })
+        setSaved(updated)
+      }
+      if (images.length) await api.uploadFormFiles(`/api/defects/${updated.id}/attachments`, {}, images)
+      done(updated)
+    } catch (reason) { setError(reason) } finally { submitting.current = false; setBusy(false) }
   }
-  return <Modal title={`Edit ${record.defect_key}`} onClose={onClose} closeDisabled={busy} workView wide><form onSubmit={save}>
-    <Field label="Title *"><input required maxLength={255} value={form.title} onChange={event => setForm(current => ({ ...current, title: event.target.value }))} /></Field>
-    <Field label="Category *"><select value={form.observation_category} onChange={event => setForm(current => ({ ...current, observation_category: event.target.value }))}>{OBSERVATION_CATEGORIES.map(value => <option key={value}>{value}</option>)}</select></Field>
-    <Field label="Observation details *"><textarea required rows={8} value={form.description} onChange={event => setForm(current => ({ ...current, description: event.target.value }))} /></Field>
-    <ErrorText error={error} /><div className="modal-actions"><button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button><button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button></div>
+  return <Modal title={`Edit ${record.defect_key}`} onClose={close} closeDisabled={busy} workView wide><form onSubmit={save}>
+    {saved && <p role="status">Changes to {saved.defect_key} are saved. Retry the pending images or open the updated observation.</p>}
+    <Field label="Title *"><input required disabled={busy || !!saved} maxLength={255} value={form.title} onChange={event => setForm(current => ({ ...current, title: event.target.value }))} /></Field>
+    <Field label="Category *"><select disabled={busy || !!saved} value={form.observation_category} onChange={event => setForm(current => ({ ...current, observation_category: event.target.value }))}>{OBSERVATION_CATEGORIES.map(value => <option key={value}>{value}</option>)}</select></Field>
+    <Field label="Observation details *"><JiraRichTextField value={form.description} onChange={description => setForm(current => ({ ...current, description }))} initialImages={images} onImagesChange={setImages} disabled={busy || !!saved} ariaLabel="Observation details" placeholder="Explain what you noticed, its context, and any suggested improvement…" /></Field>
+    <ErrorText error={error} /><div className="modal-actions"><button className="btn btn-primary" disabled={busy || !form.title.trim() || !form.description.trim()}>{busy ? 'Saving…' : saved ? 'Retry images' : 'Save changes'}</button>{saved && <button type="button" className="btn" disabled={busy} onClick={() => done(saved)}>Open updated observation</button>}<button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button></div>
   </form></Modal>
 }
 
 function ObservationActionModal({ record, action, onClose, onChanged }: { record: DefectOut; action: string; onClose: () => void; onChanged: (record: DefectOut) => void }) {
   const convert = action === 'convert'
+  const work = useWorkView()
   const [form, setForm] = useWorkState(`observation.action.${action}`, { reason: '', outcome: '', severity: 'Medium', priority: 'P3 – Medium', environment: ENVIRONMENTS.includes(record.environment) ? record.environment : '', module_feature: record.module_feature === 'General' ? '' : record.module_feature, steps_to_reproduce: '', expected_result: '', actual_result: '' })
   const [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null)
   const submitting = useRef(false)
@@ -190,13 +213,15 @@ function ObservationActionModal({ record, action, onClose, onChanged }: { record
     event.preventDefault(); if (submitting.current) return; submitting.current = true; setBusy(true); setError(null)
     try {
       const payload = convert ? { ...form, outcome: undefined } : { status: action, reason: form.reason, outcome: action === 'Closed' ? form.outcome : undefined }
-      const updated = await api.post<DefectOut>(`/api/defects/${record.id}/${convert ? 'convert-to-defect' : 'observation-action'}`, { ...payload, revision: record.workflow_revision || 0 })
+      const result = await api.post<DefectOut>(`/api/defects/${record.id}/${convert ? 'create-defect' : 'observation-action'}`, { ...payload, revision: record.workflow_revision || 0 })
+      const updated = convert ? await api.getFresh<DefectOut>(`/api/defects/${record.id}`) : result
+      if (work) delete work.data[`observation.action.${action}`]
       setForm(current => ({ ...current, reason: '', outcome: '' })); onChanged(updated)
     } catch (reason) { setError(reason) } finally { submitting.current = false; setBusy(false) }
   }
-  return <Modal title={convert ? `Convert ${record.defect_key} to Defect` : `${action === 'New' ? 'Reopen' : action === 'Under Review' ? 'Review' : 'Close'} ${record.defect_key}`} onClose={onClose} closeDisabled={busy} workView wide><form onSubmit={save}>
-    {convert && <p>A new DEF number will be assigned. The original OBS number, links, attachments, comments and history will remain available. The defect starts at New.</p>}
-    <Field label={convert ? 'Conversion reason *' : action === 'Closed' ? 'Closure reason *' : 'Review / reopen reason *'}><textarea required rows={3} maxLength={4000} value={form.reason} onChange={event => set('reason', event.target.value)} /></Field>
+  return <Modal title={convert ? `Create defect from ${record.defect_key}` : `${action === 'New' ? 'Reopen' : action === 'Under Review' ? 'Review' : 'Close'} ${record.defect_key}`} onClose={onClose} closeDisabled={busy} workView wide><form onSubmit={save}>
+    {convert && <p>A separate DEF record will start at New, with a copy of the observation details, attachments and links. {record.defect_key} stays at {record.status}, with its comments and history. Changes to either workflow remain independent.</p>}
+    <Field label={convert ? 'Reason for creating a defect *' : action === 'Closed' ? 'Closure reason *' : 'Review / reopen reason *'}><textarea required rows={3} maxLength={4000} value={form.reason} onChange={event => set('reason', event.target.value)} /></Field>
     {!convert && action === 'Closed' && <Field label="Outcome *"><select required value={form.outcome} onChange={event => set('outcome', event.target.value)}><option value="">Select outcome</option>{OUTCOMES.map(value => <option key={value}>{value}</option>)}</select></Field>}
     {convert && <><div className="observation-grid">
       <Field label="Severity *"><select value={form.severity} onChange={event => set('severity', event.target.value)}>{SEVERITIES.map(value => <option key={value}>{value}</option>)}</select></Field>
@@ -204,7 +229,7 @@ function ObservationActionModal({ record, action, onClose, onChanged }: { record
       <Field label="Environment *"><select required value={form.environment} onChange={event => set('environment', event.target.value)}><option value="">Select environment</option>{ENVIRONMENTS.map(value => <option key={value}>{value}</option>)}</select></Field>
       <Field label="Feature / Area *"><input required maxLength={150} value={form.module_feature} onChange={event => set('module_feature', event.target.value)} /></Field>
     </div>{(['steps_to_reproduce', 'expected_result', 'actual_result'] as const).map((key, index) => <Field key={key} label={`${['Steps to reproduce', 'Expected result', 'Actual result'][index]} *`}><textarea required rows={3} value={form[key]} onChange={event => set(key, event.target.value)} /></Field>)}</>}
-    <ErrorText error={error} /><div className="modal-actions"><button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : convert ? 'Convert to Defect' : 'Confirm'}</button><button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button></div>
+    <ErrorText error={error} /><div className="modal-actions"><button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : convert ? 'Create linked defect' : 'Confirm'}</button><button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button></div>
   </form></Modal>
 }
 

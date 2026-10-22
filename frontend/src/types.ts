@@ -1203,6 +1203,9 @@ export interface CertificateSummary {
   conditional_observations?: string
   observations?: { defect_key: string; functionality: string; observation: string; severity: string; status: string; owner: string; target_date: string }[]
   observation_summary?: { total: number; open: number; closed: number }
+  observation_defect_links?: { observation: FindingRecordReference; defect: FindingRecordReference; reason: string; created_at: string }[]
+  verification_gaps?: ExecutionVerificationGap[]
+  verification_gap_summary?: { total: number; executions: number; environment_mismatches: number }
   recorded_observations?: { id: number; observation_key: string; title: string; description: string; category: string; status: string; outcome?: string | null; closure_remarks?: string | null; reporter?: string | null; revision: number }[]
   change_request_ids?: string
   change_description?: string
@@ -2048,7 +2051,10 @@ export interface TestExecutionRunOut {
   defects: TestRunDefectOut[]
 }
 
+export interface ExecutionVerificationGap { execution_id: number; test_case_key?: string | null; cycle_key?: string | null; defect_id?: number | null; defect_key: string; defect_status: string; environment: string; expected_environment?: string | null; result: string; codes: string[]; message: string }
+
 export interface TestExecutionOut {
+  verification_gaps?: ExecutionVerificationGap[]
   defect_references?: DefectExecutionReferenceOut[]
   id: number
   cycle_id: number
@@ -2228,6 +2234,7 @@ export interface DefectQualityOut {
 }
 
 export interface RequirementTraceabilityRowOut {
+  verification_gaps?: ExecutionVerificationGap[]
   row_id: string
   test_case_id: number
   test_case_key: string
@@ -2320,7 +2327,12 @@ export interface FunctionalRequestReference {
   reason?: string | null
 }
 
+export interface FindingRecordReference { id: number; defect_key: string; status: string }
+
 export interface DefectOut {
+  created_defect?: FindingRecordReference | null
+  source_observation?: FindingRecordReference | null
+  source_observation_history?: ApprovalActionOut[]
   record_type?: 'Defect' | 'Observation'
   observation_key?: string | null
   observation_category?: string | null
@@ -2432,6 +2444,8 @@ export interface DefectOut {
 // (PAG-005); Defects.tsx fetches the full `DefectOut` via `GET /{id}` only
 // when a row is actually opened (PAG-006).
 export interface DefectListOut {
+  created_defect?: FindingRecordReference | null
+  source_observation?: FindingRecordReference | null
   record_type?: 'Defect' | 'Observation'
   observation_key?: string | null
   observation_category?: string | null

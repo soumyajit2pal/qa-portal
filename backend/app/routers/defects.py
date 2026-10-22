@@ -7,8 +7,8 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import Integer, and_, case, cast, func, literal_column, or_
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy import Integer, and_, case, cast, func, literal_column, or_, select
+from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 
 from .. import documents as doc_store
 from .. import models, schemas, pagination, defect_cc
@@ -533,6 +533,8 @@ _RETEST_STATUSES = ("Resolved", "Retest", "Ready for QA", "QA Testing", "Busines
 # lazy-loading `reporter_name`/`assignee_name`/`qa_request_key`/`cycle_key`/
 # `test_case_key` (all `@property`s on `models.Defect`) once per row.
 _LIST_DEFECT_EAGER_LOADS = [
+    joinedload(models.Defect.observation_escalation).joinedload(models.ObservationDefectLink.defect),
+    joinedload(models.Defect.defect_origin).joinedload(models.ObservationDefectLink.observation),
     selectinload(models.Defect.execution_references).joinedload(models.DefectExecutionReference.execution).joinedload(models.TestExecution.cycle),
     selectinload(models.Defect.execution_references).joinedload(models.DefectExecutionReference.execution).joinedload(models.TestExecution.test_case),
     selectinload(models.Defect.execution_references).joinedload(models.DefectExecutionReference.run),
@@ -596,7 +598,16 @@ def _register_filters(q, db, user, params=None, severity=None, priority=None,
     elif queue not in (None, 'all'):
         raise HTTPException(400, 'Unknown defect queue')
     if isinstance(params, pagination.PageParams):
-        q = pagination.apply_search(q, params, models.Defect.defect_key, models.Defect.observation_key, models.Defect.title, models.Defect.application_name, models.Defect.module_feature, models.Defect.module_name)
+        if params.search:
+            related = aliased(models.Defect)
+            like = f'%{params.search}%'
+            source_matches = select(models.ObservationDefectLink.defect_id).join(related,
+                related.id == models.ObservationDefectLink.observation_id).where(related.defect_key.ilike(like))
+            target_matches = select(models.ObservationDefectLink.observation_id).join(related,
+                related.id == models.ObservationDefectLink.defect_id).where(related.defect_key.ilike(like))
+            q = q.filter(or_(*[column.ilike(like) for column in (models.Defect.defect_key, models.Defect.observation_key,
+                models.Defect.title, models.Defect.application_name, models.Defect.module_feature, models.Defect.module_name)],
+                models.Defect.id.in_(source_matches), models.Defect.id.in_(target_matches)))
         q = pagination.apply_status_filter(q, params, models.Defect.status)
     return q
 
@@ -818,7 +829,7 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
         "Reporter", "Created", "Target Release", "Expected Resolution", "Ageing (Days)",
         "Reopen Count", "External Defect ID", "Resolution Type", "Resolution Summary",
         "Workflow Version", "Production Impact", "Affected Environments", "Verified Environments / Evidence Builds", "CC",
-        "Record Type", "Original Observation ID", "Observation Category", "Observation Outcome",
+        "Record Type", "Original Observation ID", "Observation Category", "Observation Outcome", "Linked Defect", "Linked Defect Status", "Source Observation Status",
     ]
     today = models.now().date()
     rows = []
@@ -835,7 +846,8 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
             ", ".join(sorted({e["environment"] for e in item.workflow_state.get("occurrences", [])})),
             ", ".join(f"{v['environment']}: {v['build']}" for v in item.verified_builds),
             ", ".join(user.full_name for user in item.cc_users),
-            item.record_type, item.observation_key, item.observation_category, item.observation_outcome,
+            item.record_type, (item.source_observation or {}).get('defect_key') or item.observation_key, item.observation_category, item.observation_outcome,
+            (item.created_defect or {}).get('defect_key'), (item.created_defect or {}).get('status'), (item.source_observation or {}).get('status'),
         ])
     add_table_sheet(
         workbook, "Defects", "Defect Register", headers, rows,
@@ -1721,7 +1733,8 @@ def observation_action(defect_id: int, payload: schemas.ObservationAction, db: S
     return observations.action(db, _get_mutable(defect_id, db, current_user), payload, current_user)
 
 
-@router.post('/{defect_id}/convert-to-defect', response_model=schemas.DefectOut)
+@router.post('/{defect_id}/create-defect', response_model=schemas.DefectOut)
+@router.post('/{defect_id}/convert-to-defect', response_model=schemas.DefectOut, deprecated=True)
 def convert_observation(defect_id: int, payload: schemas.ObservationConversion, db: Session = Depends(get_db),
                         current_user: models.User = Depends(get_current_user)):
     return observations.convert(db, _get_mutable(defect_id, db, current_user), payload, current_user)

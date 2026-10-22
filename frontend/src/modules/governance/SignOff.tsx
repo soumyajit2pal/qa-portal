@@ -687,9 +687,9 @@ function CertificateEvidence({ item }: { item: SignOffOut }) {
       <details><summary><span><b>QA Defect Status Summary</b><small>Current disposition, with deferred defects still open</small></span><strong>{summary.defects.total} defects</strong></summary>
         <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>Count</th><th>Status</th></tr></thead><tbody>{activeDefectStatuses.map(status => <tr key={status}><td>{summary.defects.counts[status] || 0}</td><td>{status}{status === 'Deferred' ? ' (Open)' : ''}</td></tr>)}{summary.defects.total === 0 && <tr><td colSpan={2}>No linked defects captured</td></tr>}<tr><td>{summary.defects.total}</td><th>Total</th></tr></tbody></table></div>
       </details>
-      <details><summary><span><b>Defect Severity-wise Breakdown</b><small>Open and terminal defects by severity</small></span><strong>{openSeverity} open</strong></summary>
+      {summary.defects.total > 0 && <details><summary><span><b>Defect Severity-wise Breakdown</b><small>Open and terminal defects by severity</small></span><strong>{openSeverity} open</strong></summary>
         <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>Severity</th><th>Open</th><th>Closed / terminal</th><th>Total</th></tr></thead><tbody>{summary.severity.map(row => <tr key={row.severity}><td>{row.severity}</td><td>{row.open}</td><td>{row.closed}</td><td>{row.total}</td></tr>)}</tbody></table></div>
-      </details>
+      </details>}
     </div>
     <section className="clearance-security-assessment" aria-label="Security Testing Assessment">
       <h4>Section D · Security Testing Assessment</h4>
@@ -697,16 +697,32 @@ function CertificateEvidence({ item }: { item: SignOffOut }) {
       {summary.security?.length ? <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>Type</th><th>Current status</th><th>Request ID</th><th>Initial total findings</th><th>Current findings</th><th>Suppression count</th><th>Suppression request ID(s)</th></tr></thead><tbody>{summary.security.map(row => <tr key={`${row.type}-${row.request_id}`}><td>{row.type}</td><td>{SAST_DAST_STATUS_LABELS[row.status] || row.status}</td><td>{row.request_id}</td><td>{row.initial_findings ?? 'Not captured'}</td><td>{row.current_findings ?? 'Not captured'}</td><td>{row.suppression_count ?? 'Not captured'}</td><td>{row.suppression_request_ids ? row.suppression_request_ids.join(', ') || 'None' : 'Not captured'}</td></tr>)}</tbody></table></div> : <p className="muted small">No linked security assessment captured.</p>}
       {summary.security?.some(row => row.initial_findings == null || row.current_findings == null || row.suppression_count == null || row.suppression_request_ids == null) && <p className="muted small">Missing scan counts require evidence refresh and full reapproval.</p>}
     </section>
+    <section className="observation-certificate" aria-label="Execution verification gaps">
+      <h4>Execution Verification Gaps</h4>
+      <p className="muted small">Execution results and defect workflow statuses are tracked separately. These warnings are frozen with this certificate revision.</p>
+      {summary.verification_gaps === undefined ? <p>Verification gaps were not captured in this certificate revision.</p>
+        : summary.verification_gaps.length ? summary.verification_gaps.map((gap, index) => <article key={`${gap.execution_id}:${gap.defect_key}:${index}`}>
+          <h4>{gap.test_case_key || `Execution #${gap.execution_id}`} · {gap.defect_key}</h4>
+          <p>{gap.result} · {gap.environment} · Defect {gap.defect_status}</p><p>{gap.message}</p>
+        </article>) : <p>No verification gaps at evidence capture.</p>}
+    </section>
     <section className="observation-certificate" aria-label="Recorded observations">
       <h4>Recorded Observations</h4>
       <p className="muted small">Observation records captured separately from defects. These details remain frozen with this certificate revision.</p>
       {summary.observation_summary && <p><strong>{summary.observation_summary.total} observations</strong> · {summary.observation_summary.open} open · {summary.observation_summary.closed} closed</p>}
       {summary.recorded_observations === undefined ? <p>Observation records were not captured in this certificate revision.</p>
         : summary.recorded_observations.length ? summary.recorded_observations.map(row => <article key={row.id}>
-          <h4>{row.observation_key} · {row.title}</h4><p>{row.category} · {row.status}{row.outcome ? ` · ${row.outcome}` : ''}</p>
-          <AuthenticatedMarkdown value={row.description} basePath={`/api/defects/${row.id}/attachments`} />
-          {row.closure_remarks && <p><strong>Closure reason:</strong> {row.closure_remarks}</p>}
+          <h4>{row.observation_key} · {row.title}</h4>
         </article>) : <p>No linked observation records at evidence capture.</p>}
+    </section>
+    <section className="observation-certificate" aria-label="Defects created from observations">
+      <h4>Defects Created from Observations</h4>
+      <p className="muted small">Linked records have independent workflows and separate counts. Statuses are frozen with this certificate revision.</p>
+      {summary.observation_defect_links === undefined ? <p>Not captured in this certificate revision.</p>
+        : summary.observation_defect_links.length ? summary.observation_defect_links.map(row => <article key={row.observation.id}>
+          <h4>{row.observation.defect_key} → {row.defect.defect_key}</h4>
+          <p>Observation: {row.observation.status} · Defect: {row.defect.status}</p><p>{row.reason}</p>
+        </article>) : <p>No linked escalations at evidence capture.</p>}
     </section>
     <details className="clearance-method-note"><summary>How these figures were calculated</summary><p>{summary.population_note}</p><p>The figures remain unchanged until explicitly refreshed. Refreshing invalidates previous approvals and requires the full approval sequence again.</p></details>
   </section>

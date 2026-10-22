@@ -293,6 +293,8 @@ def defect_retest_register(date_from: str | None = None, date_to: str | None = N
     ).order_by(models.Defect.reported_at.desc()).all())
     return [{
         "Defect ID": item.defect_key, "Title": item.title,
+        "Source Observation": (item.source_observation or {}).get('defect_key') or item.observation_key,
+        "Source Observation Status": (item.source_observation or {}).get('status'),
         "QA Request": item.qa_request_key,
         "Project": (f"{item.cycle.project.project_key} — {item.cycle.project.name}"
                     if item.cycle and item.cycle.project else None),
@@ -307,6 +309,25 @@ def defect_retest_register(date_from: str | None = None, date_to: str | None = N
         "Retest Result": item.retest_result, "Retest At": item.retest_at,
         "Reopen Count": item.reopen_count,
     } for item in rows]
+
+
+@router.get('/observation-register')
+def observation_register(date_from: str | None = None, date_to: str | None = None,
+                         db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    from .defects import _scoped_defects
+    query = _scoped_defects(db, current_user, include_observations=True).filter(models.Defect.record_type == 'Observation')
+    rows = _in_period(query, models.Defect.reported_at, date_from, date_to).options(
+        joinedload(models.Defect.observation_escalation).joinedload(models.ObservationDefectLink.defect),
+        joinedload(models.Defect.qa_request), joinedload(models.Defect.reporter),
+    ).order_by(models.Defect.reported_at.desc(), models.Defect.id.desc()).all()
+    return [{'Observation ID': item.defect_key, 'Title': item.title, 'Details': item.description,
+        'Category': item.observation_category, 'Status': item.status, 'Outcome': item.observation_outcome,
+        'QA Request': item.qa_request_key, 'Functional Requests': ', '.join(ref['request_id'] for ref in item.functional_requests),
+        'Application': item.application_name, 'Module Name': item.module_name, 'Environment': item.environment,
+        'Reporter': item.reporter_name, 'Reported At': item.reported_at,
+        'Linked Defect': (item.created_defect or {}).get('defect_key'), 'Linked Defect Status': (item.created_defect or {}).get('status'),
+        'Escalated At': item.observation_escalation.created_at if item.observation_escalation else None,
+        'Escalation Reason': item.observation_escalation.reason if item.observation_escalation else None} for item in rows]
 
 
 @router.get("/testcase-approval-summary")
@@ -394,12 +415,22 @@ def execution_attempt_register(date_from: str | None = None, date_to: str | None
         "Cycle ID": item.execution.cycle.cycle_key,
         "Test Case ID": item.execution.test_case.test_case_key if item.execution.test_case else None,
         "Pinned Version": item.execution.pinned_version.version if item.execution.pinned_version else None,
+        "Tested Environment": item.retest.environment if item.retest else 'Not captured',
+        "Tested Build": item.retest.tested_build if item.retest else 'Not captured',
+        "Current Verification Gaps": ' | '.join(gap['defect_key'] + ': ' + gap['message'] for gap in item.execution.verification_gaps),
         "Attempt": item.attempt_no, "Result": item.status,
         "Executed By": item.executed_by_name or "Unknown runner",
         "Executed At": item.executed_at,
         "Actual Result": item.actual_result,
         "Defects": ", ".join(sorted({link.defect_key for link in item.defects} | ({item.defect_id} if item.defect_id else set()))),
     } for item in rows]
+
+
+@router.get('/execution-verification-gaps')
+def execution_verification_gaps(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    projects = _visible_test_projects(db, current_user).with_entities(models.TestProject.id)
+    executions = _in_period(db.query(models.TestExecution).join(models.TestCycle).filter(models.TestCycle.project_id.in_(projects)), models.TestExecution.executed_at, date_from, date_to).all()
+    return [{'Test Case': gap['test_case_key'], 'Cycle': gap['cycle_key'], 'Recorded Result': gap['result'], 'Defect': gap['defect_key'], 'Defect Status': gap['defect_status'], 'Tested Environment': gap['environment'], 'Configured QA Environment': gap['expected_environment'], 'Verification Gap': gap['message']} for execution in executions for gap in execution.verification_gaps]
 
 
 def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
@@ -973,7 +1004,7 @@ def audit_evidence(date_from: str | None = None, date_to: str | None = None, db:
 _ALL_DATA_MODULES = (
     "QA Request", "Functional Request", "SAST Request", "DAST Request",
     "Performance Request", "Suppression Request", "Test Project", "Test Cycle", "Testcase",
-    "Test Execution", "Execution Attempt", "Defect", "Defect Severity", "QA Clearance",
+    "Test Execution", "Execution Attempt", "Defect", "Defect Severity", "Observation", "QA Clearance",
 )
 
 
@@ -1155,6 +1186,7 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
     if organisation_view:
         seen_defect_ids = {row.id for row in defects}
         legacy_defects = db.query(models.Defect).filter(
+            models.Defect.record_type == 'Defect',
             models.Defect.qa_workspace_id.is_(None),
             models.Defect.qa_request_id.is_(None),
             models.Defect.cycle_id.is_(None),
@@ -1227,6 +1259,18 @@ def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_nam
             metrics=f"Severity {row.severity or 'Unknown'}", severity=row.severity,
             created=row.reported_at)
 
+    from .defects import _scoped_defects
+    observation_rows = _scoped_defects(db, current_user, include_observations=True).filter(
+        models.Defect.record_type == 'Observation').options(
+            joinedload(models.Defect.observation_escalation).joinedload(models.ObservationDefectLink.defect)).all()
+    for row in observation_rows:
+        linked = row.created_defect
+        add(row.qa_workspace_id, 'Observation', row.defect_key, row.status,
+            parent=linked['defect_key'] if linked else row.qa_request_key,
+            description=row.title, context=row.application_name, module_name=row.module_name,
+            department=row.department, metrics=linked['status'] if linked else 'No defect created',
+            created=row.reported_at)
+
     clearance_predicate = _batched_ids(models.QASignOff.qa_workspace_id, scope_ids)
     if organisation_view:
         clearance_predicate = or_(clearance_predicate, models.QASignOff.qa_workspace_id.is_(None))
@@ -1269,7 +1313,9 @@ REPORT_REGISTRY = {
     "test-cycle-summary": test_cycle_summary,
     "testcase-register": testcase_register,
     "execution-attempt-register": execution_attempt_register,
+    "execution-verification-gaps": execution_verification_gaps,
     "defect-retest-register": defect_retest_register,
+    "observation-register": observation_register,
     "performance-testing": performance_testing_report,
     "sast-scan": sast_scan_report,
     "dast-scan": dast_scan_report,

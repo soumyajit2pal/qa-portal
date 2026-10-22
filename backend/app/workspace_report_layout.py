@@ -13,7 +13,7 @@ GUIDE = [
     ("Requests", "Main QA requests and their Functional, SAST, DAST, and Performance child requests. Each main request is counted once."),
     ("Projects / Testcases / Cycles", "Individual testing records. Project and cycle linked metrics show their current linked testcases, executions, and defects."),
     ("Executions / Attempts", "Executions show the latest result per testcase in a cycle. Attempts show every recorded run and may exceed the execution count."),
-    ("Defects / Governance", "Individual defects, suppression requests, and QA clearances. Severity counts describe defects; they are not additional defects."),
+    ("Defects / Observations / Governance", "Defects and observations have separate totals and detail sections. Linked OBS/DEF records retain independent statuses. Severity counts describe defects only."),
     ("Reporting period", "The date filter applies to each record's creation or execution date. The linked metrics on a visible project or cycle reflect its current linked records."),
     ("Visibility", "Only records visible to the logged-in user are included. Private drafts and cancelled requests follow existing access rules; legacy unassigned records can appear separately."),
 ]
@@ -41,7 +41,7 @@ def all_data_sections(rows):
         "Workspace", "Main QA Requests", "Functional", "SAST", "DAST", "Performance",
         "Projects", "Testcases", "Cycles", "Execution Slots", "Passed", "Failed",
         "Blocked", "Not Executed", "Retest Passed", "Attempts", "Defects",
-        "Critical Defects", "High Defects", "Suppressions", "QA Clearances",
+        "Critical Defects", "High Defects", "Observations", "Suppressions", "QA Clearances",
     ]
     overview = []
     for name in workspace_names:
@@ -55,7 +55,7 @@ def all_data_sections(rows):
             result("Retest Passed"), total("Execution Attempt"), total("Defect"),
             statuses[(name, "Defect Severity", "Critical")],
             statuses[(name, "Defect Severity", "High")],
-            total("Suppression Request"), total("QA Clearance"),
+            total("Observation"), total("Suppression Request"), total("QA Clearance"),
         ])))
 
     breakdown_headers = ["Workspace", "Record Type", "Status", "Count"]
@@ -105,6 +105,11 @@ def all_data_sections(rows):
             ("Workspace", "Workspace"), ("Defect ID", "Record ID"), ("Linked Record", "Parent / Linked ID"),
             ("Application", "Application / Project"), ("Title", "Description"),
             ("Status", "Status"), ("Severity", "Execution Results"), ("Created At", "Created At"),
+        ]),
+        ("Observations", {"Observation"}, [
+            ("Workspace", "Workspace"), ("Observation ID", "Record ID"), ("Linked Defect / QA Request", "Parent / Linked ID"),
+            ("Application", "Application / Project"), ("Module Name", "Module Name"), ("Title", "Description"),
+            ("Status", "Status"), ("Linked Defect Status", "Execution Results"), ("Created At", "Created At"),
         ]),
         ("Governance", {"Suppression Request", "QA Clearance"}, [
             ("Workspace", "Workspace"), ("Record Type", "Module"), ("Record ID", "Record ID"),

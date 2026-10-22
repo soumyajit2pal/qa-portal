@@ -618,14 +618,14 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
   // must not make otherwise valid environment coverage disappear.
   const verifiedForCycleContext = (defect: DefectListOut) => !!defect.verified_builds?.some(v =>
     v.environment === cycle.environment)
-  const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect))
-  const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect))
+  const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && (unresolvedStatuses.has(defect.status)) && !verifiedForCycleContext(defect))
+  const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status)) && !verifiedForCycleContext(defect))
   const canCompleteWithResidualRisk = hasRole(user, ...QA_LEAD_GROUP_ROLES)
   const notExecutedCount = Math.max(0, executionTotal - executedCount)
   const severitySummary = ['Critical', 'High', 'Medium', 'Low'].map((severity) => ({ severity, count: completionDefects.filter((defect) => defect.severity === severity).length }))
   const targetReleaseMissing = completionDefects.filter((defect) =>
     !defect.target_release && (
-      (['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !verifiedForCycleContext(defect)) || defect.status === 'Deferred'
+      (['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status)) && !verifiedForCycleContext(defect)) || defect.status === 'Deferred'
     ))
   const completionBlockers = new Set(severeBlockers.map((defect) => defect.id))
   const missingTargetDefects = new Set(targetReleaseMissing.map((defect) => defect.id))
@@ -744,7 +744,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
                 <div>
                   <strong>{hasCompletionBlockers ? 'This cycle is not ready to complete' : needsResidualJustification ? 'Residual-risk approval details required' : 'This cycle satisfies the completion checks'}</strong>
                   <p>
-                    {pendingRetestCount > 0 ? `${pendingRetestCount} retest(s) await verification and final confirmation.` : linkedRequestCompletionBlocked
+                    {pendingRetestCount > 0 ? `${pendingRetestCount} older pending result(s) need a fresh saved result.` : linkedRequestCompletionBlocked
                       ? linkedRequestCompletionReason
                       : conditionalCompletion
                       ? executedCount === 0 ? 'Record at least one test result before conditional completion.'
@@ -975,7 +975,7 @@ function InlineExecutionActions({ execution, canExecute, executionContextError, 
         {result && executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status, execution.id) && (
           <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status, execution.id)}</small>
         )}
-        <div className="tm-inline-run-actions"><span>{result ? `${result} selected` : 'Select one result'}</span><button type="button" className="btn btn-sm" onClick={() => { setResult(''); setOpen(false) }}>Cancel</button><button type="button" className="btn btn-sm btn-primary" disabled={!result || busy || !canExecute || !!executionContextError} onClick={saveResult}>{busy ? 'Saving…' : 'Save attempt'}</button></div>
+        <div className="tm-inline-run-actions"><span>{result ? `${result} selected` : 'Select one result'}</span><button type="button" className="btn btn-sm" onClick={() => { setResult(''); setOpen(false) }}>Cancel</button><button type="button" className="btn btn-sm btn-primary" disabled={!result || busy || !canExecute || !!executionContextError} onClick={saveResult}>{busy ? 'Saving…' : 'Save result'}</button></div>
       </div>, document.body)}
       {linkingDefect && latestRun && <form className="tm-inline-defect-panel" onSubmit={linkDefect}>
         <strong>Link to latest {latestRun.status.toLowerCase()} run</strong><small>Attempt #{latestRun.attempt_no} only</small>
@@ -1589,22 +1589,9 @@ function RecordResultModal({ execution, readOnly, canLinkHistorical, canUnlinkDe
       )}
       {!execution.assigned_to_id && <div className="info-banner">A workspace QA Engineer or QA Lead must assign this testcase before an execution attempt can be recorded.</div>}
       {execution.assigned_to_id && readOnly && <div className="info-banner">Only the assigned runner can record the next attempt. Any QA Engineer or QA Lead in this workspace can reassign the testcase when needed.</div>}
-      {activeLinkedDefects.length > 0 && (
-        <WarningNotice className="info-banner warning">
-          <strong>Verification required:</strong> Final passing result requires linked defect verification
-          {' '}({activeLinkedDefects.map((d) => `${d.defect_key} · ${d.status}`).join(', ')}). The
-          final passing result remains locked until the checks are met. Use the execution form below to retest ready fixes and record evidence. Verify in the actual cycle environment. Build numbers remain visible as audit evidence, but do not need to match the cycle build.
-        </WarningNotice>
-      )}
-      {activeExternalDefects.length > 0 && <div className="info-banner warning">
-        External defects still need resolution: {activeExternalDefects.map(defect => `${defect.defect_key} · ${defect.defect_status || 'Open'}`).join(', ')}.
-        Confirm their status in the external tracker, then use Update status in Attempt History to record Resolved or Closed before retesting.
-      </div>}
-      {activeLinkedDefects.length === 0 && activeExternalDefects.length === 0 && hasPriorFailedOrBlocked && (
-        <div className="info-banner">
-          {validChangeRequestDisposition ? <>The finding was converted to a referenced Change Request. Preserve the original failed attempt and select <strong>NA</strong> for the current scope.</> : <>The linked defect verification requirements are satisfied. Please retest the test case and select <strong>Retest Passed</strong> if it passes, or <strong>Fail</strong> if it fails again.</>}
-        </div>
-      )}
+      {!!execution.verification_gaps?.length && !usesRetestForm(execution) && <WarningNotice title="Verification gaps">
+        You can save the actual result. {execution.verification_gaps.map(gap => `${gap.defect_key}: ${gap.message}`).join(' ')}
+      </WarningNotice>}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 16px' }}>
         <span className="muted small">Latest result:</span>
         <Badge status={execution.status} />
@@ -1644,7 +1631,7 @@ function RecordResultModal({ execution, readOnly, canLinkHistorical, canUnlinkDe
               <strong>Link a defect to this attempt</strong>
               <span>
                 {status === 'Fail' && (execution.runs || []).some((run) => run.status === 'Fail')
-                  ? 'Required -- reopen the existing defect, link another active one, or reference a newly created one'
+                  ? 'Optional · Review linked defects if this failure needs follow-up'
                   : 'Optional · More defects can be linked from Attempt History'}
               </span>
             </div>
@@ -1655,7 +1642,7 @@ function RecordResultModal({ execution, readOnly, canLinkHistorical, canUnlinkDe
           </div>}
           <ErrorText error={error} />
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            <button className="btn btn-primary" disabled={busy || !status || actualResult.length > 10000}>{busy ? 'Saving...' : 'Save Attempt'}</button>
+            <button className="btn btn-primary" disabled={busy || !status || actualResult.length > 10000}>{busy ? 'Saving...' : 'Save result'}</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
             {canRemove && (
               <button type="button" className="btn btn-danger" onClick={() => setConfirmRemove(true)} disabled={busy}>Remove from Cycle</button>

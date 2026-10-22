@@ -1665,33 +1665,52 @@ The reporter or QA may edit an open observation. The register has **All records*
 **Defects** and **Observations** views with separate counts. Observation forms
 and details support full screen, page and new-tab views with preserved drafts.
 
-QA can **Convert to Defect** after providing the conversion reason, severity,
+QA can **Create defect from observation** after providing the reason, severity,
 priority, environment, reproduction steps and expected/actual results. This
-updates the same record in place, assigns a DEF number and starts the governed
-defect workflow at New. The original OBS number remains searchable and resolves
-to the converted record. Links, documents, comments and review history retain
-their original record ID. Conversion is revision-checked and cannot be repeated
-or used to rewrite an earlier test result. There is no defect-to-observation
-shortcut that could clear a failure.
+keeps the original OBS record and creates a separate DEF at New. Both numbers
+remain searchable and linked in the register and detail views. The observation
+keeps its status, comments and history; request, testcase, execution and CC links
+are copied to the defect. Attachments get independent document rows and file
+copies, including embedded description images. A frozen copy of the original
+activity is visible on the defect. Later workflow or detail changes do not
+update the other record. Creation is revision-checked and serialized on the
+source; a database constraint and idempotent retries prevent duplicate defects.
+After creation, the action becomes **Open linked defect**. Original test runs
+and their evidence are not rewritten.
 
 Observations can link QA/Functional Requests and execution context, including
 passing executions. They create no failed-attempt defect links and are excluded
 from defect KPIs, severity totals, retest requirements and defect release gates.
-Existing failed attempts remain authoritative. Once converted, the record
-participates in the normal defect checks. Workspace, department, folder and
+Existing failed attempts remain authoritative. The created DEF participates
+in the normal defect checks, while the OBS stays excluded. Workspace, department, folder and
 read-only access boundaries still apply.
 
 New certificate evidence captures a separate **Recorded Observations** section,
 including open/closed counts, category, details and review outcome. The UI and
-exported PDF use the frozen revision; later edits or conversion never rewrite an
+exported PDF use the frozen revision; later edits or escalation never rewrite an
 issued certificate. Changed observations require evidence refresh and reapproval
 for an editable certificate. Older revisions explicitly show when observation
 records were not captured.
+
+The **Observation Register** report includes linked DEF numbers, independent
+statuses, escalation time and reason. The Defect & Retest Register identifies
+the original OBS. The combined Excel register and All Data Report retain both
+records without including observations in defect totals. Certificates also
+capture **Defects Created from Observations**, with both numbers and statuses.
 
 Apply additive, restartable migration `d94a8c1e6f52` after `c83f7b0d5e41` before
 deploying the matching backend/frontend. Existing rows default to Defect and
 retain their numbers and history. Rollback retains observation data. The local
 Oracle schema has been upgraded; validation is in `validation/observations-2026-10-22/`.
+
+For separate linked records, apply additive, restartable migration
+`e15a7c9b2046` after `d94a8c1e6f52` before deploying the matching code. It adds
+`qap_observation_defect_links`; rollback retains the links. The old
+`convert-to-defect` API URL remains compatible and now creates a separate DEF.
+Earlier in-place conversion records, if present, retain their existing IDs,
+original OBS alias and historical certificate snapshots; this migration does
+not invent or rewrite their past records. The local database had no earlier
+in-place conversions. Validation: `validation/observation-linked-defect-2026-10-22/`.
 
 ### Test Cycle subfolders
 

@@ -50,7 +50,10 @@ function actorLabel(item: ApprovalActionOut): string {
 }
 
 function relativeTime(value: string): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - portalDate(value).getTime()) / 1000))
+  if (!value) return 'Date not recorded'
+  const timestamp = portalDate(value).getTime()
+  if (!Number.isFinite(timestamp)) return 'Date not recorded'
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000))
   if (seconds < 60) return 'just now'
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}m ago`
@@ -339,6 +342,7 @@ function CommentContent({ commentId, value }: { commentId: number; value: string
 
 export interface JiraActivityProps {
   readOnly?: boolean
+  readOnlyMessage?: string
   ownerWorkspaceId?: number | null
   workflowHistory?: Record<string, any>[]
   entityType: string
@@ -352,7 +356,7 @@ export default function JiraActivity(props: JiraActivityProps) {
   return <JiraActivityContent key={`${props.entityType}:${props.entityId}:${props.ownerWorkspaceId ?? ''}:${activeWorkspaceId(user) ?? ''}`} {...props} />
 }
 
-export function JiraActivityContent({ entityType, entityId, items, onPosted, workflowHistory, readOnly = false, ownerWorkspaceId }: JiraActivityProps) {
+export function JiraActivityContent({ entityType, entityId, items, onPosted, workflowHistory, readOnly = false, readOnlyMessage, ownerWorkspaceId }: JiraActivityProps) {
   const { user } = useAuth()
   const selectedWorkspaceId = activeWorkspaceId(user)
   const activeWorkspaceAccess = uniqueWorkspaceAccess(user).find(
@@ -603,7 +607,7 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
 
       {isReadOnly && (
         <div className="jira-activity-read-only" role="note">
-          Comments are read-only for the selected workspace or permission profile. Switch to the record's owning workspace with contributor access to add a comment.
+          {readOnlyMessage || "Comments are read-only for the selected workspace or permission profile. Switch to the record's owning workspace with contributor access to add a comment."}
         </div>
       )}
 
@@ -716,7 +720,7 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
                   {!isComment && item.previous_state && item.new_state && (
                     <span className="jira-activity-transition">{item.previous_state} → {item.new_state}</span>
                   )}
-                  <time title={formatDateTimeIST(item.created_at)}>{relativeTime(item.created_at)}</time>
+                  <time title={item.created_at ? formatDateTimeIST(item.created_at) : 'Date not recorded'}>{relativeTime(item.created_at)}</time>
                 </div>
                 {item.workflowEvent && <WorkflowEventDetails event={item.workflowEvent} basePath={`/api/defects/${entityId}/attachments`} />}
                 {!item.workflowEvent && item.comments && (isComment ? <CommentContent commentId={item.id} value={item.comments} /> : <div className="jira-activity-message">{item.comments}</div>)}
