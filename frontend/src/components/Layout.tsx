@@ -87,7 +87,7 @@ function navGroups(user: UserOut | null, workspaceOptions: WorkspaceAccessEntry[
         // the backend's own department scoping (routers/defects.py's
         // _scoped_defects) is what actually restricts what a scoped user
         // sees once there, not this nav check.
-        { to: '/defects', label: 'Defect Management', icon: IconTarget },
+        { to: '/defects', label: 'Defects & Observations', icon: IconTarget },
         // SRS EXE-002 "My Executions" -- the signed-in user's own actionable
         // items across every authorized project, one cross-project view
         // instead of hunting through each project's own Test Execution page.

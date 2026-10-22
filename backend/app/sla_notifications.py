@@ -19,6 +19,8 @@ ENTITIES = {
 
 
 def queue_record_breach(db, entity_type, target, now=None):
+    if entity_type == 'DEFECT' and getattr(target, 'record_type', None) == 'Observation':
+        return 0
     if not mail._enabled():
         return 0
     now = m.as_aware(now or m.now())

@@ -223,7 +223,7 @@ def defect_quality(
     # list would hit Oracle's 1,000-expression limit on large projects.
     cycle_ids = db.query(models.TestCycle.id).filter(models.TestCycle.project_id == project_id)
     execution_ids = db.query(models.TestExecution.id).filter(models.TestExecution.cycle_id.in_(cycle_ids))
-    governed_query = db.query(models.Defect).filter(or_(
+    governed_query = db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(or_(
         models.Defect.cycle_id.in_(cycle_ids),
         models.Defect.execution_id.in_(execution_ids),
         models.Defect.execution_links.any(models.DefectExecutionLink.execution_id.in_(execution_ids)),
@@ -482,7 +482,7 @@ def requirements_traceability(
     ):
         add_defect(execution_id, defect_key, defect_status)
     for execution_id, defect_key, defect_status in (
-        db.query(models.Defect.execution_id, models.Defect.defect_key, models.Defect.status)
+        db.query(models.Defect.execution_id, models.Defect.defect_key, models.Defect.status).filter(models.Defect.record_type == 'Defect')
         .join(models.TestExecution, models.Defect.execution_id == models.TestExecution.id)
         .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
         .filter(models.TestCycle.project_id == project_id)
@@ -490,7 +490,7 @@ def requirements_traceability(
     ):
         add_defect(execution_id, defect_key, defect_status)
     for execution_id, defect_key, defect_status in (
-        db.query(models.DefectExecutionLink.execution_id, models.Defect.defect_key, models.Defect.status)
+        db.query(models.DefectExecutionLink.execution_id, models.Defect.defect_key, models.Defect.status).filter(models.Defect.record_type == 'Defect')
         .join(models.Defect, models.DefectExecutionLink.defect_id == models.Defect.id)
         .join(models.TestExecution, models.DefectExecutionLink.execution_id == models.TestExecution.id)
         .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)

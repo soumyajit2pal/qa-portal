@@ -1159,6 +1159,21 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     else:
         sections.append(('Sections B–D – Evidence snapshot', [('Availability', 'Legacy certificate: no frozen automatic summary. Refresh requires full reapproval.')]))
     sections.append(('Section E – QA Clearance Remarks', remarks))
+    if snapshot and 'recorded_observations' in snapshot:
+        recorded = snapshot['recorded_observations']
+        observation_rows = [('Summary', f"{snapshot['observation_summary']['total']} observations · {snapshot['observation_summary']['open']} open · {snapshot['observation_summary']['closed']} closed. Recorded separately from defects and frozen at evidence capture.")]
+        for row in recorded:
+            observation_rows.extend([
+                (row['observation_key'], f"{row['title']} | Category: {row['category']} | Status: {row['status']} | Outcome: {row.get('outcome') or 'Pending review'}"),
+                ('Observation details', RichTextValue(row['description'])),
+            ])
+            if row.get('closure_remarks'):
+                observation_rows.append(('Closure reason', row['closure_remarks']))
+        if not recorded:
+            observation_rows.append(('Observations', 'No linked observation records at evidence capture.'))
+    else:
+        observation_rows = [('Availability', 'Observation records were not captured in this certificate revision.')]
+    sections.append(('Recorded Observations', observation_rows))
     observations = snapshot.get('observations', []) if snapshot else []
     manual_observations = (snapshot.get('conditional_observations', '') if snapshot else obj.conditional_observations) or ''
     observation_fields = [('User-entered observations', RichTextValue(manual_observations))] if manual_observations.strip() else [

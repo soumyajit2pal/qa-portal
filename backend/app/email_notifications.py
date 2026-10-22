@@ -862,6 +862,9 @@ def _defect_notification_route(db: SASession, target: models.Defect) -> Notifica
     messages go to both the defect reporter and the linked QA Request's requester. Subsequent workflow
     messages exclude the actor; creation also confirms receipt to the reporter.
     """
+    if getattr(target, 'record_type', None) == 'Observation':
+        return NotificationRoute(_user_ids(target.reporter_id), 'Observation Reporter', False,
+            'The observation was recorded or reviewed. Open the record for the review decision and discussion.')
     status = str(getattr(target, "status", "") or "").upper()
     if status in _DEFECT_QA_ROUTING_STATUSES:
         recipients = _user_ids(target.reporter_id) | _user_ids(target.assignee_id)
@@ -1299,8 +1302,9 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> int:
     queued_count = _queue_notification_route(db, action, target, route, include_actor=defect_creation) if route else 0
     if isinstance(target, models.Defect) and (_is_workflow_transition(action) or action.decision in {'CC Updated', 'Updated', 'Commented'}):
         from .defect_cc import notification_ids
+        record_label = 'observation' if getattr(target, 'record_type', None) == 'Observation' else 'defect'
         cc_route = NotificationRoute(notification_ids(db, target), 'CC', False,
-                                     'You are following this defect in CC. This update is for your information.')
+                                     f'You are following this {record_label} in CC. This update is for your information.')
         queued_count += _queue_notification_route(db, action, target, cc_route, include_actor=defect_creation)
     return queued_count
 
@@ -1323,6 +1327,8 @@ def _queue_notification_route(db, action, target, route, *, include_actor=False)
     url = f"{portal_url}{path}" if portal_url else path
     status = _status_label(getattr(target, "status", None))
     type_label = action.entity_type.replace("_", " ").title()
+    if getattr(target, 'record_type', None) == 'Observation':
+        type_label = 'Observation'
     subject = f"{'Action required' if route.action_required else 'Workflow update'}: {reference} — {route.recipient_label}"
     body = (
         f"QualityOps {'ACTION REQUIRED' if route.action_required else 'WORKFLOW UPDATE'}\n\n"

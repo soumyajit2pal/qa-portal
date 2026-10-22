@@ -1,5 +1,6 @@
 export interface DefectRegisterFilters {
   functionalRequest: string
+  record_type?: string
   search?: string
   status?: string
   severity?: string
@@ -12,7 +13,7 @@ export function defectRegisterParams(filters: DefectRegisterFilters, includeQueu
   const params = new URLSearchParams()
   if (filters.functionalRequest === 'none') params.set('without_functional_request', 'true')
   else if (filters.functionalRequest) params.set('functional_request_id', filters.functionalRequest)
-  for (const key of ['search', 'status', 'severity', 'priority'] as const) {
+  for (const key of ['search', 'status', 'severity', 'priority', 'record_type'] as const) {
     if (filters[key]) params.set(key, filters[key]!)
   }
   if (includeQueue && filters.queue && filters.queue !== 'all') params.set('queue', filters.queue)

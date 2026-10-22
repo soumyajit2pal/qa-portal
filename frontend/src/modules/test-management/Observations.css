@@ -1,0 +1,21 @@
+.observation-dialog .observation-intro { color: var(--text-secondary, #546d77); margin: 0 0 22px; max-width: 80ch; }
+.observation-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.observation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
+.observation-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 20px; }
+.observation-heading p { margin: 10px 0; }
+.observation-badge { display: inline-flex; color: #18586a; background: #e5f3f7; border: 1px solid #b8dce5; border-radius: 20px; padding: 4px 10px; font-size: 12px; font-weight: 700; margin-right: 10px; }
+.observation-actions, .observation-links { display: flex; flex-wrap: wrap; gap: 10px; }
+.observation-tabs { display: flex; gap: 6px; border-bottom: 1px solid #d8e5e9; margin-bottom: 24px; }
+.observation-tabs button { padding: 12px 16px; background: transparent; border: 0; color: #526771; cursor: pointer; border-bottom: 3px solid transparent; }
+.observation-tabs button[aria-selected="true"] { color: #15596a; border-bottom-color: #19768a; font-weight: 700; }
+.observation-section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 18px 0; }
+.observation-outcome { background: #f1f8f5; border: 1px solid #cce4d8; padding: 16px; border-radius: 10px; margin: 20px 0; }
+.observation-files { list-style: none; padding: 0; }
+.observation-files li { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0; overflow-wrap: anywhere; }
+.observation-record-types { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px 20px 0; }
+.observation-record-types button[aria-pressed="true"] { background: #e4f2f5; border-color: #28778b; color: #155568; }
+.observation-certificate { margin: 24px 0; }
+.observation-certificate article { border: 1px solid #d9e5e9; padding: 16px; margin: 12px 0; border-radius: 10px; }
+@media (max-width: 700px) { .observation-grid { grid-template-columns: 1fr; } .observation-heading { flex-direction: column; } .observation-actions { width: 100%; } .observation-tabs { overflow-x: auto; } .observation-tabs button { white-space: nowrap; } }
+
+.observation-fields > .form-field, .observation-grid .form-field { margin-bottom: 16px; }

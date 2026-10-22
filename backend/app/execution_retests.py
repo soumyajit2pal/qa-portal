@@ -139,7 +139,7 @@ def record(db, execution_id, payload, user, files=()):
         raise HTTPException(400, 'Observed result and tested build are required')
     execution._validate_result_evidence(list(files))
     # Deterministic row-lock ordering serializes against workflow actions.
-    governed = {d.id:d for d in db.query(models.Defect).filter(or_(models.Defect.execution_id==obj.id,
+    governed = {d.id:d for d in db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(or_(models.Defect.execution_id==obj.id,
         models.Defect.execution_links.any(models.DefectExecutionLink.execution_id==obj.id))).order_by(models.Defect.id).with_for_update().populate_existing().all()}
     external = {link.id:link for link in db.query(models.TestRunDefect).join(models.TestExecutionRun).filter(
         models.TestExecutionRun.execution_id == obj.id, models.TestRunDefect.is_historical == False,
@@ -266,7 +266,7 @@ def verify(db,execution_id,run_id,outcome_id,payload,user):
         raise HTTPException(409,'A newer outcome exists for this defect; verify its evidence instead')
     _require_evidence([outcome],documents.list_documents(db,execution._RESULT_IMAGE_MODULE,run.id))
     defect=defects._get_mutable(outcome.defect_id,db,user)
-    db.query(models.Defect).filter_by(id=defect.id).with_for_update().populate_existing().one()
+    db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter_by(id=defect.id).with_for_update().populate_existing().one()
     if defect.execution_id != obj.id and not any(link.execution_id == obj.id for link in defect.execution_links):
         raise HTTPException(409,'This defect is no longer actively linked to the execution')
     _reviewer(db,defect,user)
@@ -316,7 +316,7 @@ def finalize(db,execution_id,run_id,payload,user):
     if retest.environment!=obj.cycle.environment or retest.pinned_version_id!=obj.pinned_version_id:
         raise HTTPException(409,'Retest context changed; record a fresh attempt')
     _require_evidence(retest.outcomes,documents.list_documents(db,execution._RESULT_IMAGE_MODULE,run.id))
-    governed=db.query(models.Defect).filter(or_(models.Defect.execution_id==obj.id,
+    governed=db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(or_(models.Defect.execution_id==obj.id,
         models.Defect.execution_links.any(models.DefectExecutionLink.execution_id==obj.id))).order_by(models.Defect.id).with_for_update().populate_existing().all()
     external=db.query(models.TestRunDefect).join(models.TestExecutionRun).filter(
         models.TestExecutionRun.execution_id==obj.id,models.TestRunDefect.is_historical==False,

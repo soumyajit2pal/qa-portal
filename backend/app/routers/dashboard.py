@@ -917,7 +917,7 @@ def _scoped_contribution_query(db: Session, model, current_user: models.User):
     """
     if model is models.Defect:
         return _scope_qa_requests(
-            db.query(model).join(models.QARequest, model.qa_request_id == models.QARequest.id),
+            db.query(model).filter(models.Defect.record_type == 'Defect').join(models.QARequest, model.qa_request_id == models.QARequest.id),
             db, current_user,
         )
     project_ids = viewable_project_ids(db, current_user)

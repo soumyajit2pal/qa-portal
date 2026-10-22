@@ -471,7 +471,7 @@ export default function App() {
           <Route path="/test-projects" element={<ModuleBoundary moduleName="Test Management"><TestProjects /></ModuleBoundary>} />
           <Route path="/test-repository" element={<ModuleBoundary moduleName="Test Management"><TestRepository /></ModuleBoundary>} />
           <Route path="/test-execution" element={<ModuleBoundary moduleName="Test Management"><TestExecution /></ModuleBoundary>} />
-          <Route path="/defects" element={<ModuleBoundary moduleName="Defect Management"><Defects /></ModuleBoundary>} />
+          <Route path="/defects" element={<ModuleBoundary moduleName="Defects & Observations"><Defects /></ModuleBoundary>} />
           <Route path="/work/*" element={<ModuleBoundary moduleName="Work page"><WorkPage /></ModuleBoundary>} />
           <Route path="/my-executions" element={<QaGroupOnly><ModuleBoundary moduleName="Test Management"><MyExecutions /></ModuleBoundary></QaGroupOnly>} />
           <Route path="/test-reports" element={<ModuleBoundary moduleName="Test Management"><TestReports /></ModuleBoundary>} />

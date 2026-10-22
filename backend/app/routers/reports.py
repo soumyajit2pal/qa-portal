@@ -799,7 +799,7 @@ def quality_scorecard(date_from: str | None = None, date_to: str | None = None, 
     dast_rows = db.query(models.DASTRequest.qa_request_id).filter(models.DASTRequest.qa_request_id.in_(request_ids)).all()
     performance_rows = db.query(models.PerformanceRequest.qa_request_id).filter(
         models.PerformanceRequest.qa_request_id.in_(request_ids)).all()
-    open_defect_rows = db.query(models.Defect.qa_request_id).filter(
+    open_defect_rows = db.query(models.Defect.qa_request_id).filter(models.Defect.record_type == 'Defect',
         models.Defect.qa_request_id.in_(request_ids),
         models.Defect.status.notin_(("Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised")),
     ).all()

@@ -1655,6 +1655,44 @@ linking retains the existing owning-department boundary. This change requires
 matching frontend/backend code and no database migration. Validation evidence
 is in `validation/late-qa-request-link-2026-10-22/`.
 
+### Defects & Observations
+
+Use **Add observation** for usability suggestions, improvements, requirement
+clarifications and documentation findings. An observation has a separate
+`TQA-OBS-NNNNN` number, category and **New → Under Review → Closed** workflow.
+QA records a reason and outcome when closing it, and can reopen it with a reason.
+The reporter or QA may edit an open observation. The register has **All records**,
+**Defects** and **Observations** views with separate counts. Observation forms
+and details support full screen, page and new-tab views with preserved drafts.
+
+QA can **Convert to Defect** after providing the conversion reason, severity,
+priority, environment, reproduction steps and expected/actual results. This
+updates the same record in place, assigns a DEF number and starts the governed
+defect workflow at New. The original OBS number remains searchable and resolves
+to the converted record. Links, documents, comments and review history retain
+their original record ID. Conversion is revision-checked and cannot be repeated
+or used to rewrite an earlier test result. There is no defect-to-observation
+shortcut that could clear a failure.
+
+Observations can link QA/Functional Requests and execution context, including
+passing executions. They create no failed-attempt defect links and are excluded
+from defect KPIs, severity totals, retest requirements and defect release gates.
+Existing failed attempts remain authoritative. Once converted, the record
+participates in the normal defect checks. Workspace, department, folder and
+read-only access boundaries still apply.
+
+New certificate evidence captures a separate **Recorded Observations** section,
+including open/closed counts, category, details and review outcome. The UI and
+exported PDF use the frozen revision; later edits or conversion never rewrite an
+issued certificate. Changed observations require evidence refresh and reapproval
+for an editable certificate. Older revisions explicitly show when observation
+records were not captured.
+
+Apply additive, restartable migration `d94a8c1e6f52` after `c83f7b0d5e41` before
+deploying the matching backend/frontend. Existing rows default to Defect and
+retain their numbers and history. Rollback retains observation data. The local
+Oracle schema has been upgraded; validation is in `validation/observations-2026-10-22/`.
+
 ### Test Cycle subfolders
 
 Test Execution supports nested cycle folders, matching Test Repository. Use a

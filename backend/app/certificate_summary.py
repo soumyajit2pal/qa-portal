@@ -8,6 +8,7 @@ from html import unescape
 from fastapi import HTTPException
 from sqlalchemy import or_
 from . import models
+from .observations import is_observation
 from .constants import CERTIFICATE_TYPES, ENVIRONMENT_PIPELINE_ORDER, QAStatus, SAST_DAST_CLEARANCE_RESOLVED_STATUSES
 
 TERMINAL = {'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'}
@@ -87,7 +88,7 @@ def latest_testcase_executions(executions):
 
 def aggregate(executions, defects):
     executions = latest_testcase_executions(executions)
-    defects = list({item.id: item for item in defects}.values())
+    defects = list({item.id: item for item in defects if not is_observation(item)}.values())
     counts = Counter(item.status for item in executions)
     total = sum(counts.values())
     applicable = total - counts['NA']
@@ -261,7 +262,18 @@ def capture(db, obj):
             models.Defect.execution_links.any(models.DefectExecutionLink.execution_id.in_(all_execution_ids)),
             models.Defect.historical_execution_links.any(models.TestRunDefect.run.has(models.TestExecutionRun.execution_id.in_(all_execution_ids))),
             models.Defect.cycle_id.in_(all_cycle_ids))).order_by(models.Defect.id).all()
+    recorded_observations = [item for item in defects if is_observation(item)]
+    defects = [item for item in defects if not is_observation(item)]
     result = aggregate(executions, defects)
+    result['recorded_observations'] = [dict(id=item.id, observation_key=item.observation_key or item.defect_key,
+        title=item.title, description=item.description, category=item.observation_category,
+        status=item.status, outcome=item.observation_outcome, closure_remarks=item.closure_remarks,
+        reporter=item.reporter_name, owner=item.assignee_name, revision=item.workflow_revision,
+        module_name=item.module_name, functionality=item.module_feature)
+        for item in recorded_observations]
+    result['observation_summary'] = dict(total=len(recorded_observations),
+        open=sum(item.status != 'Closed' for item in recorded_observations),
+        closed=sum(item.status == 'Closed' for item in recorded_observations))
     # Closed-at-link references are trace metadata, never active defect counts
     # or verification. Issued snapshots are not rewritten by adding a link.
     references = db.query(models.DefectExecutionReference).filter(
@@ -366,6 +378,9 @@ def validate(obj, db=None):
         for field in ('assigned_testers', 'execution_population_basis', 'execution', 'defects', 'severity', 'execution_ids', 'defect_ids', 'defect_scope_cycle_ids', 'observations', 'security', 'execution_results', 'cycle_results', 'defect_results', 'change_request_ids', 'change_description', 'conditional_observations'):
             if live.get(field) != snapshot.get(field):
                 raise HTTPException(409, 'Linked evidence changed since capture. Refresh the certificate and obtain full reapproval.')
+        for field in ('recorded_observations', 'observation_summary'):
+            if (field in snapshot or live.get('recorded_observations')) and live.get(field) != snapshot.get(field):
+                raise HTTPException(409, 'Linked observations changed since capture. Refresh the certificate and obtain full reapproval.')
         for field in ('change_type', 'business_defect_number', 'previous_request_id'):
             if field in snapshot and live.get(field) != snapshot[field]:
                 raise HTTPException(409, 'Linked change details changed since capture. Refresh the certificate and obtain full reapproval.')

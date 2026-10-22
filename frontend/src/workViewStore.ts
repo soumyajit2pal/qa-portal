@@ -1,4 +1,4 @@
-export type WorkKind = 'add-cases' | 'defect' | 'functional'
+export type WorkKind = 'add-cases' | 'defect' | 'functional' | 'observation'
 export interface WorkTarget { kind: WorkKind; id: number | 'new' }
 export interface WorkSnapshot {
   scope: string; target: string; data: Record<string, unknown>; lists: Record<string, unknown>
@@ -7,11 +7,13 @@ export interface WorkSnapshot {
 }
 export function workKey(target: WorkTarget) { return `${target.kind}:${target.id}` }
 export function workPath(target: WorkTarget) {
+  if (target.kind === 'observation') return '/work/observations/new'
   if (target.kind === 'add-cases') return `/work/test-cycles/${target.id}/add-cases`
   if (target.kind === 'functional') return `/work/functional-requests/${target.id}`
   return `/work/defects/${target.id}`
 }
 export function parseWorkPath(path: string): WorkTarget | null {
+  if (path === '/work/observations/new') return { kind: 'observation', id: 'new' }
   const match = /^\/work\/(test-cycles|functional-requests|defects)\/([1-9]\d*|new)(\/add-cases)?$/.exec(path)
   if (!match || (match[1] === 'test-cycles') !== !!match[3]) return null
   if (match[2] === 'new' && match[1] !== 'defects') return null

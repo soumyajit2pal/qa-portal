@@ -161,6 +161,7 @@ BUSINESS_ID_PREFIXES = {
     "TEST_CYCLE": "TQA-CYCLE",
     "TEST_CASE": "TQA-TC",
     "DEFECT": "DEF",
+    "OBSERVATION": "OBS",
 }
 _BUSINESS_ID_PREFIX_SET = frozenset(BUSINESS_ID_PREFIXES.values())
 _LIFETIME_COUNTER_SCOPE = datetime.date(1900, 1, 1)
@@ -231,6 +232,10 @@ def gen_defect_id(db):
     actually returns rather than an abandoned year-scoped format."""
     n = _claim_business_seq(BUSINESS_ID_PREFIXES["DEFECT"], db)
     return f"TQA-DEF-{n:05d}"
+
+
+def gen_observation_id(db):
+    return f'TQA-OBS-{_claim_business_seq(BUSINESS_ID_PREFIXES["OBSERVATION"], db):05d}'
 
 
 class VendorOrganization(Base):
@@ -4073,7 +4078,7 @@ class TestExecution(Base):
     @property
     def linked_defects(self):
         combined = [*self.primary_linked_defects, *self.additional_linked_defects]
-        return list({defect.id: defect for defect in combined}.values())
+        return list({defect.id: defect for defect in combined if defect.record_type != 'Observation'}.values())
 
     @property
     def assigned_to_name(self):
@@ -4256,6 +4261,13 @@ class Defect(Base):
     __tablename__ = "qap_defects"
     id = pk_column()
     defect_key = Column(String(40), unique=True, nullable=False, index=True)
+    # Conversion changes classification and business key, never the record ID.
+    # Documents, comments, audit actions and every trace link keep their FK.
+    record_type = Column(String(20), nullable=False, default='Defect', server_default='Defect', index=True)
+    observation_key = Column(String(40), nullable=True, unique=True, index=True)
+    observation_category = Column(String(60), nullable=True)
+    observation_outcome = Column(String(60), nullable=True)
+    observation_converted_at = Column(DateTime, nullable=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=False)
     status = Column(String(40), nullable=False, default="New", index=True)
@@ -4303,11 +4315,15 @@ class Defect(Base):
 
     @property
     def workflow_stages(self):
+        if self.record_type == 'Observation':
+            return ['New', 'Under Review', 'Closed']
         from .defect_workflow import stages
         return stages(self) if self.workflow_json else []
 
     @property
     def workflow_transitions(self):
+        if self.record_type == 'Observation':
+            return {'New': ['Under Review'], 'Under Review': ['Closed'], 'Closed': ['New']}.get(self.status, [])
         from .defect_workflow import transitions
         return transitions(self)
 

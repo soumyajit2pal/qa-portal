@@ -1026,7 +1026,7 @@ def _execution_lock_state(db: Session, execution_id: int):
     'Pass'/'NA' block for the rest of this slot's history, regardless of
     whether a defect is linked right now. The mirrored current status is a
     compatibility fallback for results saved before run history existed."""
-    defects = db.query(models.Defect).filter(or_(
+    defects = db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(or_(
         models.Defect.execution_id == execution_id,
         models.Defect.execution_links.any(models.DefectExecutionLink.execution_id == execution_id),
     )).all()
@@ -1058,6 +1058,8 @@ def _defect_blocks_execution(defect, cycle, verification_check=None, execution_i
     Any active canonical defect remains independently authoritative when
     linked.
     """
+    if getattr(defect, 'record_type', None) == 'Observation':
+        return False
     if (
         defect.status in _DEFECT_UNCONDITIONAL_CLEAR_STATUSES
         or (
@@ -1164,7 +1166,7 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
                 "link another active defect, or create a new defect in Defect Management, then reference "
                 "its Defect Key here before recording this Fail."
             )
-        governed = db.query(models.Defect).filter(models.Defect.defect_key == defect_key).first()
+        governed = db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(models.Defect.defect_key == defect_key).first()
         if not governed:
             return (
                 f"'{defect_key}' is not a known governed defect -- create it in Defect Management first, "
@@ -1225,6 +1227,8 @@ def _prepare_execution_update(db: Session, obj: models.TestExecution, status_val
 
 def _validate_defect_values(defect_key: str, defect_url: str = "") -> tuple[str, str]:
     key = defect_key.strip()
+    if key.upper().startswith(('TQA-OBS-', 'OBS-')):
+        raise HTTPException(400, 'Observations cannot be used as failure defects. QA must convert the observation to a defect first.')
     url = defect_url.strip()
     if len(key) > 100:
         raise HTTPException(400, "Defect key cannot exceed 100 characters")
@@ -1879,7 +1883,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                     "Every testcase must be Pass, Retest Passed or NA. "
                     f"{len(incomplete_executions)} testcase(s) require attention: {labels}{suffix}",
                 )
-            severe = db.query(models.Defect).filter(
+            severe = db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(
                 or_(models.Defect.cycle_id == obj.id,
                     models.Defect.execution_links.any(models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == obj.id))),
                 models.Defect.severity.in_(("Critical", "High")),
@@ -1897,7 +1901,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                     "Resolve, reject, defer with approval, or close these defects before completing the Test Cycle. "
                     f"Blocking defects: {labels}",
                 )
-            invalid_deferred = db.query(models.Defect).filter(
+            invalid_deferred = db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(
                 or_(models.Defect.cycle_id == obj.id,
                     models.Defect.execution_links.any(models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == obj.id))),
                 models.Defect.status == "Deferred",
@@ -1910,7 +1914,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                     "Update these defects in Defect Management: "
                     + ", ".join(defect.defect_key for defect in invalid_deferred),
                 )
-            residual = db.query(models.Defect).filter(
+            residual = db.query(models.Defect).filter(models.Defect.record_type == 'Defect').filter(
                 or_(models.Defect.cycle_id == obj.id,
                     models.Defect.execution_links.any(models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == obj.id))),
                 models.Defect.severity.in_(("Medium", "Low")),
@@ -3744,7 +3748,7 @@ def _governed_defect_linked_to_execution(
     its primary FK or the additional-execution trace table.
     """
     return (
-        db.query(models.Defect)
+        db.query(models.Defect).filter(models.Defect.record_type == 'Defect')
         .filter(models.Defect.defect_key == defect_key)
         .filter(or_(
             models.Defect.execution_id == execution_id,

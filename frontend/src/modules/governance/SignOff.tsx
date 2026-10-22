@@ -697,6 +697,17 @@ function CertificateEvidence({ item }: { item: SignOffOut }) {
       {summary.security?.length ? <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>Type</th><th>Current status</th><th>Request ID</th><th>Initial total findings</th><th>Current findings</th><th>Suppression count</th><th>Suppression request ID(s)</th></tr></thead><tbody>{summary.security.map(row => <tr key={`${row.type}-${row.request_id}`}><td>{row.type}</td><td>{SAST_DAST_STATUS_LABELS[row.status] || row.status}</td><td>{row.request_id}</td><td>{row.initial_findings ?? 'Not captured'}</td><td>{row.current_findings ?? 'Not captured'}</td><td>{row.suppression_count ?? 'Not captured'}</td><td>{row.suppression_request_ids ? row.suppression_request_ids.join(', ') || 'None' : 'Not captured'}</td></tr>)}</tbody></table></div> : <p className="muted small">No linked security assessment captured.</p>}
       {summary.security?.some(row => row.initial_findings == null || row.current_findings == null || row.suppression_count == null || row.suppression_request_ids == null) && <p className="muted small">Missing scan counts require evidence refresh and full reapproval.</p>}
     </section>
+    <section className="observation-certificate" aria-label="Recorded observations">
+      <h4>Recorded Observations</h4>
+      <p className="muted small">Observation records captured separately from defects. These details remain frozen with this certificate revision.</p>
+      {summary.observation_summary && <p><strong>{summary.observation_summary.total} observations</strong> · {summary.observation_summary.open} open · {summary.observation_summary.closed} closed</p>}
+      {summary.recorded_observations === undefined ? <p>Observation records were not captured in this certificate revision.</p>
+        : summary.recorded_observations.length ? summary.recorded_observations.map(row => <article key={row.id}>
+          <h4>{row.observation_key} · {row.title}</h4><p>{row.category} · {row.status}{row.outcome ? ` · ${row.outcome}` : ''}</p>
+          <AuthenticatedMarkdown value={row.description} basePath={`/api/defects/${row.id}/attachments`} />
+          {row.closure_remarks && <p><strong>Closure reason:</strong> {row.closure_remarks}</p>}
+        </article>) : <p>No linked observation records at evidence capture.</p>}
+    </section>
     <details className="clearance-method-note"><summary>How these figures were calculated</summary><p>{summary.population_note}</p><p>The figures remain unchanged until explicitly refreshed. Refreshing invalidates previous approvals and requires the full approval sequence again.</p></details>
   </section>
 }

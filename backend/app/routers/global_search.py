@@ -42,14 +42,14 @@ _SOURCES = (
 )
 _CHILD_TYPES = {"FUNCTIONAL_REQUEST", "SAST", "DAST", "PERFORMANCE"}
 _PROJECT_TYPES = {"TEST_PROJECT", "TEST_CASE", "TEST_CYCLE"}
-_SHORTHAND = re.compile(r"^(FUNC|SAST|DAST|PERF|SIGN|PROJ|TC|CYCLE)-", re.I)
+_SHORTHAND = re.compile(r"^(FUNC|SAST|DAST|PERF|SIGN|PROJ|TC|CYCLE|OBS)-", re.I)
 
 
 def _candidate_query(db, user, entity_type, model, project_ids):
     workspace_ids = active_qa_workspace_scope_ids(user)
     if entity_type == "DEFECT":
         from .defects import _scoped_defects
-        return _scoped_defects(db, user)
+        return _scoped_defects(db, user, include_observations=True)
     q = db.query(model)
     if entity_type in _CHILD_TYPES:
         q = q.outerjoin(models.QARequest, model.qa_request_id == models.QARequest.id)
@@ -131,7 +131,7 @@ def search_suggestions(q: str = Query("", max_length=120), limit: int = Query(10
             change_fields.extend([models.QARequest.cr_number, models.QARequest.epic_number])
         searchable = [title]
         if entity_type == "DEFECT":
-            searchable.extend([model.application_name, model.external_defect_id])
+            searchable.extend([model.application_name, model.external_defect_id, model.observation_key])
         if entity_type in {"TEST_CASE", "TEST_CYCLE"}:
             searchable.append(models.TestProject.name)
         reference_terms = dict.fromkeys((normalized, term))
@@ -158,7 +158,7 @@ def search_suggestions(q: str = Query("", max_length=120), limit: int = Query(10
             change_reference = next((value for value in changes if value and term in value.lower()),
                                     next((value for value in changes if value), None))
             suggestion = SearchSuggestion(entity_type=entity_type, entity_id=identifier, reference=ref,
-                title=title_text or ref, category=category, status=status, change_reference=change_reference,
+                title=title_text or ref, category='Observation' if entity_type == 'DEFECT' and ref.startswith('TQA-OBS-') else category, status=status, change_reference=change_reference,
                 destination=_portal_link(SimpleNamespace(entity_type=entity_type, entity_id=identifier), ref))
             ranked.append((score, -(created_at.timestamp() if created_at else 0), order, -identifier, suggestion))
     ranked.sort(key=lambda item: item[:4])

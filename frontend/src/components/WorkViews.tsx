@@ -42,7 +42,7 @@ function WorkSessionContent({ target, children, page, snapshot, onReturn, draftT
   }, [])
   const data = useRef<Record<string, unknown>>(drafts.get(key) || (snapshot ? structuredClone(snapshot.data) : {}))
   if (!cleared.current) drafts.set(key, data.current)
-  const fallback = target.kind === 'functional' ? '/functional-requests' : target.kind === 'defect' ? '/defects' : '/test-execution'
+  const fallback = target.kind === 'functional' ? '/functional-requests' : ['defect', 'observation'].includes(target.kind) ? '/defects' : '/test-execution'
   const listParams = new URLSearchParams(location.search)
   if (['/defects', '/functional-requests'].includes(location.pathname)) {
     for (const key of ['open', 'openId', 'defect', 'fromPending']) listParams.delete(key)

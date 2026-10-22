@@ -8,6 +8,7 @@ import HistoricalDefectLinkDialog from '../../components/HistoricalDefectLinkDia
 import DefectReassignmentDialog from '../../components/DefectReassignmentDialog'
 import { canRecoverDefectRouting } from '../../defectReassignment'
 import './Defects.css'
+import { CreateObservationModal, ObservationDetail } from './Observations'
 import { defectEvidenceError, DEFECT_EVIDENCE_EXTENSIONS } from '../../defectEvidence'
 import { useUserOptions } from '../../hooks/useUserOptions'
 import DefectWorkflowDiagram from '../../components/DefectWorkflowDiagram'
@@ -887,7 +888,9 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
 }
 
 export function DefectDetail(props: React.ComponentProps<typeof DefectDetailContent>) {
-  return <WorkSession target={{ kind: 'defect', id: props.defect.id }}><DefectDetailContent {...props} /></WorkSession>
+  return <WorkSession target={{ kind: 'defect', id: props.defect.id }}>{props.defect.record_type === 'Observation'
+    ? <ObservationDetail record={props.defect} users={props.users} onClose={props.onClose} onChanged={props.onChanged} />
+    : <DefectDetailContent {...props} />}</WorkSession>
 }
 
 function DefectDetailContent({ defect, users, departments, requestDepartment, defects, contexts, closeBeforeNavigate = false, onClose, onChanged, onOpenDefect }: {
@@ -1063,6 +1066,7 @@ function DefectDetailContent({ defect, users, departments, requestDepartment, de
   return <>
     <Modal title={`${defect.defect_key} · ${defect.title}`} onClose={onClose} workView wide>
       <div className="defect-review">
+      {defect.observation_key && <p className="observation-intro">Converted from <strong>{defect.observation_key}</strong>. Observation links, attachments, comments and review history remain on this record.</p>}
       <div className="defect-detail-hero">
         <div className="defect-detail-summary"><span className="defect-detail-kicker">DEFECT OVERVIEW · {defect.application_name} · {defect.module_feature}</span><div><Badge status={defect.status} /><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity} severity</span><span className="defect-priority-pill">{defect.priority}</span>{defect.workflow_state?.blocked && <span className="badge badge-yellow">Blocked</span>}</div></div>
         <div className="defect-review-tools">
@@ -1309,7 +1313,8 @@ export default function Defects() {
   const [duplicateCandidates, setDuplicateCandidates] = useState<DefectListOut[]>([])
   const [selected, setSelected] = useState<DefectOut | null>(null)
   const [openingDefectId, setOpeningDefectId] = useState<number | null>(null)
-  const [createMode, setCreateMode] = useState<'' | 'execution' | 'standalone'>('')
+  const [createMode, setCreateMode] = useState<'' | 'execution' | 'standalone' | 'observation'>('')
+  const [recordType, setRecordType] = useRetainedState<'All' | 'Defect' | 'Observation'>('defect.list.recordType', 'All')
   const [search, setSearch] = useRetainedState('defect.list.search', '')
   const [status, setStatus] = useRetainedState('defect.list.status', '')
   const [severity, setSeverity] = useRetainedState('defect.list.severity', '')
@@ -1319,7 +1324,7 @@ export default function Defects() {
   const detailRequests = useRef(createLatestRequestGate()).current
   const initialExecutionId = Number(searchParams.get('execution')) || undefined
 
-  const registerParams = defectRegisterParams({ functionalRequest, search, status, severity, priority, queue })
+  const registerParams = defectRegisterParams({ functionalRequest, search, status, severity, priority, queue, record_type: recordType })
 
   // SRS 7.2 pagination rollout -- the register is now server-paginated and
   // server-filtered (search/status/severity/priority/queue all become query
@@ -1337,7 +1342,7 @@ export default function Defects() {
   useListScrollRestoration(defectsLoading)
 
   const dashboardRequests = useRef(createLatestRequestGate()).current
-  const countQuery = defectRegisterParams({ functionalRequest, search, status, severity, priority }, false).toString()
+  const countQuery = defectRegisterParams({ functionalRequest, search, status, severity, priority, record_type: recordType }, false).toString()
   const loadDashboard = useCallback(() => {
     const request = dashboardRequests.begin()
     setDashboard(null)
@@ -1419,15 +1424,15 @@ export default function Defects() {
   // status/severity/priority filters, independently of queue), not from `.filter().length` over
   // whatever the paginated list happens to hold.
   const queueCounts = {
-    all: dashboard?.total || 0,
-    attention: dashboard?.attention_count || 0,
-    mine: dashboard?.mine_count || 0,
-    unlinked: dashboard?.unlinked_count || 0,
-    retest: dashboard?.retest_count || 0,
-    closed: dashboard?.closed || 0,
+    all: dashboard?.queue_counts?.all ?? (recordType === 'All' ? dashboard?.records_total : recordType === 'Observation' ? dashboard?.observations_total : dashboard?.total) ?? 0,
+    attention: dashboard?.queue_counts?.attention ?? dashboard?.attention_count ?? 0,
+    mine: dashboard?.queue_counts?.mine ?? dashboard?.mine_count ?? 0,
+    unlinked: dashboard?.queue_counts?.unlinked ?? dashboard?.unlinked_count ?? 0,
+    retest: dashboard?.queue_counts?.retest ?? dashboard?.retest_count ?? 0,
+    closed: dashboard?.queue_counts?.closed ?? dashboard?.closed ?? 0,
   }
   const queueDescriptions = {
-    all: 'Every defect visible in your workspace and department scope.',
+    all: 'Every record visible in your workspace and department scope.',
     attention: 'Open critical and high severity defects that need priority review.',
     mine: 'Defects assigned to you or reported by you.',
     unlinked: 'Defects without an active or historical execution link.',
@@ -1457,36 +1462,43 @@ export default function Defects() {
 
   return <div className="tm-page defect-page defect-module">
     <header className="defect-command-header">
-      <div className="defect-command-copy"><div><h2>Defect Management</h2><b>{dashboard?.total || 0} defects</b></div><p>Track issues, prioritize fixes, and verify resolution.</p></div>
-      <div className="defect-command-actions"><button className="btn btn-sm" onClick={() => { void api.downloadFile(`/api/defects/export-xlsx?${registerParams}`, 'defect-management-register.xlsx').catch(setError) }}>Export</button>{canCreateDefect && <><button className="btn btn-sm" onClick={() => setCreateMode('standalone')}>+ New defect</button><button className="btn btn-primary btn-sm" disabled={!contexts.length} onClick={() => setCreateMode('execution')}>+ Report from execution</button></>}</div>
+      <div className="defect-command-copy"><div><h2>Defects &amp; Observations</h2><b>{dashboard?.total || 0} defects · {dashboard?.observations_total || 0} observations</b></div><p>Review observations, prioritize defects, and retain their full history.</p></div>
+      <div className="defect-command-actions"><button className="btn btn-sm" onClick={() => { void api.downloadFile(`/api/defects/export-xlsx?${registerParams}`, 'defect-management-register.xlsx').catch(setError) }}>Export</button>{canCreateDefect && <><button className="btn btn-sm" onClick={() => setCreateMode('observation')}>+ Add observation</button><button className="btn btn-sm" onClick={() => setCreateMode('standalone')}>+ New defect</button><button className="btn btn-primary btn-sm" disabled={!contexts.length} onClick={() => setCreateMode('execution')}>+ Report from execution</button></>}</div>
     </header>
-    <ErrorText error={error} title="Defect Management could not be loaded" />
-    <section className="defect-health-strip" aria-label="Defect overview">
+    <ErrorText error={error} title="Defects & Observations could not be loaded" />
+    {recordType !== 'Observation' && <section className="defect-health-strip" aria-label="Defect overview">
       <div className="primary"><span>Open exposure</span><strong>{dashboard?.open || 0}</strong><small>defects require workflow action</small></div>
-      <button type="button" className={`danger ${queue === 'attention' ? 'active' : ''}`} aria-pressed={queue === 'attention'} onClick={() => setQueue('attention')}><span>Needs attention</span><strong>{queueCounts.attention}</strong><small>Open critical or high severity · View queue →</small></button>
-      <button type="button" className={`warning ${queue === 'unlinked' ? 'active' : ''}`} aria-pressed={queue === 'unlinked'} onClick={() => setQueue('unlinked')}><span>Execution gaps</span><strong>{queueCounts.unlinked}</strong><small>No execution linked · View queue →</small></button>
-      <button type="button" className={`success ${queue === 'retest' ? 'active' : ''}`} aria-pressed={queue === 'retest'} onClick={() => setQueue('retest')}><span>Awaiting verification</span><strong>{queueCounts.retest}</strong><small>QA, business or production · View queue →</small></button>
-      <button type="button" className={`neutral ${queue === 'closed' ? 'active' : ''}`} aria-pressed={queue === 'closed'} onClick={() => setQueue('closed')}><span>Closed</span><strong>{dashboard?.closed || 0}</strong><small>{dashboard?.reopened || 0} reopened · {dashboard?.deferred || 0} deferred</small></button>
-    </section>
+      <button type="button" className={`danger ${queue === 'attention' ? 'active' : ''}`} aria-pressed={queue === 'attention'} onClick={() => { setRecordType('Defect'); setQueue('attention') }}><span>Needs attention</span><strong>{dashboard?.attention_count || 0}</strong><small>Open critical or high severity · View queue →</small></button>
+      <button type="button" className={`warning ${queue === 'unlinked' ? 'active' : ''}`} aria-pressed={queue === 'unlinked'} onClick={() => { setRecordType('Defect'); setQueue('unlinked') }}><span>Execution gaps</span><strong>{dashboard?.unlinked_count || 0}</strong><small>No execution linked · View queue →</small></button>
+      <button type="button" className={`success ${queue === 'retest' ? 'active' : ''}`} aria-pressed={queue === 'retest'} onClick={() => { setRecordType('Defect'); setQueue('retest') }}><span>Awaiting verification</span><strong>{dashboard?.retest_count || 0}</strong><small>QA, business or production · View queue →</small></button>
+      <button type="button" className={`neutral ${queue === 'closed' ? 'active' : ''}`} aria-pressed={queue === 'closed'} onClick={() => { setRecordType('Defect'); setQueue('closed') }}><span>Closed</span><strong>{dashboard?.closed || 0}</strong><small>{dashboard?.reopened || 0} reopened · {dashboard?.deferred || 0} deferred</small></button>
+    </section>}
+    {recordType === 'Observation' && <section className="defect-health-strip" aria-label="Observation overview">
+      <div className="primary"><span>Observations</span><strong>{dashboard?.observations_total || 0}</strong><small>tracked separately from defects</small></div>
+      <div className="primary"><span>Open observations</span><strong>{dashboard?.observations_open || 0}</strong><small>New or Under Review</small></div>
+      <div className="primary"><span>Closed observations</span><strong>{dashboard?.observations_closed || 0}</strong><small>QA decision and reason recorded</small></div>
+    </section>}
     <section className="defect-workspace-card">
-      <nav className="defect-queue-tabs" aria-label="Defect queues">{([['all', 'All defects'], ['attention', 'Needs attention'], ['mine', 'My work'], ['unlinked', 'No execution link'], ['retest', 'Verification queue'], ['closed', 'Closed']] as const).map(([key, label]) => <button type="button" key={key} className={queue === key ? 'active' : ''} aria-current={queue === key ? 'page' : undefined} onClick={() => setQueue(key)}><span>{label}</span><b>{queueCounts[key]}</b></button>)}</nav>
-      <div className="defect-register-head"><div><span>DEFECT REGISTER · {queue.replace('-', ' ').toUpperCase()}</span><h3>{total} {total === 1 ? 'record' : 'records'} in this view</h3><p>{queueDescriptions[queue]}</p></div>{dashboard && <div className="defect-register-signals"><span><i className="critical" />Critical {dashboard.by_severity?.Critical || 0}</span><span><i className="high" />High {dashboard.by_severity?.High || 0}</span></div>}</div>
-      <div className="defect-toolbar"><FunctionalRequestSelect filter value={functionalRequest} onChange={setFunctionalRequest} /><label className="defect-search"><span>⌕</span><input value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search defects" placeholder="Search ID, title, application or module…" /></label><select aria-label="Filter by status" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{STATUSES.map((value) => <option key={value}>{value}</option>)}</select><select aria-label="Filter by severity" value={severity} onChange={(e) => setSeverity(e.target.value)}><option value="">All severities</option>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select><select aria-label="Filter by priority" value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">All priorities</option>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>{hasFilters && <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>}</div>
+      <div className="observation-record-types" aria-label="Record type">{([['All', 'All records'], ['Defect', 'Defects'], ['Observation', 'Observations']] as const).map(([value, label]) => <button key={value} type="button" className="btn btn-sm" aria-pressed={recordType === value} onClick={() => { setRecordType(value); setStatus(''); setSeverity(''); setPriority(''); setQueue('all') }}>{label} ({value === 'Defect' ? dashboard?.total || 0 : value === 'Observation' ? dashboard?.observations_total || 0 : dashboard?.records_total ?? dashboard?.total ?? 0})</button>)}</div>
+      <nav className="defect-queue-tabs" aria-label="Defect queues">{([['all', 'All records'], ['attention', 'Needs attention'], ['mine', 'My work'], ['unlinked', 'No execution link'], ['retest', 'Verification queue'], ['closed', 'Closed']] as const).filter(([key]) => recordType !== 'Observation' || ['all', 'mine', 'closed'].includes(key)).map(([key, label]) => <button type="button" key={key} className={queue === key ? 'active' : ''} aria-current={queue === key ? 'page' : undefined} onClick={() => setQueue(key)}><span>{label}</span><b>{queueCounts[key]}</b></button>)}</nav>
+      <div className="defect-register-head"><div><span>DEFECTS &amp; OBSERVATIONS · {queue.replace('-', ' ').toUpperCase()}</span><h3>{total} {total === 1 ? 'record' : 'records'} in this view</h3><p>{queueDescriptions[queue]}</p></div>{dashboard && recordType !== 'Observation' && <div className="defect-register-signals"><span><i className="critical" />Critical {dashboard.by_severity?.Critical || 0}</span><span><i className="high" />High {dashboard.by_severity?.High || 0}</span></div>}</div>
+      <div className="defect-toolbar"><FunctionalRequestSelect filter value={functionalRequest} onChange={setFunctionalRequest} /><label className="defect-search"><span>⌕</span><input value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search defects" placeholder="Search ID, title, application or module…" /></label><select aria-label="Filter by status" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{(recordType === 'Observation' ? ['New', 'Under Review', 'Closed'] : recordType === 'All' ? [...STATUSES, 'Under Review'] : STATUSES).map((value) => <option key={value}>{value}</option>)}</select><select disabled={recordType === 'Observation'} aria-label="Filter by severity" value={severity} onChange={(e) => setSeverity(e.target.value)}><option value="">All severities</option>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select><select disabled={recordType === 'Observation'} aria-label="Filter by priority" value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">All priorities</option>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>{hasFilters && <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>}</div>
       <Table<DefectListOut>
         tableId="defect-management" rowKey="id" retainStateKey="defect.list.table" rows={defects}
         onRowClick={(defect) => setSearchParams(current => defectDetailParams(current, defect.defect_key, defect.id))}
         server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading: defectsLoading }}
         columns={[
-        { key: 'title', header: 'Defect', render: (defect) => <span className="defect-title-cell"><DefectNumberLink id={defect.id} defectKey={defect.defect_key} loading={openingDefectId === defect.id} onOpen={() => setSearchParams(current => defectDetailParams(current, defect.defect_key, defect.id))} /><strong>{defect.title}</strong><small>Feature: {defect.module_feature}</small></span> },
+        { key: 'title', header: 'Defect / Observation', render: (defect) => <span className="defect-title-cell"><DefectNumberLink id={defect.id} defectKey={defect.defect_key} loading={openingDefectId === defect.id} onOpen={() => setSearchParams(current => defectDetailParams(current, defect.defect_key, defect.id))} /><span>{defect.record_type === 'Observation' && <span className="observation-badge">Observation</span>}{defect.record_type !== 'Observation' && defect.observation_key && <small>Converted from {defect.observation_key}</small>}</span><strong>{defect.title}</strong><small>Feature: {defect.module_feature}</small></span> },
         { key: 'application_name', header: 'Application / Module', render: (defect) => <span className="defect-application-cell"><strong>{defect.application_name}</strong><small>{defect.module_name || 'Module not specified'}</small></span>, filterValue: (defect) => `${defect.application_name} ${defect.module_name || ''}` },
-        { key: 'severity', header: 'Risk', render: (defect) => <span className="defect-risk-cell"><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><small>{defect.priority}</small></span> },
-        { key: 'status', header: 'Workflow', render: (defect) => <span className="defect-workflow-cell"><Badge status={defect.status} />{defect.status === 'Duplicate' && <small className="defect-canonical-reference">Canonical: {defect.duplicate_of_key || (defect.duplicate_of_id ? `Defect #${defect.duplicate_of_id}` : 'Not recorded')}</small>}<small>{defect.assignee_name || 'Unassigned'}</small><small className="defect-workflow-department">{defect.assigned_team || 'Department not assigned'}</small></span> },
-        { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${!defect.execution_id && !defect.execution_links.length && !defect.historical_execution_links?.length && !defect.execution_references?.length ? 'incomplete' : ''}`}>{defect.functional_requests?.length ? defect.functional_requests.map(request => <RecordNumberLink key={request.id} kind="functional" id={request.id} recordKey={request.request_id} title={request.sources.join(' · ')} onOpen={() => navigate(`/functional-requests?open=${request.id}`)} />) : <strong>No Functional Request linked</strong>}<small>{defect.qa_request_key ? `QA request: ${defect.qa_request_key}` : 'No parent QA request linked'}</small>{defect.execution_id ? <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small> : defect.execution_references?.length ? <small>Reference: {defect.execution_references[0].cycle_key} · {defect.execution_references[0].test_case_key} · Closed at link</small> : defect.historical_execution_links?.length ? <small>Historical: {defect.historical_execution_links[0].cycle_key} · {defect.historical_execution_links[0].test_case_key} · Attempt #{defect.historical_execution_links[0].attempt_no}</small> : <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small>}</span> },
+        { key: 'severity', header: recordType === 'Observation' ? 'Category' : 'Risk / Category', render: (defect) => defect.record_type === 'Observation' ? <span className="defect-risk-cell"><strong>{defect.observation_category}</strong><small>Observation</small></span> : <span className="defect-risk-cell"><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><small>{defect.priority}</small></span> },
+        { key: 'status', header: 'Workflow', render: (defect) => <span className="defect-workflow-cell"><Badge status={defect.status} />{defect.status === 'Duplicate' && <small className="defect-canonical-reference">Canonical: {defect.duplicate_of_key || (defect.duplicate_of_id ? `Defect #${defect.duplicate_of_id}` : 'Not recorded')}</small>}<small>{defect.record_type === 'Observation' ? 'QA review workflow' : defect.assignee_name || 'Unassigned'}</small>{defect.record_type !== 'Observation' && <small className="defect-workflow-department">{defect.assigned_team || 'Department not assigned'}</small>}</span> },
+        { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${defect.record_type !== 'Observation' && !defect.execution_id && !defect.execution_links.length && !defect.historical_execution_links?.length && !defect.execution_references?.length ? 'incomplete' : ''}`}>{defect.functional_requests?.length ? defect.functional_requests.map(request => <RecordNumberLink key={request.id} kind="functional" id={request.id} recordKey={request.request_id} title={request.sources.join(' · ')} onOpen={() => navigate(`/functional-requests?open=${request.id}`)} />) : <strong>No Functional Request linked</strong>}<small>{defect.qa_request_key ? `QA request: ${defect.qa_request_key}` : 'No parent QA request linked'}</small>{defect.execution_id ? <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small> : defect.execution_references?.length ? <small>Reference: {defect.execution_references[0].cycle_key} · {defect.execution_references[0].test_case_key} · Closed at link</small> : defect.historical_execution_links?.length ? <small>Historical: {defect.historical_execution_links[0].cycle_key} · {defect.historical_execution_links[0].test_case_key} · Attempt #{defect.historical_execution_links[0].attempt_no}</small> : <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small>}</span> },
         { key: 'reported_at', header: 'Reported / Age', render: (defect) => <span className="defect-age-cell"><strong>{formatDateIST(defect.reported_at)}</strong><small>{ageInDays(defect.reported_at)}d since reported · {defect.reporter_name}</small></span> },
       ]} />
-      {!defects.length && <div className="tm-empty"><strong>{dashboard?.total ? 'No defects match this view' : 'No governed defects yet'}</strong><span>{dashboard?.total ? 'Change the queue or clear filters to see more records.' : 'Open a defect now, or report one directly from a Failed/Blocked execution.'}</span></div>}
+      {!defects.length && <div className="tm-empty"><strong>{dashboard?.records_total ? 'No records match this view' : 'No defects or observations yet'}</strong><span>{dashboard?.total ? 'Change the queue or clear filters to see more records.' : 'Add an observation or raise a defect to start tracking findings.'}</span></div>}
     </section>
-    {createMode && <CreateDefectModal standalone={createMode === 'standalone'} contexts={contexts} requests={requests} initialExecutionId={initialExecutionId} onClose={() => { setCreateMode(''); setSearchParams(current => defectDetailParams(current)) }} onCreated={(created) => { refreshDefects(); setCreateMode(''); setSelected(created); setSearchParams(current => defectDetailParams(current, created.defect_key)) }} />}
+    {createMode === 'observation' && <CreateObservationModal requests={requests} onClose={() => setCreateMode('')} onCreated={created => { refreshDefects(); setCreateMode(''); setSelected(created); setSearchParams(current => defectDetailParams(current, created.defect_key)) }} />}
+    {createMode && createMode !== 'observation' && <CreateDefectModal standalone={createMode === 'standalone'} contexts={contexts} requests={requests} initialExecutionId={initialExecutionId} onClose={() => { setCreateMode(''); setSearchParams(current => defectDetailParams(current)) }} onCreated={(created) => { refreshDefects(); setCreateMode(''); setSelected(created); setSearchParams(current => defectDetailParams(current, created.defect_key)) }} />}
     {selected && <DefectDetail defect={selected} users={users} departments={departments} requestDepartment={requests.find((request) => request.id === selected.qa_request_id)?.department} defects={duplicateCandidates} contexts={contexts} onOpenDefect={(opened) => { setSelected(opened); setSearchParams(current => defectDetailParams(current, opened.defect_key)) }} onClose={() => {
       // 2026-08 -- reported directly: closing a defect opened via a
       // cross-module deep link (e.g. Test Execution's "Cycle Defects"

@@ -15,10 +15,10 @@ export async function resolveDefect<T>(keyOrId: number | string, get: (path: str
   try {
     return await get(`/api/defects/by-key/${encodeURIComponent(key)}`)
   } catch (error) {
-    const shorthand = /^DEF-(\d+)$/i.exec(key)
+    const shorthand = /^(DEF|OBS)-(\d+)$/i.exec(key)
     if (!shorthand || (error as { status?: number })?.status !== 404) throw error
     // Existing legacy keys keep their identity. Only a missing exact key may
     // use the current namespace; access/network errors never trigger fallback.
-    return get(`/api/defects/by-key/TQA-DEF-${shorthand[1].padStart(5, '0')}`)
+    return get(`/api/defects/by-key/TQA-${shorthand[1].toUpperCase()}-${shorthand[2].padStart(5, '0')}`)
   }
 }

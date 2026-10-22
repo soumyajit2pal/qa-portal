@@ -2256,6 +2256,58 @@ class CommentCreate(BaseModel):
 
 
 # ---------------- Defect Management ----------------
+OBSERVATION_CATEGORIES = ('UI / Usability', 'Improvement', 'Requirement Clarification', 'Documentation', 'Other')
+
+
+class ObservationCreate(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(min_length=1)
+    observation_category: Literal['UI / Usability', 'Improvement', 'Requirement Clarification', 'Documentation', 'Other']
+    application_name: Optional[str] = Field(default=None, max_length=150)
+    department: Optional[str] = Field(default=None, max_length=150)
+    module_name: Optional[str] = Field(default=None, max_length=150)
+    module_feature: Optional[str] = Field(default=None, max_length=150)
+    environment: Optional[str] = Field(default=None, max_length=60)
+    qa_request_id: Optional[int] = Field(default=None, gt=0)
+    functional_request_id: Optional[int] = Field(default=None, gt=0)
+    execution_id: Optional[int] = Field(default=None, gt=0)
+    related_cr_number: Optional[str] = Field(default=None, max_length=64)
+    cc_user_ids: List[int] = Field(default_factory=list, max_length=200)
+    _limit_rich_text = field_validator('description')(_limited_rich_text)
+
+
+class ObservationUpdate(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    revision: int = Field(ge=0, strict=True)
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(min_length=1)
+    observation_category: Literal['UI / Usability', 'Improvement', 'Requirement Clarification', 'Documentation', 'Other']
+    _limit_rich_text = field_validator('description')(_limited_rich_text)
+
+
+class ObservationAction(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    revision: int = Field(ge=0, strict=True)
+    status: Literal['Under Review', 'Closed', 'New']
+    reason: str = Field(min_length=1, max_length=4000)
+    outcome: Optional[Literal['Accepted as is', 'Improvement recorded', 'Clarification provided', 'Documentation updated', 'No action required']] = None
+
+
+class ObservationConversion(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    revision: int = Field(ge=0, strict=True)
+    reason: str = Field(min_length=1, max_length=4000)
+    severity: Literal['Critical', 'High', 'Medium', 'Low']
+    priority: Literal['P1 – Immediate', 'P2 – High', 'P3 – Medium', 'P4 – Low']
+    environment: str = Field(min_length=1, max_length=60)
+    module_feature: str = Field(min_length=1, max_length=150)
+    steps_to_reproduce: str = Field(min_length=1)
+    expected_result: str = Field(min_length=1)
+    actual_result: str = Field(min_length=1)
+    _limit_rich_text = field_validator('steps_to_reproduce', 'expected_result', 'actual_result')(_limited_rich_text)
+
+
 class DefectCreate(BaseModel):
     cc_user_ids: List[int] = Field(default_factory=list, max_length=200)
     application_name: Optional[str] = Field(default=None, max_length=150)
@@ -2463,6 +2515,11 @@ class FunctionalRequestOptionOut(ORMModel):
 
 
 class DefectOut(ORMModel):
+    record_type: str = 'Defect'
+    observation_key: Optional[str] = None
+    observation_category: Optional[str] = None
+    observation_outcome: Optional[str] = None
+    observation_converted_at: Optional[datetime.datetime] = None
     functional_requests: List[FunctionalRequestReferenceOut] = []
     resolver_department: Optional[str] = None
     cc_user_ids: List[int] = []
@@ -2575,6 +2632,10 @@ class DefectAssignmentContext(BaseModel):
 
 
 class DefectListOut(ORMModel):
+    record_type: str = 'Defect'
+    observation_key: Optional[str] = None
+    observation_category: Optional[str] = None
+    observation_outcome: Optional[str] = None
     functional_requests: List[FunctionalRequestReferenceOut] = []
     modern_workflow: bool = False
     resolution_type: Optional[str] = None
@@ -2631,6 +2692,12 @@ class DefectListOut(ORMModel):
 
 
 class DefectDashboardOut(BaseModel):
+    queue_counts: dict[str, int] = {}
+    observations_total: int = 0
+    observations_open: int = 0
+    observations_closed: int = 0
+    observations_by_status: dict[str, int] = {}
+    records_total: int = 0
     total: int
     open: int
     closed: int

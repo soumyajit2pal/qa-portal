@@ -9,6 +9,8 @@ from ..defect_action_evidence import selected_evidence
 
 
 def apply_action(db, obj, payload, user, *, commit=True, verification_context=None, allow_failure_observation=False):
+    from ..observations import require_defect
+    require_defect(obj)
     from . import defects as d
     # Scope is checked by the caller; lock only the base table (Oracle disallows
     # FOR UPDATE on the outer-joined visibility query).
@@ -258,6 +260,7 @@ def apply_action(db, obj, payload, user, *, commit=True, verification_context=No
                 event.update(target_release=obj.target_release, review_date=payload.review_date.isoformat(), approved_by=user.id)
             elif target == 'Duplicate':
                 original = d._get_visible(payload.duplicate_defect_id, db, user)
+                require_defect(original)
                 if original.id == obj.id or original.status == 'Duplicate':
                     raise HTTPException(400, 'Select a different canonical defect')
                 obj.duplicate_of_id = original.id

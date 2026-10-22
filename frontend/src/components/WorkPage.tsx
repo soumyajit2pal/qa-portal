@@ -11,6 +11,7 @@ import AddCasesModal from './AddCasesModal'
 import { UserOption, FunctionalOut, DefectOut, DepartmentOut, DefectListOut, DefectLinkableExecutionOut, QARequestListOut, TestCycleOut, TestExecutionSummaryOut, TestProjectMyAccessOut } from '../types'
 import { FunctionalDetail } from '../modules/functional/Functional'
 import { CreateDefectModal, DefectDetail } from '../modules/test-management/Defects'
+import { CreateObservationModal } from '../modules/test-management/Observations'
 
 interface PageData {
   snapshot?: WorkSnapshot; users: UserOption[]; functional?: FunctionalOut; defect?: DefectOut
@@ -22,7 +23,7 @@ export default function WorkPage() {
   const target = parseWorkPath(location.pathname), token = new URLSearchParams(location.search).get('draft')
   const identity = target ? workKey(target) : ''
   const [data, setData] = useState<PageData | null>(null), [error, setError] = useState<unknown>(null), [retry, setRetry] = useState(0)
-  const pageTitle = data?.functional?.request_id || data?.defect?.defect_key || (data?.cycle ? `Add testcases · ${data.cycle.cycle_key}` : target?.id === 'new' ? 'New defect' : '')
+  const pageTitle = data?.functional?.request_id || data?.defect?.defect_key || (data?.cycle ? `Add testcases · ${data.cycle.cycle_key}` : target?.id === 'new' ? target.kind === 'observation' ? 'New observation' : 'New defect' : '')
   useEffect(() => {
     if (!pageTitle) return
     const previous = document.title
@@ -62,7 +63,7 @@ export default function WorkPage() {
     load().catch(reason => { if (active) setError(reason) })
     return () => { active = false }
   }, [identity, token, scope, retry])
-  const fallback = target?.kind === 'functional' ? '/functional-requests' : target?.kind === 'defect' ? '/defects' : '/test-execution'
+  const fallback = target?.kind === 'functional' ? '/functional-requests' : target && ['defect', 'observation'].includes(target.kind) ? '/defects' : '/test-execution'
   const back = () => navigate(internalNavigationPath(data?.snapshot?.returnTo) || fallback)
   if (!data || !target) return <div className="work-page-status"><button className="btn" onClick={back}>← Back to list</button>{error ? <><ErrorText error={error} /><button className="btn" onClick={() => setRetry(value => value + 1)}>Retry</button></> : <p role="status">Opening work page and restoring your draft…</p>}</div>
   return <WorkSession target={target} page snapshot={data.snapshot}>
@@ -78,5 +79,6 @@ export default function WorkPage() {
       onOpenDefect={defect => navigate(workPath({ kind: 'defect', id: defect.id }))} />}
     {target.kind === 'defect' && target.id === 'new' && <CreateDefectModal standalone contexts={data.contexts || []} requests={data.requests || []}
       onClose={back} onCreated={defect => navigate(workPath({ kind: 'defect', id: defect.id }))} />}
+    {target.kind === 'observation' && <CreateObservationModal requests={data.requests || []} onClose={back} onCreated={record => navigate(workPath({ kind: 'defect', id: record.id }))} />}
   </WorkSession>
 }

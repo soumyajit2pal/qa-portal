@@ -1202,6 +1202,8 @@ export interface CertificateSummary {
   assigned_testers?: { id: number; name: string }[]
   conditional_observations?: string
   observations?: { defect_key: string; functionality: string; observation: string; severity: string; status: string; owner: string; target_date: string }[]
+  observation_summary?: { total: number; open: number; closed: number }
+  recorded_observations?: { id: number; observation_key: string; title: string; description: string; category: string; status: string; outcome?: string | null; closure_remarks?: string | null; reporter?: string | null; revision: number }[]
   change_request_ids?: string
   change_description?: string
   revision: number
@@ -2319,6 +2321,11 @@ export interface FunctionalRequestReference {
 }
 
 export interface DefectOut {
+  record_type?: 'Defect' | 'Observation'
+  observation_key?: string | null
+  observation_category?: string | null
+  observation_outcome?: string | null
+  observation_converted_at?: string | null
   functional_requests?: FunctionalRequestReference[]
   resolver_department?: string | null
   cc_user_ids?: number[]
@@ -2425,6 +2432,10 @@ export interface DefectOut {
 // (PAG-005); Defects.tsx fetches the full `DefectOut` via `GET /{id}` only
 // when a row is actually opened (PAG-006).
 export interface DefectListOut {
+  record_type?: 'Defect' | 'Observation'
+  observation_key?: string | null
+  observation_category?: string | null
+  observation_outcome?: string | null
   functional_requests?: FunctionalRequestReference[]
   modern_workflow?: boolean
   resolution_type?: string | null
@@ -2473,6 +2484,12 @@ export interface DefectListOut {
 }
 
 export interface DefectDashboardOut {
+  observations_total?: number
+  observations_open?: number
+  observations_closed?: number
+  observations_by_status?: Record<string, number>
+  records_total?: number
+  queue_counts?: Record<string, number>
   total: number
   open: number
   closed: number
