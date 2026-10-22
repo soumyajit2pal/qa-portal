@@ -20,12 +20,13 @@ import {
 // this file only owns what's specific to being a controlled form field
 // (seeding from an initial markdown value, reporting images back up,
 // character-count footer).
-export default function JiraRichTextField({ value, disabled, onChange, onImagesChange, maxLength = 10000, allowImages = true,
+export default function JiraRichTextField({ value, disabled, onChange, onImagesChange, initialImages, maxLength = 10000, allowImages = true,
   ariaLabel = 'Actual Result', placeholder = 'Describe the observed result. Paste screenshots with Ctrl/Cmd+V…' }: {
   value: string
   disabled?: boolean
   onChange: (value: string) => void
   onImagesChange: (files: File[]) => void
+  initialImages?: File[]
   maxLength?: number
   allowImages?: boolean
   ariaLabel?: string
@@ -53,6 +54,7 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
   // field) each get their own correctly-named files and messages.
   const fieldSlug = ariaLabel.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'result'
   const { images, addImages, removeImage, pasteImages } = useRichTextImages({
+    initialFiles: initialImages,
     filenamePrefix: fieldSlug,
     messages: {
       tooLarge: (name) => `“${name}” exceeds the 10 MB limit.`,

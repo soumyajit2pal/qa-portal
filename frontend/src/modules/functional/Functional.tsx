@@ -1,3 +1,4 @@
+import { WorkSession, useWorkState, useRetainedState, useListScrollRestoration } from '../../components/WorkViews'
 import TestingScopeNotice, { additionalTestingOptions } from '../../components/TestingScopeNotice'
 import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
@@ -19,6 +20,7 @@ import JiraActivity from "../../components/JiraActivity";
 import ClearableSearchInput from "../../components/ClearableSearchInput";
 import RaisedHistoryFilter from "../../components/RaisedHistoryFilter";
 import RoleGroupLink from "../../components/RoleGroupLink";
+import RecordNumberLink from "../../components/RecordNumberLink";
 import RequestDelegation from "../../components/RequestDelegation";
 import {
   QA_STATUSES,
@@ -98,7 +100,7 @@ function FunctionalFormModal({
 }) {
   const { user } = useAuth();
   const isAdmin = hasRole(user, "ADMIN");
-  const [form, setForm] = useState({
+  const [form, setForm] = useWorkState('functional.edit.form', {
     priority: editing.priority || "Medium",
     risk_rating: editing.risk_rating || "Medium",
     application_name: editing.application_name || "",
@@ -117,7 +119,7 @@ function FunctionalFormModal({
   // even while this request was still sitting in the requester's own hands
   // (e.g. Draft or returned for changes). Same pattern as Performance.tsx's
   // PerformanceFormModal/SAST.tsx's SASTFormModal.
-  const [checkedItems, setCheckedItems] = useState<string[]>(
+  const [checkedItems, setCheckedItems] = useWorkState<string[]>('functional.edit.checkedItems', 
     editing.checklist_items
       .filter((c) => c.requester_checked)
       .map((c) => c.item)
@@ -192,7 +194,7 @@ function FunctionalFormModal({
   }
 
   return (
-    <Modal title={`Edit ${editing.request_id}`} onClose={onClose} wide>
+    <Modal title={`Edit ${editing.request_id}`} onClose={onClose} closeDisabled={busy} workView wide>
       {editing?.qa_request && (
         <p className="muted small" style={{ marginTop: -8 }}>
           Auto-created from QA Request {editing.qa_request.request_id} --
@@ -740,7 +742,11 @@ interface FunctionalDetailProps {
   preview?: { busy: boolean; onConfirm: () => void };
 }
 
-export function FunctionalDetail({
+export function FunctionalDetail(props: FunctionalDetailProps) {
+  return <WorkSession target={{ kind: 'functional', id: props.req.id }}><FunctionalDetailContent {...props} /></WorkSession>
+}
+
+function FunctionalDetailContent({
   req,
   onClose,
   onChanged,
@@ -749,31 +755,31 @@ export function FunctionalDetail({
 }: FunctionalDetailProps) {
   const { user } = useAuth();
   const navigate = useRequestNavigation();
-  const [tab, setTab] = useState("overview");
+  const [tab, setTab] = useWorkState('functional.detail.tab', "overview");
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>([]);
   const [history, setHistory] = useState<ApprovalActionOut[]>([]);
   const [error, setError] = useState<unknown>(null);
-  const [comments, setComments] = useState("");
+  const [comments, setComments] = useWorkState('functional.detail.comments', "");
   // 2026-08 -- dedicated from the shared `comments` state above (which is
   // only ever populated by the unrelated "What was the behaviour earlier?"
   // Readiness Verification textarea, and was empty at this later stage) so
   // the Requester can actually give a reason for "Changes Required" -- see
   // the backend's own mandatory-reason check in
   // routers/functional.py::requester_decision.
-  const [requesterComments, setRequesterComments] = useState("");
+  const [requesterComments, setRequesterComments] = useWorkState('functional.detail.requesterComments', "");
   // Requester-requested certificate changes are first reviewed by QA. No
   // successor certificate or mutable copy of an issued certificate is made
   // until QA explicitly chooses the appropriate path below.
-  const [clearanceChangeComments, setClearanceChangeComments] = useState("");
-  const [retestSourceCycleId, setRetestSourceCycleId] = useState<number | null>(null);
+  const [clearanceChangeComments, setClearanceChangeComments] = useWorkState('functional.detail.clearanceChangeComments', "");
+  const [retestSourceCycleId, setRetestSourceCycleId] = useWorkState<number | null>('functional.detail.retestSourceCycleId', null);
   const [createdReexecutionCycle, setCreatedReexecutionCycle] = useState<LinkedTestCycleRef | null>(null);
-  const [selectedQALead, setSelectedQALead] = useState("");
-  const [selectedTesters, setSelectedTesters] = useState<string[]>([]);
+  const [selectedQALead, setSelectedQALead] = useWorkState('functional.detail.selectedQALead', "");
+  const [selectedTesters, setSelectedTesters] = useWorkState<string[]>('functional.detail.selectedTesters', (req.assigned_tester_ids || "").split(",").filter(Boolean));
   // 2026-08 Reassignment CR -- a reason is mandatory when this is a genuine
   // reassignment (not the very first tester assignment); the backend
   // enforces this too (reassignment.require_reason), this is just the UI
   // half. Reset whenever the request itself changes, same as selectedTesters.
-  const [reassignReason, setReassignReason] = useState("");
+  const [reassignReason, setReassignReason] = useWorkState('functional.detail.reassignReason', "");
   // Whether the "require Department Head re-approval on return" popup (see
   // canReadinessDecide below) is open -- reported directly: an always-visible
   // checkbox next to "Readiness Failed" was easy to miss/forget before
@@ -782,9 +788,9 @@ export function FunctionalDetail({
   const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false);
   const [readinessPassError, setReadinessPassError] = useState<unknown>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [editingDetails, setEditingDetails] = useState(false);
+  const [editingDetails, setEditingDetails] = useWorkState('functional.detail.editingDetails', false);
   const [showSignoffModal, setShowSignoffModal] = useState(false);
-  const [showStartExecution, setShowStartExecution] = useState(false);
+  const [showStartExecution, setShowStartExecution] = useWorkState('functional.detail.showStartExecution', false);
   const [executionNotice, setExecutionNotice] = useState("");
   const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments(
     "/api/functional-requests",
@@ -812,7 +818,10 @@ export function FunctionalDetail({
     load();
   }, [load]);
 
+  const previousRequest = useRef(req.id);
   useEffect(() => {
+    if (previousRequest.current === req.id) return;
+    previousRequest.current = req.id;
     setCreatedReexecutionCycle(null);
     setRetestSourceCycleId(null);
     setClearanceChangeComments("");
@@ -1089,7 +1098,11 @@ export function FunctionalDetail({
   // to "hand off from the current roster" rather than starting blank. Only
   // runs once per loaded request (keyed on id + the assignment string
   // itself), so it won't stomp on in-progress edits to the picker.
+  const previousAssignment = useRef(`${req.id}:${req.assigned_tester_ids}`);
   useEffect(() => {
+    const assignmentKey = `${req.id}:${req.assigned_tester_ids}`;
+    if (previousAssignment.current === assignmentKey) return;
+    previousAssignment.current = assignmentKey;
     if (canAssignTester && !isInitialTesterAssignment) {
       setSelectedTesters((req.assigned_tester_ids || "").split(",").filter(Boolean));
     }
@@ -1236,6 +1249,8 @@ export function FunctionalDetail({
   return (
     <Modal
       title={`${req.request_id} — ${req.application_name || ""}`}
+      workView={!preview}
+      closeDisabled={!!busyAction}
       onClose={onClose}
       wide
     >
@@ -2161,9 +2176,9 @@ export function FunctionalDetail({
 export default function Functional() {
   const viewerManagedDeepLinks = useViewerManagedDeepLinks();
   const [users, setUsers] = useState<UserOption[]>([]);
-  const [statusFilter, setStatusFilter] = useState("");
-  const [assignedOnly, setAssignedOnly] = useState(false);
-  const [raisedHistory, setRaisedHistory] = useState({ from: "", to: "" });
+  const [statusFilter, setStatusFilter] = useRetainedState('functional.list.statusFilter', "");
+  const [assignedOnly, setAssignedOnly] = useRetainedState('functional.list.assignedOnly', false);
+  const [raisedHistory, setRaisedHistory] = useRetainedState('functional.list.raisedHistory', { from: "", to: "" });
   // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
   // FunctionalListOut shape; opening a request fetches the full
   // FunctionalOut record fresh via GET /api/functional-requests/{id} before
@@ -2180,7 +2195,8 @@ export default function Functional() {
   } = usePaginatedList<FunctionalListOut>("/api/functional-requests", {
     status: statusFilter ? [statusFilter] : undefined,
     extra: { assigned_to_me: assignedOnly ? "true" : undefined, raised_from: raisedHistory.from || undefined, raised_to: raisedHistory.to || undefined },
-  });
+  }, { retainKey: "functional.list" });
+  useListScrollRestoration(loading);
 
   useEffect(() => {
     api.get<UserOption[]>("/api/auth/user-options").then(setUsers).catch(setError);
@@ -2267,7 +2283,7 @@ export default function Functional() {
             {
               key: "request_id",
               header: "Request ID",
-              render: (r) => (openingId === r.id ? "Opening…" : r.request_id),
+              render: (r) => <RecordNumberLink kind="functional" id={r.id} recordKey={r.request_id} loading={openingId === r.id} onOpen={() => openRequest(r)} />,
             },
             {
               key: "application_name",
@@ -2359,7 +2375,7 @@ export default function Functional() {
               render: (r) => formatDateTimeIST(r.updated_at),
             },
           ]}
-          rows={requests}
+          retainStateKey="functional.list.table" rows={requests}
         />
       </Card>
 

@@ -18,6 +18,8 @@ export function mutationSuccessCopy({ path, method }: ApiMutationEvent): Mutatio
   // Login/logout feedback belongs to the destination screen and would flash
   // during navigation. All authenticated business mutations are covered.
   if (value === '/api/auth/login' || value === '/api/auth/logout') return null
+  // These POSTs only resolve or review a picker selection; no data is saved.
+  if (/^\/api\/test-execution\/cycles\/\d+\/candidate-(review|test-case-ids)$/.test(value)) return null
   if (value.startsWith('/api/test-repository/') && action === 'move-preview') return null
   if (value.startsWith('/api/test-repository/') && (action === 'move' || action === 'bulk-move')) {
     return { title: 'Test cases moved', message: 'The selected test cases are now in the destination project.' }

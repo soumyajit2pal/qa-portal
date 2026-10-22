@@ -1975,6 +1975,7 @@ export interface TestCycleFolderOut {
   workspace_writable?: boolean
   id: number
   project_id: number
+  parent_id?: number | null
   name: string
   created_by_id?: number | null
   created_by_name?: string | null

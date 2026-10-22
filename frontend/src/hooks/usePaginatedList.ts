@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { PageOut } from '../types'
+import { useRetainedState } from '../components/WorkViews'
 
 // SRS 7.2 (PAG-001..010) -- the shared consumption side of
 // backend/app/pagination.py. Every list page that used to call
@@ -26,13 +27,13 @@ export interface PaginatedListFilters {
 
 const DEFAULT_PAGE_SIZE = 5
 
-export function usePaginatedList<T>(path: string, filters: PaginatedListFilters = {}, options: { cursor?: boolean } = {}) {
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
+export function usePaginatedList<T>(path: string, filters: PaginatedListFilters = {}, options: { cursor?: boolean; retainKey?: string } = {}) {
+  const [page, setPage] = useRetainedState(options.retainKey ? `${options.retainKey}.page` : undefined, 1)
+  const [pageSize, setPageSize] = useRetainedState(options.retainKey ? `${options.retainKey}.pageSize` : undefined, DEFAULT_PAGE_SIZE)
   const [data, setData] = useState<PageOut<T> | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
-  const [cursorByPage, setCursorByPage] = useState<Record<number, number | null>>({ 1: null })
+  const [cursorByPage, setCursorByPage] = useRetainedState<Record<number, number | null>>(options.retainKey ? `${options.retainKey}.cursors` : undefined, { 1: null })
   // Guards against an earlier, slower request's response overwriting a
   // later one's (e.g. typing quickly in a search box outruns the network) --
   // only the response matching the most recently issued request is applied.
@@ -40,11 +41,15 @@ export function usePaginatedList<T>(path: string, filters: PaginatedListFilters 
 
   const statusKey = (filters.status || []).join(',')
   const extraKey = filters.extra ? JSON.stringify(filters.extra) : ''
+  const filterIdentity = JSON.stringify([path, filters.search, statusKey, filters.department, filters.sortBy, filters.sortOrder, extraKey, pageSize])
+  const previousFilters = useRef(filterIdentity)
 
   // A changed filter, sort, or page size should always land back on page 1
   // -- otherwise narrowing a search while sitting on page 4 could request a
   // now-nonexistent page instead of the first, most relevant matches.
   useEffect(() => {
+    if (previousFilters.current === filterIdentity) return
+    previousFilters.current = filterIdentity
     setPage(1)
     setCursorByPage({ 1: null })
     // eslint-disable-next-line react-hooks/exhaustive-deps

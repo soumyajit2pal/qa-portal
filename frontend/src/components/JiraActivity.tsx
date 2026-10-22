@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react'
+import { useWorkState, useWorkBusy } from './WorkViews'
 import { api, mapWithConcurrency } from '../api'
 import { formatDateIST, formatDateTimeIST, portalDate } from '../time'
 import { useAuth } from '../context/AuthContext'
@@ -7,6 +8,7 @@ import { ApprovalActionOut, RequestDocumentOut } from '../types'
 import { EmptyState, ErrorText } from './Common'
 import {
   editorContentToMarkdown,
+  markdownToEditorHtml,
   safeRichTextLink,
   useRichTextImages,
   useRichTextLink,
@@ -369,19 +371,24 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
   const editorRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const imageInsertRange = useRef<Range | null>(null)
-  const [filter, setFilter] = useState<ActivityFilter>('all')
-  const [expanded, setExpanded] = useState(false)
+  const draftKey = `activity:${entityType}:${entityId}`
+  const [draftText, setDraftText] = useWorkState(`${draftKey}.text`, '')
+  const [draftImages, setDraftImages] = useWorkState<File[]>(`${draftKey}.images`, [])
+  const [filter, setFilter] = useWorkState<ActivityFilter>(`${draftKey}.filter`, 'all')
+  const [expanded, setExpanded] = useWorkState(`${draftKey}.expanded`, false)
   const [busy, setBusy] = useState(false)
+  useWorkBusy(busy)
   const posting = useRef(false)
   const mounted = useRef(true)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
-  const [attachments, setAttachments] = useState<PendingActivityAttachment[]>([])
-  const attachmentsRef = useRef<PendingActivityAttachment[]>([])
-  const attachmentSequence = useRef(0)
+  const [attachments, setAttachments] = useWorkState<PendingActivityAttachment[]>(`${draftKey}.attachments`, [])
+  const attachmentsRef = useRef<PendingActivityAttachment[]>(attachments)
+  const attachmentSequence = useRef(attachments.length)
   const inlineImagesRef = useRef<PendingRichImage[]>([])
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
-  const [characterCount, setCharacterCount] = useState(0)
+  const [characterCount, setCharacterCount] = useState(draftText.length)
+  useEffect(() => { if (editorRef.current && draftText) editorRef.current.innerHTML = markdownToEditorHtml(draftText) }, [entityType, entityId])
   const mentionRange = useRef<Range | null>(null)
   const [mentionQuery, setMentionQuery] = useState<string | null>(null)
   const [mentionUsers, setMentionUsers] = useState<ActivityMentionUser[]>([])
@@ -407,6 +414,7 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
   }, [mentionQuery, entityType, entityId, busy, isReadOnly])
 
   const { images, addImages, removeImage, clearImages, pasteImages } = useRichTextImages({
+    initialFiles: draftImages,
     filenamePrefix: 'pasted-image',
     maxImages: ACTIVITY_MAX_ATTACHMENTS - attachments.length,
     messages: {
@@ -416,7 +424,7 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
     onError: setError,
   })
   const { showLink, linkUrl, setLinkUrl, linkInputRef, beginLink, applyLink, cancelLink } = useRichTextLink(editorRef, setError)
-  useEffect(() => { inlineImagesRef.current = images }, [images])
+  useEffect(() => { inlineImagesRef.current = images; setDraftImages(images.map(image => image.file)) }, [images])
 
   const timeline = useMemo(() => {
     const entries: (ApprovalActionOut & { workflowEvent?: Record<string, any> })[] = items.map(item => ({ ...item }))
@@ -441,7 +449,9 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
   const commentCount = items.filter((item) => item.decision === 'Commented').length
 
   function syncEditor() {
-    setCharacterCount(editorContentToMarkdown(editorRef.current).length)
+    const text = editorContentToMarkdown(editorRef.current)
+    setDraftText(text)
+    setCharacterCount(text.length)
     const mention = activityMentionAtCaret(editorRef.current)
     mentionRange.current = mention?.range || null
     if ((mention?.query ?? null) !== mentionQuery) {
@@ -481,6 +491,7 @@ export function JiraActivityContent({ entityType, entityId, items, onPosted, wor
     mentionRange.current = null
     setMentionQuery(null)
     if (editorRef.current) editorRef.current.innerHTML = ''
+    setDraftText('')
     clearImages()
     inlineImagesRef.current = []
     attachmentsRef.current = []; setAttachments([]); setDragging(false)

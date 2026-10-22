@@ -36,6 +36,7 @@
 
 .defect-review { display:grid; gap:12px; min-width:0; font-size:12px; }
 .defect-review > * { min-width:0; }
+.defect-review .defect-linked-request { display:grid; gap:4px; }
 .defect-review .defect-detail-hero { padding:13px 15px; margin:0; border:1px solid #dbe6ea; border-top:3px solid #277a88; border-radius:10px; background:#f8fbfc; gap:14px; align-items:center; }
 .defect-review .defect-detail-kicker { font-size:10px; letter-spacing:.03em; color:#536f7c; line-height:1.5; }
 .defect-review .defect-review-tools { display:flex; flex-wrap:wrap; align-items:center; gap:7px; flex-shrink:0; }

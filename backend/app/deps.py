@@ -1166,41 +1166,31 @@ def require_can_manage_project(project: models.TestProject, current_user: models
 
 
 def can_view_cycle_folder(folder: models.TestCycleFolder, current_user: models.User) -> bool:
-    """Reported directly: "Create Test Cycle Folder, in which I can give
-    access department based or user level, same behaviour like project
-    has." Deliberately the OPPOSITE of viewable_project_ids/
-    TestProjectViewGrant above (which only ever WIDEN visibility) -- a
-    TestCycleFolder with at least one TestCycleFolderAccess row RESTRICTS
-    visibility to just the department(s)/user(s) it names. A folder with no
-    access rows at all is unrestricted (same as an Unfiled cycle, or every
-    folder before this feature existed).
+    """Require access at every folder level, preserving governance exemptions.
 
-    Reported directly as a follow-up: QA Group (QA_ENGINEER) added to the
-    bypass list alongside QA Lead Group -- both groups, plus the project's
-    own owner, always bypass, same "QA Group/QA Lead Group govern everything"
-    convention can_manage_project/can_execute_project already use elsewhere
-    in this module -- plus this folder's own creator, so nobody can
-    restrict themselves out of a folder they just made. has_role() already
-    bypasses for ADMIN too. In practice this means a folder's access grants
-    only ever matter for accounts that hold none of these roles (e.g. a
-    business department user who can otherwise view Test Execution at all,
-    since list_cycles/get_cycle carry no role gate of their own) -- every
-    QA_ENGINEER/QA_LEAD/CHIEF_MANAGER_QA/AGM_QA account sees every folder
-    regardless of grants."""
+    Creating a child or granting access to it never bypasses a restricted
+    parent. Project visibility is enforced separately by the caller.
+    """
     if current_user.has_role(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.VIEW_ONLY):
         return True
     if folder.project and folder.project.owner_id == current_user.id:
         return True
-    if folder.created_by_id == current_user.id:
-        return True
-    grants = folder.access_grants
-    if not grants:
-        return True
-    for grant in grants:
-        if grant.user_id == current_user.id:
+    current = folder
+    seen = set()
+    while current is not None:
+        if current.id in seen or current.project_id != folder.project_id:
+            return False
+        seen.add(current.id)
+        grants = current.access_grants
+        if current.created_by_id != current_user.id and grants and not any(
+            grant.user_id == current_user.id
+            or (grant.department and current_user.has_department(grant.department))
+            for grant in grants
+        ):
+            return False
+        if current.parent_id is None:
             return True
-        if grant.department and current_user.has_department(grant.department):
-            return True
+        current = current.parent
     return False
 
 

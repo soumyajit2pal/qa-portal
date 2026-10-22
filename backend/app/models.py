@@ -3784,35 +3784,25 @@ class TestCaseVersionStep(Base):
 
 
 class TestCycleFolder(WorkspaceOwnedContent, Base):
-    """Flat (non-nested, by design) organizational folder for a Project's
-    Test Cycles, plus an OPTIONAL access restriction (see
-    TestCycleFolderAccess below). Unlike TestFolder (Test Repository), which
-    is purely organizational and always inherits its Project's own access
-    rules, a TestCycleFolder with at least one TestCycleFolderAccess row
-    becomes visible ONLY to the department(s)/user(s) it names (plus the
-    project owner, this folder's own creator, and the QA Lead Group/Admin,
-    who bypass every governance gate in this module already) -- everyone
-    else who can otherwise execute in this project is excluded, even though
-    they could see every OTHER (unrestricted) folder and every Unfiled
-    cycle. A folder with zero access rows is unrestricted -- visible to
-    anyone who can already execute in the project, same as an Unfiled cycle
-    today. Reported directly: "Create Test Cycle Folder, in which I can give
-    access department based or user level, same behaviour like project
-    has." This is deliberately the OPPOSITE of TestProjectViewGrant (which
-    only ever WIDENS a project's visibility, never restricts it) -- see
-    deps.py::can_view_cycle_folder for the actual check, and
-    ORACLE_MIGRATION_2026-07.md section 147 for the full design decision
-    (restrict, not widen; flat, not nested; existing cycles land in an
-    Unfiled pseudo-folder rather than a migrated default folder)."""
+    """Nested organizational folders for a project's Test Cycles.
+
+    Department/user grants restrict access rather than widen project access.
+    A subfolder must pass its own and every ancestor's restriction; a grant
+    on a child cannot expose content hidden by its parent. Existing folders
+    remain at the top level. See deps.can_view_cycle_folder for exemptions.
+    """
     __tablename__ = "qap_test_cycle_folders"
     id = pk_column()
     origin_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False, index=True)
+    parent_id = Column(Integer, ForeignKey("qap_test_cycle_folders.id"), nullable=True, index=True)
     name = Column(String(150), nullable=False)
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
 
     project = relationship("TestProject", back_populates="cycle_folders")
+    parent = relationship("TestCycleFolder", remote_side=[id], back_populates="children")
+    children = relationship("TestCycleFolder", back_populates="parent", passive_deletes="all")
     created_by = relationship("User", foreign_keys=[created_by_id])
     cycles = relationship("TestCycle", back_populates="folder")
     access_grants = relationship("TestCycleFolderAccess", back_populates="folder", cascade="all,delete-orphan")

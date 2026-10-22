@@ -65,7 +65,12 @@ def ensure_unique_constraint(name, table_name, columns):
 def ensure_foreign_key(name, table_name, referred_table, columns, referred_columns):
     metadata = sa.MetaData()
     table = sa.Table(table_name, metadata, *(sa.Column(column, sa.Integer) for column in columns))
-    sa.Table(referred_table, metadata, *(sa.Column(column, sa.Integer) for column in referred_columns))
+    if referred_table == table_name:
+        for column in referred_columns:
+            if column not in table.c:
+                table.append_column(sa.Column(column, sa.Integer))
+    else:
+        sa.Table(referred_table, metadata, *(sa.Column(column, sa.Integer) for column in referred_columns))
     constraint = sa.ForeignKeyConstraint(columns, [f"{referred_table}.{column}" for column in referred_columns], name=name)
     table.append_constraint(constraint)
     _ensure_constraint(table_name, name, constraint, lambda: op.create_foreign_key(name, table_name, referred_table, columns, referred_columns), "foreign_key")

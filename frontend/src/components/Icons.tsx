@@ -81,6 +81,9 @@ export const IconWarning = (p: IconProps) => (
 export const IconArrowRight = (p: IconProps) => (
   <svg {...base} {...p}><path d="M5 12h14M13 6l6 6-6 6" /></svg>
 )
+export const IconExternalLink = (p: IconProps) => (
+  <svg {...base} {...p}><path d="M14 3h7v7M21 3l-11 11" /><path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5" /></svg>
+)
 export const IconLogout = (p: IconProps) => (
   <svg {...base} {...p}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" /></svg>
 )

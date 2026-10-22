@@ -108,7 +108,9 @@ def _in_batches(values: List[int], size: int = _ORACLE_IN_BATCH_SIZE):
 def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
                            search: Optional[str] = None, priority: Optional[str] = None,
                            test_type: Optional[str] = None,
-                           created_by_id: Optional[int] = None):
+                           created_by_id: Optional[int] = None,
+                           folder_id: Optional[str] = None, include_subfolders: bool = True,
+                           exclude_linked: bool = True):
     """Approved project testcases not already present in ``cycle``.
 
     The correlated NOT EXISTS is intentionally resolved by Oracle. It
@@ -129,9 +131,33 @@ def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
             models.TestCase.project_id == cycle.project_id,
             models.TestCase.is_deleted == False,  # noqa: E712
             models.TestCaseVersion.status == "Approved",
-            ~already_in_cycle,
         )
     )
+    if exclude_linked:
+        query = query.filter(~already_in_cycle)
+    if folder_id == 'unfiled':
+        query = query.filter(models.TestCase.folder_id.is_(None))
+    elif folder_id is not None:
+        try:
+            selected_folder_id = int(folder_id)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "folder_id must be numeric or 'unfiled'")
+        folders = db.query(models.TestFolder.id, models.TestFolder.parent_id).filter_by(project_id=cycle.project_id).all()
+        if selected_folder_id not in {row.id for row in folders}:
+            raise HTTPException(404, 'Repository folder not found in this project')
+        ids = {selected_folder_id}
+        if include_subfolders:
+            children = {}
+            for row in folders:
+                children.setdefault(row.parent_id, []).append(row.id)
+            frontier = [selected_folder_id]
+            while frontier:
+                child = frontier.pop()
+                for nested in children.get(child, []):
+                    if nested not in ids:
+                        ids.add(nested)
+                        frontier.append(nested)
+        query = query.filter(or_(*(models.TestCase.folder_id.in_(batch) for batch in _in_batches(sorted(ids)))))
     if search and search.strip():
         like = f"%{search.strip()}%"
         query = query.filter(or_(
@@ -147,6 +173,25 @@ def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
     if created_by_id is not None:
         query = query.filter(models.TestCase.created_by_id == created_by_id)
     return query
+
+
+def _candidate_page(base, cursor, page_size, sort_order):
+    total = base.order_by(None).count()
+    if cursor is not None:
+        base = base.filter(models.TestCase.id < cursor if sort_order == 'newest' else models.TestCase.id > cursor)
+    order = models.TestCase.id.desc() if sort_order == 'newest' else models.TestCase.id.asc()
+    rows = base.options(joinedload(models.TestCase.created_by), joinedload(models.TestCase.current_approved_version)).order_by(order).limit(page_size + 1).all()
+    items, has_more = rows[:page_size], len(rows) > page_size
+    return {
+        'items': [{
+            'id': case.id, 'test_case_key': case.test_case_key, 'folder_id': case.folder_id,
+            'test_scenario': case.current_approved_version.test_scenario,
+            'test_type': case.current_approved_version.test_type, 'priority': case.current_approved_version.priority,
+            'module_name': case.current_approved_version.module_name, 'version': case.current_approved_version.version,
+            'created_at': case.created_at, 'created_by_id': case.created_by_id, 'created_by_name': case.created_by_name,
+        } for case in items],
+        'total': total, 'next_cursor': items[-1].id if has_more and items else None, 'has_more': has_more,
+    }
 
 
 def _get_cycle_or_404(db: Session, cycle_id: int) -> models.TestCycle:
@@ -1323,11 +1368,7 @@ def _latest_run_or_404(db: Session, obj: models.TestExecution) -> models.TestExe
 # ---- Cycle Folders ----
 # Reported directly: "Create Test Cycle Folder, in which I can give access
 # department based or user level, same behaviour like project has. Under
-# this folder create test cycle." Flat (no nesting -- see
-# models.TestCycleFolder's own docstring and ORACLE_MIGRATION_2026-07.md
-# section 147 for the full design decision), and deliberately RESTRICTING
-# (the opposite of TestProjectViewGrant's widen-only semantics) once a
-# folder has at least one access grant.
+# this folder create test cycle." Restrictions also apply through ancestors.
 def _hidden_cycle_folder_ids(db: Session, project_id: int, current_user: models.User) -> List[int]:
     """Folder ids in this project this user cannot view (see
     deps.py::can_view_cycle_folder) -- used to exclude their cycles from the
@@ -1338,7 +1379,7 @@ def _hidden_cycle_folder_ids(db: Session, project_id: int, current_user: models.
         .options(selectinload(models.TestCycleFolder.access_grants))
         .all()
     )
-    return [f.id for f in folders if f.access_grants and not can_view_cycle_folder(f, current_user)]
+    return [f.id for f in folders if not can_view_cycle_folder(f, current_user)]
 
 
 @router.get("/projects/{project_id}/cycle-folders", response_model=schemas.TestCycleFolderListOut)
@@ -1381,7 +1422,15 @@ def create_cycle_folder(project_id: int, payload: schemas.TestCycleFolderCreate,
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Folder name cannot be blank")
-    obj = models.TestCycleFolder(project_id=project_id, name=name, created_by_id=current_user.id)
+    if payload.parent_id is not None:
+        parent = _get_cycle_folder_or_404(db, payload.parent_id)
+        if parent.project_id != project_id:
+            raise HTTPException(404, "Parent folder not found in this project")
+        require_can_view_cycle_folder(parent, current_user)
+        from ..project_workspace_ownership import assert_owned
+        assert_owned(db, parent, current_user)
+    obj = models.TestCycleFolder(project_id=project_id, parent_id=payload.parent_id,
+                                 name=name, created_by_id=current_user.id)
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -1389,7 +1438,7 @@ def create_cycle_folder(project_id: int, payload: schemas.TestCycleFolderCreate,
 
 
 @router.patch("/cycle-folders/{folder_id}", response_model=schemas.TestCycleFolderOut)
-def rename_cycle_folder(folder_id: int, payload: schemas.TestCycleFolderCreate, db: Session = Depends(get_db),
+def rename_cycle_folder(folder_id: int, payload: schemas.TestCycleFolderRename, db: Session = Depends(get_db),
                          current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _get_cycle_folder_or_404(db, folder_id)
     require_project_visibility(db, obj.project_id, current_user)
@@ -1421,6 +1470,8 @@ def delete_cycle_folder(folder_id: int, db: Session = Depends(get_db),
     has_cycles = db.query(models.TestCycle).filter_by(folder_id=folder_id).first()
     if has_cycles:
         raise HTTPException(400, "This folder still has test cycles in it -- move or delete them first")
+    if db.query(models.TestCycleFolder.id).filter_by(parent_id=folder_id).first():
+        raise HTTPException(400, "This folder still has subfolders in it -- remove them first")
     db.delete(obj)
     db.commit()
 
@@ -2640,6 +2691,8 @@ def list_cycle_candidate_test_cases(
     test_type: Optional[str] = Query(None),
     created_by_id: Optional[int] = Query(None, ge=1),
     sort_order: Literal["newest", "oldest"] = Query("newest"),
+    folder_id: Optional[str] = Query(None),
+    include_subfolders: bool = Query(True),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -2652,33 +2705,60 @@ def list_cycle_candidate_test_cases(
     cycle = _get_cycle_or_404(db, cycle_id)
     _require_cycle_visibility(db, cycle, current_user)
     require_can_execute_project(db, cycle.project_id, current_user)
-    base = _cycle_candidate_query(db, cycle, search, priority, test_type, created_by_id)
-    total = base.order_by(None).count()
-    page_query = base
-    if cursor is not None:
-        page_query = page_query.filter(
-            models.TestCase.id < cursor if sort_order == "newest" else models.TestCase.id > cursor
-        )
-    id_order = models.TestCase.id.desc() if sort_order == "newest" else models.TestCase.id.asc()
-    rows = page_query.options(joinedload(models.TestCase.created_by),
-                              joinedload(models.TestCase.current_approved_version)).order_by(id_order).limit(page_size + 1).all()
-    has_more = len(rows) > page_size
-    items = rows[:page_size]
-    return {
-        "items": [{
-            "id": case.id, "test_case_key": case.test_case_key,
-            "test_scenario": case.current_approved_version.test_scenario,
-            "test_type": case.current_approved_version.test_type,
-            "priority": case.current_approved_version.priority,
-            "module_name": case.current_approved_version.module_name,
-            "version": case.current_approved_version.version,
-            "created_at": case.created_at, "created_by_id": case.created_by_id,
-            "created_by_name": case.created_by_name,
-        } for case in items],
-        "total": total,
-        "next_cursor": items[-1].id if has_more and items else None,
-        "has_more": has_more,
-    }
+    base = _cycle_candidate_query(db, cycle, search, priority, test_type, created_by_id, folder_id, include_subfolders)
+    page = _candidate_page(base, cursor, page_size, sort_order)
+    approved = _cycle_candidate_query(db, cycle, search, priority, test_type, created_by_id,
+                                     folder_id, include_subfolders, exclude_linked=False).count()
+    return {**page, "already_added_count": approved - page['total']}
+
+
+
+@router.get('/cycles/{cycle_id}/candidate-folders', response_model=schemas.CycleCandidateFolders)
+def cycle_candidate_folders(cycle_id: int, search: Optional[str] = None, priority: Optional[str] = None,
+                            test_type: Optional[str] = None, created_by_id: Optional[int] = None,
+                            db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
+    require_can_execute_project(db, cycle.project_id, current_user)
+    folders = db.query(models.TestFolder).filter_by(project_id=cycle.project_id).order_by(models.TestFolder.name, models.TestFolder.id).all()
+    counts = dict(_cycle_candidate_query(db, cycle, search, priority, test_type, created_by_id)
+                  .with_entities(models.TestCase.folder_id, func.count(models.TestCase.id)).group_by(models.TestCase.folder_id).all())
+    # Roll direct counts up each ancestor once, including deep hierarchies.
+    parents = {folder.id: folder.parent_id for folder in folders}
+    totals = {folder.id: 0 for folder in folders}
+    for folder_id, count in counts.items():
+        cursor, seen = folder_id, set()
+        while cursor in parents and cursor not in seen:
+            seen.add(cursor)
+            totals[cursor] += count
+            cursor = parents[cursor]
+    return {'project_name': cycle.project.name, 'total': sum(counts.values()), 'unfiled_count': counts.get(None, 0),
+            'folders': [{'id': f.id, 'parent_id': f.parent_id, 'name': f.name,
+                         'direct_count': counts.get(f.id, 0), 'available_count': totals[f.id]} for f in folders]}
+
+
+@router.post('/cycles/{cycle_id}/candidate-test-case-ids', response_model=List[int])
+def cycle_candidate_ids(cycle_id: int, payload: schemas.CycleCandidateFilter,
+                        db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Resolve a bulk selection to stable IDs without transferring full rows."""
+    cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
+    require_can_execute_project(db, cycle.project_id, current_user)
+    query = _cycle_candidate_query(db, cycle, **payload.model_dump())
+    return [row[0] for row in query.with_entities(models.TestCase.id).order_by(models.TestCase.id).all()]
+
+
+@router.post('/cycles/{cycle_id}/candidate-review', response_model=schemas.TestCaseCandidatePage)
+def cycle_candidate_review(cycle_id: int, payload: schemas.CycleCandidateReview,
+                           db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    cycle = _get_cycle_or_404(db, cycle_id)
+    _require_cycle_visibility(db, cycle, current_user)
+    require_can_execute_project(db, cycle.project_id, current_user)
+    ids = list(dict.fromkeys(payload.test_case_ids))
+    query = _cycle_candidate_query(db, cycle).filter(or_(*(models.TestCase.id.in_(batch) for batch in _in_batches(ids)))) if ids else _cycle_candidate_query(db, cycle).filter(False)
+    available = {row[0] for row in query.with_entities(models.TestCase.id).all()}
+    page = _candidate_page(query, payload.cursor, payload.page_size, payload.sort_order)
+    return {**page, 'unavailable_ids': [identifier for identifier in ids if identifier not in available]}
 
 
 @router.get("/executions/{execution_id}", response_model=schemas.TestExecutionOut)
@@ -3131,7 +3211,7 @@ def add_test_cases_from_server_selection(
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     if payload.selection_mode == "all_matching":
-        query = _cycle_candidate_query(db, cycle, payload.search, payload.priority, payload.test_type, payload.created_by_id)
+        query = _cycle_candidate_query(db, cycle, payload.search, payload.priority, payload.test_type, payload.created_by_id, payload.folder_id, payload.include_subfolders)
         for id_batch in _in_batches(list(dict.fromkeys(payload.excluded_ids))):
             query = query.filter(~models.TestCase.id.in_(id_batch))
         selected_ids = [row[0] for row in query.with_entities(models.TestCase.id).order_by(models.TestCase.id).all()]

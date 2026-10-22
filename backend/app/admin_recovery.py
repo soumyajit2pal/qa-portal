@@ -206,6 +206,10 @@ def migration_plan(db, body, user, *, lock=False):
             raise HTTPException(409, 'Both projects must be active and unarchived')
     all_cases = _rows(db, m.TestCase, m.TestCase.project_id == source.id, lock=lock)
     all_cycles = _rows(db, m.TestCycle, m.TestCycle.project_id == source.id, lock=lock)
+    all_cycle_folders = _rows(db, m.TestCycleFolder, m.TestCycleFolder.project_id == source.id, lock=lock)
+    folder_by_id = {row.id: row for row in all_cycle_folders}
+    folder_parents = {row.parent_id for row in all_cycle_folders if row.parent_id}
+    preserved_folder_ids = set()
     source_executions = _rows(db, m.TestExecution, within(m.TestExecution.cycle_id, [row.id for row in all_cycles]), lock=lock)
     case_ids = {row.id for row in all_cases} if body.whole_project else set(body.case_ids)
     cycle_ids = {row.id for row in all_cycles} if body.whole_project else set(body.cycle_ids)
@@ -227,9 +231,25 @@ def migration_plan(db, body, user, *, lock=False):
                 cycle_ids.add(cycle.reexecution_of_cycle_id)
             if cycle.reexecution_of_cycle_id in cycle_ids:
                 cycle_ids.add(cycle.id)
-        restricted = {row.folder_id for row in all_cycles if row.id in cycle_ids
-                      and row.folder and row.folder.access_grants}
-        cycle_ids.update(row.id for row in all_cycles if row.folder_id in restricted)
+        # Preserve complete nested trees and restricted folders. Moving only
+        # a child to Unfiled would discard its inherited access restrictions;
+        # moving a parent alone would strand children in the source project.
+        for cycle in all_cycles:
+            folder = folder_by_id.get(cycle.folder_id) if cycle.id in cycle_ids else None
+            if not folder or not (folder.parent_id or folder.id in folder_parents or folder.access_grants):
+                continue
+            seen = set()
+            while folder.parent_id:
+                if folder.id in seen or folder.parent_id not in folder_by_id:
+                    raise HTTPException(409, 'The cycle folder hierarchy is invalid; correct it before moving work')
+                seen.add(folder.id)
+                folder = folder_by_id[folder.parent_id]
+            preserved_folder_ids.add(folder.id)
+        previous_folders = None
+        while previous_folders != preserved_folder_ids:
+            previous_folders = preserved_folder_ids.copy()
+            preserved_folder_ids.update(row.id for row in all_cycle_folders if row.parent_id in preserved_folder_ids)
+        cycle_ids.update(row.id for row in all_cycles if row.folder_id in preserved_folder_ids)
     blockers, warnings = [], []
     if not case_ids <= {row.id for row in all_cases} or not cycle_ids <= {row.id for row in all_cycles}:
         blockers.append('A selected cycle or re-execution lineage contains work in another project; resolve that association first')
@@ -248,11 +268,11 @@ def migration_plan(db, body, user, *, lock=False):
     folders = []
     if body.whole_project:
         folders = (_rows(db, m.TestFolder, m.TestFolder.project_id == source.id, lock=lock)
-                   + _rows(db, m.TestCycleFolder, m.TestCycleFolder.project_id == source.id, lock=lock))
+                   + all_cycle_folders)
     else:
-        folders = list({row.folder for row in cycles if row.folder and row.folder.access_grants})
+        folders = [row for row in all_cycle_folders if row.id in preserved_folder_ids]
         if any(row.folder_id for row in cases + cycles):
-            warnings.append('Repository cases and unrestricted cycles become Unfiled in the destination. Original folder locations remain in history. Restricted cycle folders move with all their cycles and access rules.')
+            warnings.append('Repository cases and unrestricted top-level cycles become Unfiled in the destination. Original folder locations remain in history. Nested and restricted cycle folders move with their complete folder tree, cycles and access rules.')
     roots = cases + cycles + folders
     for root in roots:
         if (root.origin_workspace_id or source.qa_workspace_id) != workspace:

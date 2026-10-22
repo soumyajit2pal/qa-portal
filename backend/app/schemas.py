@@ -3931,8 +3931,13 @@ class TestCaseImportResult(ORMModel):
     failure_reason: Optional[str] = None
 
 
-class TestCycleFolderCreate(BaseModel):
-    name: str
+class TestCycleFolderRename(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=150)
+
+
+class TestCycleFolderCreate(TestCycleFolderRename):
+    parent_id: Optional[int] = Field(default=None, gt=0)
 
 
 class TestCycleFolderAccessCreate(BaseModel):
@@ -3960,6 +3965,7 @@ class TestCycleFolderOut(ORMModel):
     workspace_writable: bool = False
     id: int
     project_id: int
+    parent_id: Optional[int] = None
     name: str
     created_by_id: Optional[int] = None
     created_by_name: Optional[str] = None
@@ -4160,6 +4166,7 @@ class TestCaseCandidateOut(ORMModel):
     """Compact cycle-candidate row. Full testcase/version content is loaded
     only when a user opens a testcase, never for the bulk picker."""
     id: int
+    folder_id: Optional[int] = None
     test_case_key: str
     test_scenario: Optional[str] = None
     test_type: Optional[str] = None
@@ -4181,6 +4188,39 @@ class TestCaseCandidatePage(BaseModel):
     total: int
     next_cursor: Optional[int] = None
     has_more: bool = False
+    already_added_count: int = 0
+    unavailable_ids: List[int] = Field(default_factory=list)
+
+
+class CycleCandidateFolder(BaseModel):
+    id: int
+    parent_id: Optional[int] = None
+    name: str
+    direct_count: int
+    available_count: int
+
+
+class CycleCandidateFolders(BaseModel):
+    project_name: str
+    folders: List[CycleCandidateFolder]
+    total: int
+    unfiled_count: int
+
+
+class CycleCandidateFilter(BaseModel):
+    folder_id: Optional[str] = None
+    include_subfolders: bool = True
+    search: Optional[str] = None
+    priority: Optional[str] = None
+    test_type: Optional[str] = None
+    created_by_id: Optional[int] = Field(default=None, ge=1)
+
+
+class CycleCandidateReview(BaseModel):
+    test_case_ids: List[int]
+    cursor: Optional[int] = Field(default=None, ge=0)
+    page_size: int = Field(default=25, ge=5, le=100)
+    sort_order: Literal['newest', 'oldest'] = 'newest'
 
 
 class TestExecutionCandidateSelection(BaseModel):
@@ -4197,6 +4237,8 @@ class TestExecutionCandidateSelection(BaseModel):
     priority: Optional[str] = None
     test_type: Optional[str] = None
     created_by_id: Optional[int] = None
+    folder_id: Optional[str] = None
+    include_subfolders: bool = True
     assigned_to_id: Optional[int] = None
     reason: Optional[str] = Field(default=None, max_length=2000)
 
@@ -4773,6 +4815,19 @@ class DefectWorkflowAction(BaseModel):
 class DefectLinkRequest(BaseModel):
     qa_request_id: int
     revision: int
+    confirm_department_change: bool = False
+
+
+class DefectQARequestOptionOut(BaseModel):
+    id: int
+    request_id: str
+    application_name: str
+    module_name: Optional[str] = None
+    department: str
+    qa_workspace_id: int
+    cr_number: Optional[str] = None
+    epic_number: Optional[str] = None
+    status: str
 
 
 class DefectLinkFunctionalRequest(BaseModel):

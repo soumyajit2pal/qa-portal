@@ -1,3 +1,4 @@
+import { useWorkState, useWorkBusy } from './WorkViews'
 import React, { useEffect, useRef, useState } from 'react'
 import DefectRetestReview from './DefectRetestReview'
 import { api } from '../api'
@@ -104,19 +105,20 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
 }) {
   const { confirmDefectSubmission, confirmationModal } = useDefectSubmissionConfirmation()
   const { user } = useAuth()
-  const [choice, setChoice] = useState('')
+  const [choice, setChoice] = useWorkState('defect.workflow.choice', '')
   const actionForm = useRef<HTMLFormElement>(null)
   useEffect(() => {
     if (choice) actionForm.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [choice])
-  const [data, setData] = useState<Record<string, any>>({})
+  const [data, setData] = useWorkState<Record<string, any>>('defect.workflow.data', {})
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  useWorkBusy(busy)
   const [uploadStatus, setUploadStatus] = useState('')
-  const [files, setFiles] = useState<File[]>([])
-  const [fieldImages, setFieldImages] = useState<Record<string, File[]>>({})
-  const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<number[]>([])
-  const [evidenceExpanded, setEvidenceExpanded] = useState(false)
+  const [files, setFiles] = useWorkState<File[]>('defect.workflow.files', [])
+  const [fieldImages, setFieldImages] = useWorkState<Record<string, File[]>>('defect.workflow.fieldImages', {})
+  const [selectedEvidenceIds, setSelectedEvidenceIds] = useWorkState<number[]>('defect.workflow.selectedEvidenceIds', [])
+  const [evidenceExpanded, setEvidenceExpanded] = useWorkState('defect.workflow.evidenceExpanded', false)
   const uploaded = useRef(new Map<File, RequestDocumentOut>())
   const [editorVersion, setEditorVersion] = useState(0)
   const attachmentsPath = `/api/defects/${defect.id}/attachments`
@@ -181,7 +183,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
   const selectedCanonicalDefect = canonicalDefects.find((candidate) => candidate.id === Number(data.duplicate_defect_id))
 
   function richField(key: string, label: string, placeholder: string, required = true) {
-    return <Field label={`${label}${required ? ' *' : ''}`}><JiraRichTextField key={`${editorVersion}-${key}`} value={data[key] || ''} disabled={busy}
+    return <Field label={`${label}${required ? ' *' : ''}`}><JiraRichTextField key={`${editorVersion}-${key}`} value={data[key] || ''} initialImages={fieldImages[key] || []} disabled={busy}
       onChange={value => setData(current => ({ ...current, [key]: value }))}
       onImagesChange={images => setFieldImages(current => ({ ...current, [key]: images }))}
       ariaLabel={label} placeholder={placeholder} /></Field>
@@ -205,7 +207,11 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
     if (requestedAction) select(requestedAction)
     else setChoice('')
   }, [requestedAction, defect.id])
+  const [verificationRevision, setVerificationRevision] = useWorkState('defect.workflow.revision', `${defect.id}:${defect.workflow_revision}`)
   useEffect(() => {
+    const revision = `${defect.id}:${defect.workflow_revision}`
+    if (revision === verificationRevision) return
+    setVerificationRevision(revision)
     setData(current => ({ ...current, verification_confirmed: false }))
     setSelectedEvidenceIds([])
   }, [defect.id, defect.workflow_revision])

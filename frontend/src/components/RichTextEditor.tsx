@@ -268,6 +268,7 @@ export function richTextImageFilename(prefix: string, originalName: string, mime
 }
 
 export function useRichTextImages(opts: {
+  initialFiles?: File[]
   maxImages?: number
   maxBytes?: number
   // Prefix for auto-generated filenames when an image is pasted rather
@@ -277,8 +278,10 @@ export function useRichTextImages(opts: {
   onError: (message: string) => void
 }) {
   const { maxImages = RICH_TEXT_MAX_IMAGES, maxBytes = RICH_TEXT_MAX_IMAGE_BYTES, filenamePrefix, messages, onError } = opts
-  const [images, setImages] = useState<PendingRichImage[]>([])
-  const imagesRef = useRef<PendingRichImage[]>([])
+  const initialImages = useRef<PendingRichImage[] | null>(null)
+  if (initialImages.current === null) initialImages.current = (opts.initialFiles || []).map(file => ({ file, alt: file.name, previewUrl: URL.createObjectURL(file) }))
+  const [images, setImages] = useState<PendingRichImage[]>(initialImages.current)
+  const imagesRef = useRef<PendingRichImage[]>(images)
   const imageSequence = useRef(0)
   useEffect(() => () => imagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl)), [])
 

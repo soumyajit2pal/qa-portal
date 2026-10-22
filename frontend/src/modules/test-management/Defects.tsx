@@ -1,4 +1,7 @@
+import { WorkSession, useWorkState, useWorkView, useWorkBusy, useRetainedState, useListScrollRestoration } from '../../components/WorkViews'
 import FunctionalRequestSelect from '../../components/FunctionalRequestSelect'
+import DefectNumberLink from '../../components/DefectNumberLink'
+import RecordNumberLink from '../../components/RecordNumberLink'
 import LinkDefectFunctionalRequest from '../../components/LinkDefectFunctionalRequest'
 import { defectRegisterParams, defectDetailParams } from '../../defectRegisterFilters'
 import HistoricalDefectLinkDialog from '../../components/HistoricalDefectLinkDialog'
@@ -227,7 +230,7 @@ function LinkedTestExecutionsModal({ defect, onClose, onOpen }: {
 // JiraRichTextField's onImagesChange -- that's parallel structure, not
 // copy-paste duplication, so it isn't folded in here.
 function useStagedEvidence(opts: { uploadPath: (defectId: number) => string; verb: 'created' | 'updated'; continueHint: string }) {
-  const [evidenceFiles, setEvidenceFiles] = useState<File[]>([])
+  const [evidenceFiles, setEvidenceFiles] = useWorkState<File[]>('defect.evidence.evidenceFiles', [])
 
   function addEvidenceFiles(list: FileList | null) {
     if (!list?.length) return
@@ -259,7 +262,11 @@ function useStagedEvidence(opts: { uploadPath: (defectId: number) => string; ver
   return { evidenceFiles, addEvidenceFiles, removeEvidenceFile, attach }
 }
 
-function CreateDefectModal({ contexts, requests, initialExecutionId, standalone = false, onClose, onCreated }: {
+export function CreateDefectModal(props: React.ComponentProps<typeof CreateDefectContent>) {
+  return <WorkSession target={{ kind: 'defect', id: 'new' }} draftTag={props.standalone ? 'standalone' : `execution:${props.initialExecutionId || ''}`}><CreateDefectContent {...props} /></WorkSession>
+}
+
+function CreateDefectContent({ contexts, requests, initialExecutionId, standalone: initialStandalone = false, onClose, onCreated: notifyCreated }: {
   contexts: ExecutionContext[]
   requests: QARequestListOut[]
   initialExecutionId?: number
@@ -269,7 +276,10 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
 }) {
   const { confirmDefectSubmission, confirmationModal } = useDefectSubmissionConfirmation()
   const { user } = useAuth()
-  const [ccIds, setCCIds] = useState<number[]>([])
+  const [standalone] = useWorkState('defect.create.standalone', initialStandalone)
+  const work = useWorkView()
+  const onCreated = (defect: DefectOut) => { work?.clear(); notifyCreated(defect) }
+  const [ccIds, setCCIds] = useWorkState<number[]>('defect.create.ccIds', [])
   const [workflowWorkspaces, setWorkflowWorkspaces] = useState<QAWorkspaceOut[]>([])
   const [workflowLoading, setWorkflowLoading] = useState(true)
   const [workflowError, setWorkflowError] = useState(false)
@@ -285,7 +295,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
   const [availableDepartments, setAvailableDepartments] = useState<DepartmentOut[]>([])
   useEffect(() => { api.get<DepartmentOut[]>('/api/departments').then(setAvailableDepartments).catch(() => setAvailableDepartments([])) }, [])
   const initial = standalone ? undefined : (contexts.find((row) => row.execution.id === initialExecutionId) || contexts[0])
-  const [executionId, setExecutionId] = useState(initial ? String(initial.execution.id) : '')
+  const [executionId, setExecutionId] = useWorkState('defect.create.executionId', initial ? String(initial.execution.id) : '')
   const selected = contexts.find((row) => String(row.execution.id) === executionId)
   // 2026-08 -- reported directly: "if defect open from 'report defect from
   // execution', currently showing all request id, ... it should be filter
@@ -311,9 +321,9 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
     })
   }
   const linkedRequest = findLinkedRequest(selected)
-  const [requestId, setRequestId] = useState(linkedRequest ? String(linkedRequest.id) : '')
-  const [applicationName, setApplicationName] = useState(initial?.project.application_name || '')
-  const [otherApplication, setOtherApplication] = useState(false)
+  const [requestId, setRequestId] = useWorkState('defect.create.requestId', linkedRequest ? String(linkedRequest.id) : '')
+  const [applicationName, setApplicationName] = useWorkState('defect.create.applicationName', initial?.project.application_name || '')
+  const [otherApplication, setOtherApplication] = useWorkState('defect.create.otherApplication', false)
   const [applicationOptions, setApplicationOptions] = useState<ApplicationMasterOut[]>([])
   const [applicationsLoading, setApplicationsLoading] = useState(true)
   const [applicationsError, setApplicationsError] = useState(false)
@@ -327,22 +337,24 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
       .finally(() => { if (active) setApplicationsLoading(false) })
     return () => { active = false }
   }, [applicationsReload])
-  const [department, setDepartment] = useState(initial?.project.department || user?.department || '')
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [moduleFeature, setModuleFeature] = useState(defectExecutionFeatureArea(initial))
-  const [moduleName, setModuleName] = useState(defectRequestModule(linkedRequest))
-  const moduleChoiceEdited = useRef(false)
-  const [environment, setEnvironment] = useState(ENVIRONMENTS.includes(initial?.cycle.environment || '') ? initial?.cycle.environment || '' : '')
-  const [severity, setSeverity] = useState('Medium')
-  const [priority, setPriority] = useState('P3 – Medium')
-  const [steps, setSteps] = useState('')
-  const [expected, setExpected] = useState(initial?.execution.test_case?.description || '')
-  const [actual, setActual] = useState(initial?.execution.actual_result || '')
-  const [build, setBuild] = useState(initial?.cycle.build || '')
-  const [externalId, setExternalId] = useState('')
-  const [labels, setLabels] = useState('')
-  const [relatedCaseIds, setRelatedCaseIds] = useState<Set<number>>(new Set())
+  const [department, setDepartment] = useWorkState('defect.create.department', initial?.project.department || user?.department || '')
+  const [title, setTitle] = useWorkState('defect.create.title', '')
+  const [description, setDescription] = useWorkState('defect.create.description', '')
+  const [moduleFeature, setModuleFeature] = useWorkState('defect.create.moduleFeature', defectExecutionFeatureArea(initial))
+  const [moduleName, setModuleName] = useWorkState('defect.create.moduleName', defectRequestModule(linkedRequest))
+  const [moduleWasEdited, setModuleWasEdited] = useWorkState('defect.create.moduleWasEdited', false)
+  const moduleChoiceEdited = useRef(moduleWasEdited)
+  useEffect(() => { setModuleWasEdited(moduleChoiceEdited.current) }, [moduleChoiceEdited.current])
+  const [environment, setEnvironment] = useWorkState('defect.create.environment', ENVIRONMENTS.includes(initial?.cycle.environment || '') ? initial?.cycle.environment || '' : '')
+  const [severity, setSeverity] = useWorkState('defect.create.severity', 'Medium')
+  const [priority, setPriority] = useWorkState('defect.create.priority', 'P3 – Medium')
+  const [steps, setSteps] = useWorkState('defect.create.steps', '')
+  const [expected, setExpected] = useWorkState('defect.create.expected', initial?.execution.test_case?.description || '')
+  const [actual, setActual] = useWorkState('defect.create.actual', initial?.execution.actual_result || '')
+  const [build, setBuild] = useWorkState('defect.create.build', initial?.cycle.build || '')
+  const [externalId, setExternalId] = useWorkState('defect.create.externalId', '')
+  const [labels, setLabels] = useWorkState('defect.create.labels', '')
+  const [relatedCaseIds, setRelatedCaseIds] = useWorkState<Set<number>>('defect.create.relatedCaseIds', new Set())
   // Screenshots pasted/uploaded into the three rich-text fields below are
   // never embedded inline in the markdown (see JiraRichTextField/
   // RichTextEditor.tsx -- same as Test Execution's Actual Result field);
@@ -350,10 +362,10 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
   // "+ Add evidence" picker, uploaded as defect attachments right after
   // creation succeeds (the /attachments endpoint needs a real defect id,
   // which doesn't exist until the POST below returns).
-  const [descriptionImages, setDescriptionImages] = useState<File[]>([])
-  const [stepsImages, setStepsImages] = useState<File[]>([])
-  const [actualImages, setActualImages] = useState<File[]>([])
-  const [expectedImages, setExpectedImages] = useState<File[]>([])
+  const [descriptionImages, setDescriptionImages] = useWorkState<File[]>('defect.create.descriptionImages', [])
+  const [stepsImages, setStepsImages] = useWorkState<File[]>('defect.create.stepsImages', [])
+  const [actualImages, setActualImages] = useWorkState<File[]>('defect.create.actualImages', [])
+  const [expectedImages, setExpectedImages] = useWorkState<File[]>('defect.create.expectedImages', [])
   const { evidenceFiles, addEvidenceFiles, removeEvidenceFile, attach } = useStagedEvidence({
     uploadPath: (id) => `/api/defects/${id}/attachments`,
     verb: 'created',
@@ -364,12 +376,15 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
   // (would create a duplicate defect); instead the form switches into a
   // "retry attaching evidence / continue without it" state against this
   // already-created record.
-  const [createdDefect, setCreatedDefect] = useState<DefectOut | null>(null)
+  const [createdDefect, setCreatedDefect] = useWorkState<DefectOut | null>('defect.create.createdDefect', null)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  useWorkBusy(busy)
 
+  const [sourceExecution, setSourceExecution] = useWorkState('defect.create.sourceExecution', executionId)
   useEffect(() => {
-    if (!selected) return
+    if (!selected || sourceExecution === executionId) return
+    setSourceExecution(executionId)
     setRelatedCaseIds(new Set())
     setModuleFeature(defectExecutionFeatureArea(selected))
     setEnvironment(ENVIRONMENTS.includes(selected.cycle.environment || '') ? selected.cycle.environment || '' : '')
@@ -429,7 +444,13 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
 
   const requestOptions = requests
     .filter((request) => request.request_id)
-    .map((request) => ({ value: String(request.id), label: `${request.request_id} · ${request.application_name}${request.module_name ? ` · ${request.module_name}` : ''}` }))
+    .map((request) => {
+      const changeNumbers = [...new Set([request.cr_number, request.epic_number].map(number => number?.trim()).filter(Boolean))]
+      return {
+        value: String(request.id),
+        label: [request.request_id, changeNumbers.length ? `CR/EPIC: ${changeNumbers.join(' / ')}` : '', request.application_name, request.module_name].filter(Boolean).join(' · '),
+      }
+    })
   const relatedCases = selected
     ? Array.from(new Map(
       contexts
@@ -458,9 +479,10 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
     }
     setRequestId(value)
   }
-  useEffect(() => { setCCIds([]) }, [workflowWorkspaceId])
+  const [ccWorkspace, setCCWorkspace] = useWorkState('defect.create.ccWorkspace', workflowWorkspaceId)
+  useEffect(() => { if (ccWorkspace !== workflowWorkspaceId) { setCCWorkspace(workflowWorkspaceId); setCCIds([]) } }, [workflowWorkspaceId])
 
-  return <Modal title={standalone ? 'Open Defect' : 'Report Defect from Execution'} onClose={onClose} wide>
+  return <Modal title={standalone ? 'Open Defect' : 'Report Defect from Execution'} onClose={onClose} closeDisabled={busy} workView wide>
     <form onSubmit={submit} className="defect-form">
       {confirmationModal}
       <details className="defect-flow-disclosure">
@@ -473,7 +495,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
       {!standalone && <Field label="Failed / Blocked Test Execution *"><SearchableSelect value={executionId} onChange={setExecutionId} placeholder="Select execution…" options={contexts.map((row) => ({ value: String(row.execution.id), label: `${row.cycle.cycle_key} · ${row.execution.test_case?.test_case_key || row.execution.test_case_id} · ${row.execution.status}` }))} /></Field>}
       <div className="grid grid-2 defect-application-context">
         <div className="defect-request-link"><Field label="QA Request (optional)">
-          <SearchableSelect disabled={!!createdDefect} value={requestId} onChange={changeRequest} placeholder="No QA request linked" options={linkedRequest && !standalone ? requestOptions.filter(option => option.value === String(linkedRequest.id)) : requestOptions} />
+          <SearchableSelect ariaLabel="QA Request" disabled={!!createdDefect} value={requestId} onChange={changeRequest} placeholder="No QA request linked" searchPlaceholder="Search request ID, CR/EPIC, application or module..." options={linkedRequest && !standalone ? requestOptions.filter(option => option.value === String(linkedRequest.id)) : requestOptions} />
           {requestId && <button type="button" className="btn btn-sm" disabled={!!createdDefect} onClick={() => changeRequest('')}>Remove optional link</button>}
         </Field></div>
         <Field label="Application *">
@@ -493,7 +515,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
         {!requestId && <Field label="Department *"><select required disabled={!!createdDefect || !!selected?.project.department} value={selected?.project.department || department} onChange={e => setDepartment(e.target.value)}><option value="">Select department</option>{availableDepartments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}</select></Field>}
       </div>
       <Field label="Defect Title *"><input required disabled={!!createdDefect} value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
-      <Field label="Description *"><JiraRichTextField value={description} onChange={setDescription} onImagesChange={setDescriptionImages} disabled={!!createdDefect} ariaLabel="Description" placeholder="Describe the defect…" /></Field>
+      <Field label="Description *"><JiraRichTextField value={description} onChange={setDescription} initialImages={descriptionImages} onImagesChange={setDescriptionImages} disabled={!!createdDefect} ariaLabel="Description" placeholder="Describe the defect…" /></Field>
       <div className="grid grid-2">
         <Field label="Feature / Area *"><input required disabled={!!createdDefect} value={moduleFeature} onChange={(e) => setModuleFeature(e.target.value)} /></Field>
         <Field label="Environment *"><select required value={environment} onChange={(e) => setEnvironment(e.target.value)}><option value="" disabled>Select environment…</option>{ENVIRONMENTS.map((value) => <option key={value} value={value}>{value}</option>)}</select></Field>
@@ -539,9 +561,9 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
       <Field label="Labels / Tags"><input value={labels} onChange={(e) => setLabels(e.target.value)} /></Field>
       <div className="defect-form-section">
         <div className="defect-form-section-heading"><span>✓</span><div><strong>Reproduction evidence</strong><small>Record the observable sequence in execution order. Paste or upload screenshots directly into any field below.</small></div></div>
-        <Field label="Steps to Reproduce *"><JiraRichTextField value={steps} onChange={setSteps} onImagesChange={setStepsImages} disabled={!!createdDefect} ariaLabel="Steps to Reproduce" placeholder="Describe the exact steps needed to reproduce the defect…" /></Field>
-        <Field label="Actual Result *"><JiraRichTextField value={actual} onChange={setActual} onImagesChange={setActualImages} disabled={!!createdDefect} ariaLabel="Actual Result" placeholder="Describe what actually happened…" /></Field>
-        <Field label="Expected Result *"><JiraRichTextField value={expected} onChange={setExpected} onImagesChange={setExpectedImages} disabled={!!createdDefect} ariaLabel="Expected Result" placeholder="Describe the expected behaviour…" /></Field>
+        <Field label="Steps to Reproduce *"><JiraRichTextField value={steps} onChange={setSteps} initialImages={stepsImages} onImagesChange={setStepsImages} disabled={!!createdDefect} ariaLabel="Steps to Reproduce" placeholder="Describe the exact steps needed to reproduce the defect…" /></Field>
+        <Field label="Actual Result *"><JiraRichTextField value={actual} onChange={setActual} initialImages={actualImages} onImagesChange={setActualImages} disabled={!!createdDefect} ariaLabel="Actual Result" placeholder="Describe what actually happened…" /></Field>
+        <Field label="Expected Result *"><JiraRichTextField value={expected} onChange={setExpected} initialImages={expectedImages} onImagesChange={setExpectedImages} disabled={!!createdDefect} ariaLabel="Expected Result" placeholder="Describe the expected behaviour…" /></Field>
       </div>
       <div className="defect-form-section defect-evidence">
         <div><h4>Evidence & Attachments <span>{descriptionImages.length + stepsImages.length + actualImages.length + expectedImages.length + evidenceFiles.length}</span></h4>
@@ -575,7 +597,7 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
     ? independentDefectReviewers(allRetestUsers, user?.id, defect.assignee_id)
     : allRetestUsers
   const suggestedRetestOwner = defect.retest_tester_id || defect.execution_assignee_id || defect.reporter_id
-  const [values, setValues] = useState<Record<string, any>>(
+  const [values, setValues] = useWorkState<Record<string, any>>('defect.transition.values', 
     target === 'Triaged'
       ? { assigned_team: autoDepartment || defect.assigned_team || '' }
       : ['Resolved', 'Not a Defect Review'].includes(target)
@@ -583,11 +605,11 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
         : target === 'Not a Defect' ? { resolution_type: 'Working as Designed' } : {},
   )
 
-  const [imageValues, setImageValues] = useState<Record<string, File[]>>({})
+  const [imageValues, setImageValues] = useWorkState<Record<string, File[]>>('defect.transition.imageValues', {})
   const setImages = (key: string) => (files: File[]) => setImageValues((current) => ({ ...current, [key]: files }))
-  const [evidenceFiles, setEvidenceFiles] = useState<File[]>([])
-  const [evidenceUploaded, setEvidenceUploaded] = useState(false)
-  const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<number[]>([])
+  const [evidenceFiles, setEvidenceFiles] = useWorkState<File[]>('defect.transition.evidenceFiles', [])
+  const [evidenceUploaded, setEvidenceUploaded] = useWorkState('defect.transition.evidenceUploaded', false)
+  const [selectedEvidenceIds, setSelectedEvidenceIds] = useWorkState<number[]>('defect.transition.selectedEvidenceIds', [])
   const addEvidenceFiles = (files: FileList | null) => {
     if (!files?.length) return
     setEvidenceFiles((current) => [...current, ...Array.from(files)])
@@ -596,12 +618,17 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
     setEvidenceFiles((current) => current.filter((_, fileIndex) => fileIndex !== index))
   }
 
-  const [savedDefect, setSavedDefect] = useState<DefectOut | null>(null)
+  const [savedDefect, setSavedDefect] = useWorkState<DefectOut | null>('defect.transition.savedDefect', null)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  useWorkBusy(busy)
   const set = (key: string, value: any) => setValues((current) => ({ ...current, [key]: value,
     ...(key === 'tested_build_version' ? { verification_confirmed: false } : {}) }))
+  const [verificationRevision, setVerificationRevision] = useWorkState('defect.transition.revision', `${defect.id}:${defect.workflow_revision}:${target}`)
   useEffect(() => {
+    const revision = `${defect.id}:${defect.workflow_revision}:${target}`
+    if (revision === verificationRevision) return
+    setVerificationRevision(revision)
     setValues(current => ({ ...current, verification_confirmed: false }))
     setSelectedEvidenceIds([])
   }, [defect.id, defect.workflow_revision, target])
@@ -681,7 +708,7 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
       await attachStagedEvidence(saved)
     } catch (err) { setError(err); setBusy(false) }
   }
-  return <Modal title={`${defectTransitionLabel(target)} · ${defect.defect_key}`} onClose={onClose} variant="dialog" preventBackdropClose wide>
+  return <Modal title={`${defectTransitionLabel(target)} · ${defect.defect_key}`} onClose={onClose} closeDisabled={busy} workView variant="dialog" preventBackdropClose wide>
     <form onSubmit={submit}>
       {confirmationModal}
       <div className="defect-transition-summary"><Badge status={defect.status} /><span>→</span><Badge status={target} /></div>
@@ -732,6 +759,7 @@ function LinkExecutionModal({ defect, contexts, onClose, onChanged }: {
   const [executionId, setExecutionId] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  useWorkBusy(busy)
   const linkedExecutionIds = new Set([
     ...(defect.execution_id ? [defect.execution_id] : []),
     ...defect.execution_links.map((link) => link.execution_id),
@@ -745,7 +773,7 @@ function LinkExecutionModal({ defect, contexts, onClose, onChanged }: {
     catch (err) { setError(err); setBusy(false) }
   }
   if (defect.status === 'Closed') return <HistoricalDefectLinkDialog defectId={defect.id} defectKey={defect.defect_key} onClose={onClose} onLinked={onChanged} />
-  return <Modal title={`Link ${defect.defect_key} to execution`} onClose={onClose} variant="dialog" preventBackdropClose wide>
+  return <Modal title={`Link ${defect.defect_key} to execution`} onClose={onClose} closeDisabled={busy} workView variant="dialog" preventBackdropClose wide>
     <form onSubmit={submit}>
       <div className="defect-trace-banner"><strong>Link another affected testcase</strong><span>The selected Failed or Blocked execution is added to this defect's traceability. Existing testcase and execution links remain unchanged.</span></div>
       <Field label="Test Cycle / Test Case / Execution *"><SearchableSelect value={executionId} onChange={setExecutionId} placeholder="Select Failed or Blocked execution…" options={eligibleContexts.map((row) => ({ value: String(row.execution.id), label: `${row.cycle.cycle_key} · ${row.execution.test_case?.test_case_key || row.execution.test_case_id} · ${row.execution.status}` }))} /></Field>
@@ -767,29 +795,30 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
   defect: DefectOut; manager: boolean; onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
   const { confirmDefectSubmission, confirmationModal } = useDefectSubmissionConfirmation()
-  const [ccIds, setCCIds] = useState<number[]>(defect.cc_user_ids || [])
-  const [title, setTitle] = useState(defect.title)
-  const [description, setDescription] = useState(defect.description)
-  const [moduleFeature, setModuleFeature] = useState(defect.module_feature)
-  const [moduleName, setModuleName] = useState(defect.module_name || '')
-  const [environment, setEnvironment] = useState(defect.environment)
-  const [severity, setSeverity] = useState(defect.severity)
-  const [priority, setPriority] = useState(defect.priority)
-  const [steps, setSteps] = useState(defect.steps_to_reproduce)
-  const [actual, setActual] = useState(defect.actual_result)
-  const [expected, setExpected] = useState(defect.expected_result)
-  const [descriptionImages, setDescriptionImages] = useState<File[]>([])
-  const [stepsImages, setStepsImages] = useState<File[]>([])
-  const [actualImages, setActualImages] = useState<File[]>([])
-  const [expectedImages, setExpectedImages] = useState<File[]>([])
+  const [ccIds, setCCIds] = useWorkState<number[]>('defect.edit.ccIds', defect.cc_user_ids || [])
+  const [title, setTitle] = useWorkState('defect.edit.title', defect.title)
+  const [description, setDescription] = useWorkState('defect.edit.description', defect.description)
+  const [moduleFeature, setModuleFeature] = useWorkState('defect.edit.moduleFeature', defect.module_feature)
+  const [moduleName, setModuleName] = useWorkState('defect.edit.moduleName', defect.module_name || '')
+  const [environment, setEnvironment] = useWorkState('defect.edit.environment', defect.environment)
+  const [severity, setSeverity] = useWorkState('defect.edit.severity', defect.severity)
+  const [priority, setPriority] = useWorkState('defect.edit.priority', defect.priority)
+  const [steps, setSteps] = useWorkState('defect.edit.steps', defect.steps_to_reproduce)
+  const [actual, setActual] = useWorkState('defect.edit.actual', defect.actual_result)
+  const [expected, setExpected] = useWorkState('defect.edit.expected', defect.expected_result)
+  const [descriptionImages, setDescriptionImages] = useWorkState<File[]>('defect.edit.descriptionImages', [])
+  const [stepsImages, setStepsImages] = useWorkState<File[]>('defect.edit.stepsImages', [])
+  const [actualImages, setActualImages] = useWorkState<File[]>('defect.edit.actualImages', [])
+  const [expectedImages, setExpectedImages] = useWorkState<File[]>('defect.edit.expectedImages', [])
   const { evidenceFiles, addEvidenceFiles, removeEvidenceFile, attach } = useStagedEvidence({
     uploadPath: (id) => `/api/defects/${id}/attachments`,
     verb: 'updated',
     continueHint: 'you can always add evidence from Evidence & Attachments below.',
   })
-  const [savedDefect, setSavedDefect] = useState<DefectOut | null>(null)
+  const [savedDefect, setSavedDefect] = useWorkState<DefectOut | null>('defect.edit.savedDefect', null)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  useWorkBusy(busy)
 
   function attachStagedEvidence(saved: DefectOut) {
     return attach(saved, [descriptionImages, stepsImages, actualImages, expectedImages], onChanged, (err) => { setError(err); setBusy(false) })
@@ -816,7 +845,7 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
     } catch (err) { setError(err); setBusy(false) }
   }
 
-  return <Modal title={`Edit ${defect.defect_key}`} onClose={onClose} wide>
+  return <Modal title={`Edit ${defect.defect_key}`} onClose={onClose} closeDisabled={busy} workView wide>
     <form onSubmit={submit} className="defect-form">
       {confirmationModal}
       <div className="defect-trace-banner"><strong>Editable while New</strong><span>Once this defect is Assigned or moves further through the workflow, use workflow actions instead -- every later change is captured there with its own audit trail.</span></div>
@@ -825,7 +854,7 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
           disabled={busy || !!savedDefect} workspaceId={defect.qa_workspace_id} recordLabel="defect" />
       </div>
       <Field label="Defect Title *"><input required disabled={!!savedDefect} value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
-      <Field label="Description *"><JiraRichTextField value={description} onChange={setDescription} onImagesChange={setDescriptionImages} disabled={!!savedDefect} ariaLabel="Description" placeholder="Describe the defect…" /></Field>
+      <Field label="Description *"><JiraRichTextField value={description} onChange={setDescription} initialImages={descriptionImages} onImagesChange={setDescriptionImages} disabled={!!savedDefect} ariaLabel="Description" placeholder="Describe the defect…" /></Field>
       <div className="grid grid-2">
         <Field label="Feature / Area *"><input required disabled={!!savedDefect} value={moduleFeature} onChange={(e) => setModuleFeature(e.target.value)} /></Field>
         <Field label="Environment *"><select required disabled={!!savedDefect || !!defect.workflow} value={environment} onChange={(e) => setEnvironment(e.target.value)}>{ENVIRONMENTS.map((value) => <option key={value} value={value}>{value}</option>)}</select></Field>
@@ -836,9 +865,9 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
       <DefectCCField workspaceId={defect.qa_workspace_id} value={ccIds} onChange={setCCIds} selectedUsers={defect.cc_users} disabled={busy || !!savedDefect} />
       <div className="defect-form-section">
         <div className="defect-form-section-heading"><span>✓</span><div><strong>Reproduction evidence</strong><small>Paste or upload screenshots directly into any field below.</small></div></div>
-        <Field label="Steps to Reproduce *"><JiraRichTextField value={steps} onChange={setSteps} onImagesChange={setStepsImages} disabled={!!savedDefect} ariaLabel="Steps to Reproduce" placeholder="Describe the exact steps needed to reproduce the defect…" /></Field>
-        <Field label="Actual Result *"><JiraRichTextField value={actual} onChange={setActual} onImagesChange={setActualImages} disabled={!!savedDefect} ariaLabel="Actual Result" placeholder="Describe what actually happened…" /></Field>
-        <Field label="Expected Result *"><JiraRichTextField value={expected} onChange={setExpected} onImagesChange={setExpectedImages} disabled={!!savedDefect} ariaLabel="Expected Result" placeholder="Describe the expected behaviour…" /></Field>
+        <Field label="Steps to Reproduce *"><JiraRichTextField value={steps} onChange={setSteps} initialImages={stepsImages} onImagesChange={setStepsImages} disabled={!!savedDefect} ariaLabel="Steps to Reproduce" placeholder="Describe the exact steps needed to reproduce the defect…" /></Field>
+        <Field label="Actual Result *"><JiraRichTextField value={actual} onChange={setActual} initialImages={actualImages} onImagesChange={setActualImages} disabled={!!savedDefect} ariaLabel="Actual Result" placeholder="Describe what actually happened…" /></Field>
+        <Field label="Expected Result *"><JiraRichTextField value={expected} onChange={setExpected} initialImages={expectedImages} onImagesChange={setExpectedImages} disabled={!!savedDefect} ariaLabel="Expected Result" placeholder="Describe the expected behaviour…" /></Field>
       </div>
       <div className="defect-form-section defect-evidence">
         <div><h4>Evidence & Attachments <span>{descriptionImages.length + stepsImages.length + actualImages.length + expectedImages.length + evidenceFiles.length}</span></h4>
@@ -857,27 +886,32 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
   </Modal>
 }
 
-function DefectDetail({ defect, users, departments, requestDepartment, defects, contexts, closeBeforeNavigate = false, onClose, onChanged, onOpenDefect }: {
+export function DefectDetail(props: React.ComponentProps<typeof DefectDetailContent>) {
+  return <WorkSession target={{ kind: 'defect', id: props.defect.id }}><DefectDetailContent {...props} /></WorkSession>
+}
+
+function DefectDetailContent({ defect, users, departments, requestDepartment, defects, contexts, closeBeforeNavigate = false, onClose, onChanged, onOpenDefect }: {
   defect: DefectOut; users: UserOption[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]; contexts: ExecutionContext[]; closeBeforeNavigate?: boolean; onClose: () => void; onChanged: (defect: DefectOut) => void; onOpenDefect: (defect: DefectOut) => void
 }) {
   const navigate = useRequestNavigation()
   const { user } = useAuth()
-  const [transition, setTransition] = useState('')
+  const [transition, setTransition] = useWorkState('defect.detail.transition', '')
   const [showReassign, setShowReassign] = useState(false)
   const [showRoutingRecovery, setShowRoutingRecovery] = useState(false)
   const [activity, setActivity] = useState<ApprovalActionOut[]>([])
   const [documents, setDocuments] = useState<RequestDocumentOut[]>([])
   const [uploading, setUploading] = useState(false)
+  useWorkBusy(uploading)
   const [error, setError] = useState<unknown>(null)
-  const [showLinkExecution, setShowLinkExecution] = useState(false)
-  const [showLinkedExecutions, setShowLinkedExecutions] = useState(false)
-  const [editMode, setEditMode] = useState(false)
+  const [showLinkExecution, setShowLinkExecution] = useWorkState('defect.detail.showLinkExecution', false)
+  const [showLinkedExecutions, setShowLinkedExecutions] = useWorkState('defect.detail.showLinkedExecutions', false)
+  const [editMode, setEditMode] = useWorkState('defect.detail.editMode', false)
   const [actionsOpen, setActionsOpen] = useState(false)
-  const [workflowAction, setWorkflowAction] = useState('')
-  const [detailTab, setDetailTab] = useState('overview')
+  const [workflowAction, setWorkflowAction] = useWorkState('defect.detail.workflowAction', '')
+  const [detailTab, setDetailTab] = useWorkState('defect.detail.detailTab', 'overview')
   const [openingCanonical, setOpeningCanonical] = useState(false)
   const detailTabs = [['overview', 'Overview'], ['resolution', 'Resolution'], ['trace', 'Linked work'], ['evidence', 'Evidence'], ['activity', 'Activity']]
-  useEffect(() => { setDetailTab('overview'); setWorkflowAction('') }, [defect.id])
+
   const actionsRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=DEFECT&entity_id=${defect.id}`).then(setActivity).catch(() => setActivity([]))
@@ -1027,7 +1061,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     }
   }
   return <>
-    <Modal title={`${defect.defect_key} · ${defect.title}`} onClose={onClose} wide>
+    <Modal title={`${defect.defect_key} · ${defect.title}`} onClose={onClose} workView wide>
       <div className="defect-review">
       <div className="defect-detail-hero">
         <div className="defect-detail-summary"><span className="defect-detail-kicker">DEFECT OVERVIEW · {defect.application_name} · {defect.module_feature}</span><div><Badge status={defect.status} /><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity} severity</span><span className="defect-priority-pill">{defect.priority}</span>{defect.workflow_state?.blocked && <span className="badge badge-yellow">Blocked</span>}</div></div>
@@ -1137,7 +1171,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
       <section className="defect-linked-work" aria-label="Linked work">
         <div className="defect-linked-work-head"><div><span className="defect-section-label">TRACEABILITY</span><h4>Linked work</h4></div><small>Open a linked record to follow the defect back to its source.</small></div>
         <div className="defect-trace-grid">
-          <div><span>Functional Requests</span>{defect.functional_requests?.length ? defect.functional_requests.map(request => <div key={request.id}><button type="button" onClick={() => openTrace(`/functional-requests?open=${request.id}`)}>{request.request_id} ↗</button><small>{request.sources.join(' · ')}</small>{request.reason && <small>{request.reason} · {request.linked_by_name} · {formatDateTimeIST(request.linked_at || '')}</small>}</div>) : <strong>Not linked</strong>}</div>
+          <div><span>Functional Requests</span>{defect.functional_requests?.length ? defect.functional_requests.map(request => <div key={request.id} className="defect-linked-request"><RecordNumberLink kind="functional" id={request.id} recordKey={request.request_id} title={request.sources.join(' · ')} onOpen={() => openTrace(`/functional-requests?open=${request.id}`)} /><small>{request.sources.join(' · ')}</small>{request.reason && <small>{request.reason} · {request.linked_by_name} · {formatDateTimeIST(request.linked_at || '')}</small>}</div>) : <strong>Not linked</strong>}</div>
           <div><span>QA request</span>{defect.qa_request_id ? <button type="button" onClick={() => openTrace(`/qa-requests?open=${defect.qa_request_id}`)}>{defect.qa_request_key || `Request #${defect.qa_request_id}`} ↗</button> : <strong>Not linked <small>Optional</small></strong>}</div>
           <div><span>Test cycle</span>{defect.cycle_id && defect.project_id ? <button type="button" onClick={() => openTrace(`/test-execution?project=${defect.project_id}&cycle=${defect.cycle_id}`)}>{defect.cycle_key || `Cycle #${defect.cycle_id}`} ↗</button> : <strong>Not linked</strong>}</div>
           <div><span>Test case</span>{defect.test_case_key ? <button type="button" onClick={() => openTrace(`/test-repository?${defect.project_id ? `project=${defect.project_id}&` : ''}open=${encodeURIComponent(defect.test_case_key!)}`)}>{defect.test_case_key} ↗</button> : <strong>Not linked</strong>}</div>
@@ -1276,11 +1310,11 @@ export default function Defects() {
   const [selected, setSelected] = useState<DefectOut | null>(null)
   const [openingDefectId, setOpeningDefectId] = useState<number | null>(null)
   const [createMode, setCreateMode] = useState<'' | 'execution' | 'standalone'>('')
-  const [search, setSearch] = useState('')
-  const [status, setStatus] = useState('')
-  const [severity, setSeverity] = useState('')
-  const [priority, setPriority] = useState('')
-  const [queue, setQueue] = useState<'all' | 'attention' | 'mine' | 'unlinked' | 'retest' | 'closed'>('all')
+  const [search, setSearch] = useRetainedState('defect.list.search', '')
+  const [status, setStatus] = useRetainedState('defect.list.status', '')
+  const [severity, setSeverity] = useRetainedState('defect.list.severity', '')
+  const [priority, setPriority] = useRetainedState('defect.list.priority', '')
+  const [queue, setQueue] = useRetainedState<'all' | 'attention' | 'mine' | 'unlinked' | 'retest' | 'closed'>('defect.list.queue', 'all')
   const [error, setError] = useState<unknown>(null)
   const detailRequests = useRef(createLatestRequestGate()).current
   const initialExecutionId = Number(searchParams.get('execution')) || undefined
@@ -1299,7 +1333,8 @@ export default function Defects() {
     search,
     status: status ? [status] : undefined,
     extra: Object.fromEntries([...registerParams].filter(([key]) => !['search', 'status'].includes(key))),
-  })
+  }, { retainKey: 'defect.list' })
+  useListScrollRestoration(defectsLoading)
 
   const dashboardRequests = useRef(createLatestRequestGate()).current
   const countQuery = defectRegisterParams({ functionalRequest, search, status, severity, priority }, false).toString()
@@ -1438,15 +1473,15 @@ export default function Defects() {
       <div className="defect-register-head"><div><span>DEFECT REGISTER · {queue.replace('-', ' ').toUpperCase()}</span><h3>{total} {total === 1 ? 'record' : 'records'} in this view</h3><p>{queueDescriptions[queue]}</p></div>{dashboard && <div className="defect-register-signals"><span><i className="critical" />Critical {dashboard.by_severity?.Critical || 0}</span><span><i className="high" />High {dashboard.by_severity?.High || 0}</span></div>}</div>
       <div className="defect-toolbar"><FunctionalRequestSelect filter value={functionalRequest} onChange={setFunctionalRequest} /><label className="defect-search"><span>⌕</span><input value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search defects" placeholder="Search ID, title, application or module…" /></label><select aria-label="Filter by status" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{STATUSES.map((value) => <option key={value}>{value}</option>)}</select><select aria-label="Filter by severity" value={severity} onChange={(e) => setSeverity(e.target.value)}><option value="">All severities</option>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select><select aria-label="Filter by priority" value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">All priorities</option>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>{hasFilters && <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>}</div>
       <Table<DefectListOut>
-        tableId="defect-management" rowKey="id" rows={defects}
+        tableId="defect-management" rowKey="id" retainStateKey="defect.list.table" rows={defects}
         onRowClick={(defect) => setSearchParams(current => defectDetailParams(current, defect.defect_key, defect.id))}
         server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading: defectsLoading }}
         columns={[
-        { key: 'title', header: 'Defect', render: (defect) => <span className="defect-title-cell"><span><button className="link-btn" onClick={(event) => { event.stopPropagation(); setSearchParams(current => defectDetailParams(current, defect.defect_key, defect.id)) }}>{openingDefectId === defect.id ? 'Opening…' : defect.defect_key}</button></span><strong>{defect.title}</strong><small>Feature: {defect.module_feature}</small></span> },
+        { key: 'title', header: 'Defect', render: (defect) => <span className="defect-title-cell"><DefectNumberLink id={defect.id} defectKey={defect.defect_key} loading={openingDefectId === defect.id} onOpen={() => setSearchParams(current => defectDetailParams(current, defect.defect_key, defect.id))} /><strong>{defect.title}</strong><small>Feature: {defect.module_feature}</small></span> },
         { key: 'application_name', header: 'Application / Module', render: (defect) => <span className="defect-application-cell"><strong>{defect.application_name}</strong><small>{defect.module_name || 'Module not specified'}</small></span>, filterValue: (defect) => `${defect.application_name} ${defect.module_name || ''}` },
         { key: 'severity', header: 'Risk', render: (defect) => <span className="defect-risk-cell"><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><small>{defect.priority}</small></span> },
         { key: 'status', header: 'Workflow', render: (defect) => <span className="defect-workflow-cell"><Badge status={defect.status} />{defect.status === 'Duplicate' && <small className="defect-canonical-reference">Canonical: {defect.duplicate_of_key || (defect.duplicate_of_id ? `Defect #${defect.duplicate_of_id}` : 'Not recorded')}</small>}<small>{defect.assignee_name || 'Unassigned'}</small><small className="defect-workflow-department">{defect.assigned_team || 'Department not assigned'}</small></span> },
-        { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${!defect.execution_id && !defect.execution_links.length && !defect.historical_execution_links?.length && !defect.execution_references?.length ? 'incomplete' : ''}`}>{defect.functional_requests?.length ? defect.functional_requests.map(request => <button key={request.id} type="button" className="link-btn" title={request.sources.join(' · ')} onClick={event => { event.stopPropagation(); navigate(`/functional-requests?open=${request.id}`) }}>{request.request_id} ↗</button>) : <strong>No Functional Request linked</strong>}<small>{defect.qa_request_key ? `QA request: ${defect.qa_request_key}` : 'No parent QA request linked'}</small>{defect.execution_id ? <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small> : defect.execution_references?.length ? <small>Reference: {defect.execution_references[0].cycle_key} · {defect.execution_references[0].test_case_key} · Closed at link</small> : defect.historical_execution_links?.length ? <small>Historical: {defect.historical_execution_links[0].cycle_key} · {defect.historical_execution_links[0].test_case_key} · Attempt #{defect.historical_execution_links[0].attempt_no}</small> : <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small>}</span> },
+        { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${!defect.execution_id && !defect.execution_links.length && !defect.historical_execution_links?.length && !defect.execution_references?.length ? 'incomplete' : ''}`}>{defect.functional_requests?.length ? defect.functional_requests.map(request => <RecordNumberLink key={request.id} kind="functional" id={request.id} recordKey={request.request_id} title={request.sources.join(' · ')} onOpen={() => navigate(`/functional-requests?open=${request.id}`)} />) : <strong>No Functional Request linked</strong>}<small>{defect.qa_request_key ? `QA request: ${defect.qa_request_key}` : 'No parent QA request linked'}</small>{defect.execution_id ? <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small> : defect.execution_references?.length ? <small>Reference: {defect.execution_references[0].cycle_key} · {defect.execution_references[0].test_case_key} · Closed at link</small> : defect.historical_execution_links?.length ? <small>Historical: {defect.historical_execution_links[0].cycle_key} · {defect.historical_execution_links[0].test_case_key} · Attempt #{defect.historical_execution_links[0].attempt_no}</small> : <small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small>}</span> },
         { key: 'reported_at', header: 'Reported / Age', render: (defect) => <span className="defect-age-cell"><strong>{formatDateIST(defect.reported_at)}</strong><small>{ageInDays(defect.reported_at)}d since reported · {defect.reporter_name}</small></span> },
       ]} />
       {!defects.length && <div className="tm-empty"><strong>{dashboard?.total ? 'No defects match this view' : 'No governed defects yet'}</strong><span>{dashboard?.total ? 'Change the queue or clear filters to see more records.' : 'Open a defect now, or report one directly from a Failed/Blocked execution.'}</span></div>}

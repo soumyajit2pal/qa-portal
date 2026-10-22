@@ -3,6 +3,8 @@ import React, {
   useCallback,
   useEffect,
   useId,
+  useContext,
+  createContext,
   useMemo,
   useRef,
   useState,
@@ -24,6 +26,7 @@ import { useAuth } from "../context/AuthContext";
 import type { RequestDocumentOut, ChecklistItemDocumentOut } from "../types";
 import { isKeyboardActivationKey } from "../keyboard";
 import { shouldActivateTableRow } from "../tableInteraction";
+import { useWorkView, useWorkState, useWorkBusy, useRetainedState } from './WorkViews';
 
 // Every status across every module (QA Request, SAST/DAST,
 // Performance, Suppression, Sign-off) funnels through this one Badge, so its
@@ -458,6 +461,16 @@ interface ModalProps {
   hideClose?: boolean;
   className?: string;
   tone?: "warning" | "danger";
+  workView?: boolean;
+}
+
+const pageInertLocks = new WeakMap<HTMLElement, { count: number; original: boolean }>();
+const ModalDepth = createContext(0);
+function lockBehindWorkPage(page: HTMLElement) {
+  const nodes = [document.getElementById('root'), ...document.querySelectorAll<HTMLElement>('.work-page')]
+    .filter((node): node is HTMLElement => !!node && node !== page && (node.id === 'root' || Number(node.dataset.modalDepth) < Number(page.dataset.modalDepth)));
+  for (const node of nodes) { const state = pageInertLocks.get(node) || { count: 0, original: node.inert }; state.count++; pageInertLocks.set(node, state); node.inert = true; }
+  return () => { for (const node of nodes) { const state = pageInertLocks.get(node); if (state && --state.count === 0) { node.inert = state.original; pageInertLocks.delete(node); } } };
 }
 
 export function Modal({
@@ -473,17 +486,41 @@ export function Modal({
   hideClose,
   className = "",
   tone,
+  workView,
 }: ModalProps) {
   const [shake, setShake] = useState(false);
+  const depth = useContext(ModalDepth);
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeStateRef = useRef({ onClose, closeDisabled, preventBackdropClose, variant });
   closeStateRef.current = { onClose, closeDisabled, preventBackdropClose, variant };
-  // Record drawers open in the spacious centered view by default. Users can
-  // restore the compact right-side drawer with the header toggle.
-  const [expanded, setExpanded] = useState(variant === "drawer");
+  // Full screen changes only this frame; the form subtree stays mounted.
+  const expanded = variant === "drawer";
+  const [fullScreen, setFullScreen] = useState(false);
+  const work = useWorkView();
+  const page = !!workView && !!work?.page;
+  const [openingView, setOpeningView] = useState(false);
+  const [viewError, setViewError] = useState('');
+  const openingRef = useRef(false);
+  const viewLock = closeDisabled || openingView || (!!workView && work?.locked);
+  closeStateRef.current = { onClose, closeDisabled: viewLock, preventBackdropClose, variant };
+  async function openWorkView(newTab: boolean) {
+    if (!work || viewLock || openingRef.current) return;
+    openingRef.current = true;
+    setOpeningView(true); setViewError('');
+    try { await work.open(newTab); }
+    catch (error) { setViewError(error instanceof Error ? error.message : 'Could not open this view.'); }
+    finally { openingRef.current = false; setOpeningView(false); }
+  }
 
   useEffect(() => {
+    if (page) {
+      const node = dialogRef.current;
+      if (!node) return;
+      const release = lockBehindWorkPage(node);
+      node.focus();
+      return release;
+    }
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const frame = window.requestAnimationFrame(() => {
       const first = dialogRef.current?.querySelector<HTMLElement>(
@@ -498,7 +535,8 @@ export function Modal({
       // open. Do not move keyboard focus into the underlying record drawer.
       if (document.querySelector("dialog[open][aria-modal='true']")) return;
       const openDialogs = document.querySelectorAll<HTMLElement>("[role='dialog'][aria-modal='true']");
-      if (openDialogs[openDialogs.length - 1] !== dialog) return;
+      const top = Array.from(openDialogs).sort((a, b) => Number(a.dataset.modalDepth || 0) - Number(b.dataset.modalDepth || 0)).at(-1);
+      if (top !== dialog) return;
       if (event.key === "Escape") {
         const state = closeStateRef.current;
         if (state.closeDisabled || state.preventBackdropClose) return;
@@ -526,15 +564,15 @@ export function Modal({
       document.removeEventListener("keydown", onKeyDown, true);
       previouslyFocused?.focus();
     };
-  }, []);
+  }, [page]);
 
   function handleExplicitClose() {
-    if (closeDisabled) return;
+    if (viewLock) return;
     onClose();
     // Pending Approvals opens a child module only as a host for its detail
     // drawer. Closing that drawer should return to the queue, not strand the
     // user on the module list and force another sidebar click.
-    if (variant === "drawer" && new URLSearchParams(window.location.search).get("fromPending") === "1") {
+    if (!page && variant === "drawer" && new URLSearchParams(window.location.search).get("fromPending") === "1") {
       window.history.back();
     }
   }
@@ -545,7 +583,7 @@ export function Modal({
     // Drawers hold record details and forms, so an outside click must never
     // dismiss them. They stay open until the user deliberately uses Close.
     // Centered dialogs retain their existing opt-in backdrop behaviour.
-    if (variant === "dialog" && !preventBackdropClose && !closeDisabled) {
+    if (variant === "dialog" && !preventBackdropClose && !viewLock) {
       onClose();
       return;
     }
@@ -559,57 +597,69 @@ export function Modal({
       <div><span className="modal-tone-label">{tone === "warning" ? "Warning" : "Destructive action"}</span><h3 id={titleId}>{title}</h3></div>
     </div>
   ) : <h3 id={titleId}>{title}</h3>;
+  const viewActions = <>
+    {workView && work && <>
+      {!page && <button type="button" className="btn btn-sm" disabled={viewLock} onClick={() => void openWorkView(false)}>Open as page</button>}
+      <button type="button" className="btn btn-sm" disabled={viewLock} onClick={() => void openWorkView(true)}>Open in new tab ↗</button>
+    </>}
+    {!page && !compact && <button type="button" className="modal-close-btn" disabled={viewLock} onClick={() => setFullScreen(value => !value)} aria-label={fullScreen ? 'Restore window' : 'Full screen'} title={fullScreen ? 'Restore window' : 'Full screen'}>{fullScreen ? '↙' : '⛶'}</button>}
+  </>;
 
   // Mount outside cards/tables: transformed or clipped ancestors otherwise
   // constrain fixed overlays to the card instead of the viewport.
   if (variant === "dialog") {
-    return createPortal(
+    return <ModalDepth.Provider value={depth + 1}>{createPortal(
       <div
-        className="modal-overlay modal-overlay-center"
+        style={{ zIndex: (page ? 100 : 1100) + depth * 20 }}
+        className={`${page ? 'work-page-shell' : 'modal-overlay modal-overlay-center'} ${fullScreen ? 'modal-full-screen' : ''}`}
         onClick={handleBackdropClick}
       >
         <div
           ref={dialogRef}
-          role="dialog"
-          aria-modal="true"
+          data-modal-depth={depth}
+          role={page ? 'main' : 'dialog'}
+          aria-modal={page ? undefined : true}
           aria-labelledby={titleId}
           tabIndex={-1}
-          className={`dialog ${className} ${tone ? `modal-tone-${tone}` : ""} ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${fitContent ? "dialog-fit-content" : ""} ${
+          className={`dialog ${page ? 'work-page' : ''} ${className} ${tone ? `modal-tone-${tone}` : ""} ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${fitContent ? "dialog-fit-content" : ""} ${
             shake ? "modal-shake" : ""
           }`}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="drawer-header">
             {heading}
-            {!hideClose && <button
+            <div className="drawer-header-actions">{viewActions}{page && <button type="button" className="btn btn-sm" disabled={viewLock} onClick={handleExplicitClose}>← Back</button>}{!hideClose && !page && <button
               type="button"
               className="modal-close-btn"
               onClick={handleExplicitClose}
               aria-label={closeDisabled ? "Close unavailable while upload is in progress" : "Close"}
               title={closeDisabled ? "Upload in progress" : "Close"}
-              disabled={closeDisabled}
+              disabled={viewLock}
             >
               ×
-            </button>}
+            </button>}</div>
           </div>
-          <div className="drawer-body">{children}</div>
+          {viewError && <p className="work-view-error" role="alert">{viewError}</p>}
+          <div className="drawer-body" inert={openingView || undefined}>{children}</div>
         </div>
       </div>,
       document.body
-    );
+    )}</ModalDepth.Provider>;
   }
-  return createPortal(
+  return <ModalDepth.Provider value={depth + 1}>{createPortal(
     <div
-      className={`modal-overlay ${expanded ? "modal-overlay-expanded" : ""}`}
+      style={{ zIndex: (page ? 100 : 1100) + depth * 20 }}
+      className={`${page ? 'work-page-shell' : 'modal-overlay'} ${expanded ? "modal-overlay-expanded" : ""} ${fullScreen ? 'modal-full-screen' : ''}`}
       onClick={handleBackdropClick}
     >
       <div
         ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
+        data-modal-depth={depth}
+        role={page ? 'main' : 'dialog'}
+        aria-modal={page ? undefined : true}
         aria-labelledby={titleId}
         tabIndex={-1}
-        className={`drawer ${className} ${tone ? `modal-tone-${tone}` : ""} ${wide ? "drawer-wide" : ""} ${expanded ? "drawer-expanded" : ""} ${
+        className={`drawer ${page ? 'work-page' : ''} ${className} ${tone ? `modal-tone-${tone}` : ""} ${wide ? "drawer-wide" : ""} ${expanded ? "drawer-expanded" : ""} ${
           shake ? "modal-shake" : ""
         }`}
         onClick={(e) => e.stopPropagation()}
@@ -617,36 +667,26 @@ export function Modal({
         <div className="drawer-header">
           {heading}
           <div className="drawer-header-actions">
-            <button
-              type="button"
-              className="modal-close-btn drawer-expand-btn"
-              onClick={() => setExpanded((value) => !value)}
-              aria-label={expanded ? "Restore drawer" : "Expand drawer"}
-              title={expanded ? "Restore drawer" : "Expand drawer"}
-            >
-              {expanded ? (
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v6H3M15 21v-6h6M3 9l6-6M21 15l-6 6" /></svg>
-              ) : (
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 21h5v-5M3 8l6-5M21 16l-6 5" /></svg>
-              )}
-            </button>
-            {!hideClose && <button
+            {viewActions}
+            {page && <button type="button" className="btn btn-sm" disabled={viewLock} onClick={handleExplicitClose}>← Back</button>}
+            {!hideClose && !page && <button
               type="button"
               className="modal-close-btn"
               onClick={handleExplicitClose}
               aria-label={closeDisabled ? "Close unavailable while an operation is in progress" : "Close"}
               title={closeDisabled ? "Operation in progress" : "Close"}
-              disabled={closeDisabled}
+              disabled={viewLock}
             >
               ×
             </button>}
           </div>
         </div>
-        <div className="drawer-body">{children}</div>
+        {viewError && <p className="work-view-error" role="alert">{viewError}</p>}
+        <div className="drawer-body" inert={openingView || undefined}>{children}</div>
       </div>
     </div>,
     document.body
-  );
+  )}</ModalDepth.Provider>;
 }
 
 export interface ElectronicSignature {
@@ -1417,6 +1457,8 @@ interface TableProps<T> {
   // to return the same number of records.
   resetKey?: unknown;
   showColumnControls?: boolean;
+  defaultHiddenColumnKeys?: readonly string[];
+  retainStateKey?: string;
   // See TableServerPagination above. Omitted (the default): Table behaves
   // exactly as before, filtering/paginating `rows` entirely client-side.
   server?: TableServerPagination;
@@ -1452,13 +1494,15 @@ export function Table<T extends Record<string, any>>({
   tableId,
   resetKey,
   showColumnControls = true,
+  defaultHiddenColumnKeys,
+  retainStateKey,
   server,
   onVisibleRowsChange,
 }: TableProps<T>) {
   // Each column can hold several exact values. Different columns are still
   // combined with AND, while values selected inside one column use OR.
-  const [filters, setFilters] = useState<Record<string, string[]>>({});
-  const [page, setPage] = useState(1);
+  const [filters, setFilters] = useRetainedState<Record<string, string[]>>(retainStateKey ? `${retainStateKey}.filters` : undefined, {});
+  const [page, setPage] = useRetainedState(retainStateKey ? `${retainStateKey}.page` : undefined, 1);
   // Which column's filter popover is currently open -- at most one at a
   // time, closed by clicking its icon again, pressing Escape, or clicking
   // anywhere outside the popover (see the document listener below). Having a
@@ -1510,18 +1554,18 @@ export function Table<T extends Record<string, any>>({
   const visibleColumns = useMemo(() => {
     const available = new Set(availableColumns.map((column) => column.key));
     // With no saved choice, show the screen's curated default column set.
-    const defaultHidden: string[] = [];
+    const defaultHidden = defaultHiddenColumnKeys || [];
     const hidden = new Set(
       (hasColumnPreference ? hiddenColumnKeys : defaultHidden).filter((key) => available.has(key))
     );
     const selected = availableColumns.filter((column) => !hidden.has(column.key));
     // Keep Status second even when the first column has been hidden.
     return selected.length > 0 ? statusColumnSecond(selected) : availableColumns.slice(0, 1);
-  }, [availableColumns, hasColumnPreference, hiddenColumnKeys]);
+  }, [availableColumns, hasColumnPreference, hiddenColumnKeys, defaultHiddenColumnKeys]);
 
   function setColumnVisible(key: string, visible: boolean) {
     setHiddenColumnKeys((current) => {
-      const defaultHidden: string[] = [];
+      const defaultHidden = defaultHiddenColumnKeys || [];
       const startingHidden = hasColumnPreference ? current : defaultHidden;
       const next = visible
         ? startingHidden.filter((item) => item !== key)
@@ -2007,11 +2051,12 @@ export function RequestDocuments({
 }) {
   const { user } = useAuth();
   const [documents, setDocuments] = useState<RequestDocumentOut[]>([]);
-  const [files, setFiles] = useState<File[]>([]);
+  const [files, setFiles] = useWorkState<File[]>(`documents:${apiBase}:${reqId}.files`, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [pendingDelete, setPendingDelete] = useState<RequestDocumentOut | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  useWorkBusy(busy || deleteBusy);
 
   const load = useCallback(async () => {
     try {
@@ -2418,6 +2463,7 @@ export function ChecklistEvidence({
   const [pendingDelete, setPendingDelete] = useState<RequestDocumentOut | null>(null);
 
   const endpoint = `${apiBase}/${reqId}/checklist/${itemId}/documents`;
+  useWorkBusy(busy);
 
   useEffect(() => {
     onCountChange?.(documents.length);

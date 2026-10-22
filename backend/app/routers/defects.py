@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .. import documents as doc_store
 from .. import models, schemas, pagination, defect_cc
 from ..constants import (
-    ENVIRONMENTS, Role, DEFECT_REASSIGNABLE_STATUSES,
+    ENVIRONMENTS, Role, GatewayStatus, DEFECT_REASSIGNABLE_STATUSES,
 )
 from ..database import get_db
 from ..deps import get_workflow_user as get_current_user, dashboard_department_scope, viewable_project_ids, active_qa_workspace_scope_ids
@@ -1529,44 +1529,103 @@ def defect_workflow_action(defect_id: int, payload: schemas.DefectWorkflowAction
     return apply_action(db, _get_mutable(defect_id, db, current_user), payload, current_user)
 
 
-@router.post('/{defect_id}/link-request', response_model=schemas.DefectOut)
-def link_defect_request(defect_id: int, payload: schemas.DefectLinkRequest,
-                        db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = _get_mutable(defect_id, db, current_user)
-    if not (_is_manager(db, obj, current_user) or obj.reporter_id == current_user.id or _is_assignee(obj, current_user)):
+def _require_qa_request_link_allowed(db, obj, user):
+    if not (_is_manager(db, obj, user) or obj.reporter_id == user.id or _is_assignee(obj, user)):
         raise HTTPException(403, 'Only the reporter, resolver or QA lead can link a request')
-    db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()
-    if payload.revision != obj.workflow_revision:
-        raise HTTPException(409, 'Defect changed. Refresh before linking a request.')
     if obj.qa_request_id:
         raise HTTPException(400, 'This defect already has a QA request link')
     if obj.status in _TERMINAL_STATUSES:
         raise HTTPException(400, 'Reopen this defect before adding a request link')
-    request = db.get(models.QARequest, payload.qa_request_id)
-    if not request:
-        raise HTTPException(404, 'QA Request was not found')
-    _require_request_access(db, request, current_user)
-    if request.qa_workspace_id != obj.qa_workspace_id or request.department != obj.department:
-        raise HTTPException(400, 'Request must belong to the defect workspace and department')
-    if request.application_name.casefold() != obj.application_name.casefold():
-        raise HTTPException(400, 'Request must belong to the defect application')
+
+
+def _linked_qa_parent_ids(db, obj):
+    parents = {link.functional_request.qa_request_id for link in obj.functional_request_links}
     executions = ([obj.execution] if obj.execution else []) + [link.execution for link in obj.execution_links if link.execution]
     executions += [link.run.execution for link in obj.historical_execution_links if link.run and link.run.execution]
     executions += [link.execution for link in obj.execution_references if link.execution]
-    for link in obj.functional_request_links:
-        if link.functional_request.qa_request_id != request.id:
-            raise HTTPException(400, 'A linked Functional Request belongs to a different QA request')
     for execution in executions:
         link = execution.cycle.child_request_link
         if link:
             model = {'Functional': models.FunctionalRequest, 'SAST': models.SASTRequest,
                      'DAST': models.DASTRequest, 'Performance': models.PerformanceRequest}.get(link.child_type)
             child = db.get(model, link.child_id) if model else None
-            if child and child.qa_request_id and child.qa_request_id != request.id:
-                raise HTTPException(400, 'A linked execution belongs to a different QA request')
+            if child and child.qa_request_id is not None:
+                parents.add(child.qa_request_id)
+    return parents
+
+
+def _qa_request_link_candidates(db, obj, user):
+    """Match the defect's application/workspace and the actor's target scope.
+
+    An unlinked defect may initially belong to its QA reporter's department.
+    The request department is adopted only after an explicit confirmed link.
+    """
+    from ..workspace_service import require_active_workspace, selectable_workspace_ids
+    from ..workflow_authority import is_system_admin
+    active_workspace = require_active_workspace(user)
+    workspaces = set(active_qa_workspace_scope_ids(user) or (active_workspace,)) & set(selectable_workspace_ids(db, user))
+    q = db.query(models.QARequest).filter(
+        models.QARequest.qa_workspace_id == obj.qa_workspace_id,
+        models.QARequest.qa_workspace_id.in_(workspaces),
+        func.lower(func.trim(models.QARequest.application_name)) == obj.application_name.strip().lower(),
+        models.QARequest.request_id.isnot(None),
+        models.QARequest.department.isnot(None),
+        models.QARequest.status.notin_([GatewayStatus.DRAFT, GatewayStatus.CANCELLED]),
+    )
+    departments = dashboard_department_scope(user)
+    if departments is not None:
+        q = q.filter(models.QARequest.department.in_(departments))
+    if obj.status != 'New':
+        # Once triage has started, keep the established owning department.
+        q = q.filter(models.QARequest.department == obj.department)
+    if is_system_admin(user):
+        # Administration does not extend operational department authority.
+        q = q.filter(models.QARequest.department.in_(user.departments))
+    return q
+
+
+@router.get('/{defect_id}/qa-request-options', response_model=pagination.Page[schemas.DefectQARequestOptionOut])
+def qa_request_options(defect_id: int, params: pagination.PageParams = Depends(),
+                       db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = _get_mutable(defect_id, db, current_user)
+    _require_qa_request_link_allowed(db, obj, current_user)
+    q = _qa_request_link_candidates(db, obj, current_user)
+    parents = _linked_qa_parent_ids(db, obj)
+    if parents:
+        q = q.filter(models.QARequest.id.in_(parents) if len(parents) == 1 else models.QARequest.id == -1)
+    q = pagination.apply_search(q, params, models.QARequest.request_id, models.QARequest.cr_number,
+                                models.QARequest.epic_number, models.QARequest.application_name,
+                                models.QARequest.module_name, models.QARequest.department)
+    q = q.with_entities(models.QARequest.id, models.QARequest.request_id, models.QARequest.application_name,
+                        models.QARequest.module_name, models.QARequest.department, models.QARequest.qa_workspace_id,
+                        models.QARequest.cr_number, models.QARequest.epic_number, models.QARequest.status)
+    q = q.order_by(models.QARequest.created_at.desc(), models.QARequest.id.desc())
+    return pagination.to_page_response(pagination.paginate(q, params), params)
+
+
+@router.post('/{defect_id}/link-request', response_model=schemas.DefectOut)
+def link_defect_request(defect_id: int, payload: schemas.DefectLinkRequest,
+                        db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = _get_mutable(defect_id, db, current_user)
+    db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()
+    if payload.revision != obj.workflow_revision:
+        raise HTTPException(409, 'Defect changed. Refresh before linking a request.')
+    _require_qa_request_link_allowed(db, obj, current_user)
+    request = _qa_request_link_candidates(db, obj, current_user).filter(models.QARequest.id == payload.qa_request_id).one_or_none()
+    if not request:
+        raise HTTPException(404, 'No eligible QA Request was found for this defect application and workspace')
+    _require_request_access(db, request, current_user)
+    if any(parent_id != request.id for parent_id in _linked_qa_parent_ids(db, obj)):
+        raise HTTPException(400, 'A linked Functional Request or execution belongs to a different QA request')
+    old_department = obj.department
+    if request.department != old_department:
+        if not payload.confirm_department_change:
+            raise HTTPException(400, 'Confirm changing the defect owning department to the selected QA Request department')
+        obj.department = request.department
     obj.qa_request_id = request.id
     obj.workflow_revision += 1
-    _audit(db, obj, current_user, 'Request Linked', f'Linked {request.request_id}. Saved module selection and workspace workflow version retained.')
+    department_audit = f' Owning department changed from {old_department or "Unspecified"} to {request.department} after confirmation.' if old_department != request.department else ''
+    _audit(db, obj, current_user, 'Request Linked', f'Linked {request.request_id}.{department_audit} Saved module selection, resolver assignment and workspace workflow version retained.')
     db.commit()
     db.refresh(obj)
     return obj

@@ -26,8 +26,10 @@ import ApiActivityIndicator from './components/ApiActivityIndicator'
 import GlobalButtonTooltips from './components/GlobalButtonTooltips'
 import GlobalToastCenter from './components/GlobalToastCenter'
 import AppVersion from './components/AppVersion'
+import { WorkViewsProvider } from './components/WorkViews'
 
 const Help = lazyModule(() => import('./Help'), { displayName: 'Help' })
+const WorkPage = lazyModule(() => import('./components/WorkPage'), { displayName: 'WorkPage' })
 
 // The 4 domain modules (Functional / Security / Specialised Testing /
 // Governance) live under src/modules/<group>/ as plain local folders in
@@ -248,12 +250,12 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
   }
   return (
     <MaintenanceWindowProvider>
-      <RequestViewer>
+      <WorkViewsProvider><RequestViewer>
         <Layout>
           {children}
           <LoginNoticeCoordinator />
         </Layout>
-      </RequestViewer>
+      </RequestViewer></WorkViewsProvider>
     </MaintenanceWindowProvider>
   )
 }
@@ -470,6 +472,7 @@ export default function App() {
           <Route path="/test-repository" element={<ModuleBoundary moduleName="Test Management"><TestRepository /></ModuleBoundary>} />
           <Route path="/test-execution" element={<ModuleBoundary moduleName="Test Management"><TestExecution /></ModuleBoundary>} />
           <Route path="/defects" element={<ModuleBoundary moduleName="Defect Management"><Defects /></ModuleBoundary>} />
+          <Route path="/work/*" element={<ModuleBoundary moduleName="Work page"><WorkPage /></ModuleBoundary>} />
           <Route path="/my-executions" element={<QaGroupOnly><ModuleBoundary moduleName="Test Management"><MyExecutions /></ModuleBoundary></QaGroupOnly>} />
           <Route path="/test-reports" element={<ModuleBoundary moduleName="Test Management"><TestReports /></ModuleBoundary>} />
         </Route>

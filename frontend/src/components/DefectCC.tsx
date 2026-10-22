@@ -3,6 +3,7 @@ import { api } from '../api'
 import type { DefectOut, UserOption } from '../types'
 import { ErrorText, Field } from './Common'
 import UserPicker from './UserPicker'
+import { useWorkState, useWorkBusy } from './WorkViews'
 
 export function DefectCCField({ workspaceId, value, onChange, selectedUsers = [], disabled = false }: {
   workspaceId?: number | null
@@ -41,11 +42,17 @@ export default function DefectCC({ defect, canManage, onChanged }: {
   canManage: boolean
   onChanged: (defect: DefectOut) => void
 }) {
-  const [editing, setEditing] = useState(false)
-  const [ids, setIds] = useState<number[]>(defect.cc_user_ids || [])
+  const [editing, setEditing] = useWorkState(`defect.cc:${defect.id}.editing`, false)
+  const [ids, setIds] = useWorkState<number[]>(`defect.cc:${defect.id}.ids`, defect.cc_user_ids || [])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
-  useEffect(() => { setIds(defect.cc_user_ids || []); setEditing(false); setError(null) }, [defect])
+  useWorkBusy(busy)
+  const serverCC = `${defect.id}:${(defect.cc_user_ids || []).join(',')}`
+  const [loadedCC, setLoadedCC] = useWorkState(`defect.cc:${defect.id}.loaded`, serverCC)
+  useEffect(() => {
+    if (loadedCC === serverCC) return
+    setLoadedCC(serverCC); setIds(defect.cc_user_ids || []); setEditing(false); setError(null)
+  }, [serverCC])
   async function save() {
     setBusy(true); setError(null)
     try {

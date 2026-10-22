@@ -1239,8 +1239,25 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
   certificate**. No backfill or schema migration is required.
 - Testcase/repository and execution lists use primary-key cursor pagination;
   cycle candidates are evaluated with SQL `NOT EXISTS` and are loaded only
-  when the Add Test Cases dialog opens. Apply every versioned schema/index
+  when the Add Test Cases dialog opens. The picker mirrors repository folders,
+  supports Include subfolders and filtered folder-wide selection, and preserves
+  selected IDs across folders, filters, and pages. Review selected loads the
+  combined selection in pages and flags cases that became unavailable.
+  Folder counts exclude cases already in the cycle. Bulk selection transfers
+  only eligible IDs; adding still revalidates eligibility and skips duplicates.
+  Apply every versioned schema/index
   change with `alembic upgrade head`; do not target or stamp an undocumented revision.
+- Add Test Cases, Defect details/create/edit, and Functional Request details/edit
+  support true viewport-sized Full screen, Open as page, and Open in new tab.
+  Dedicated `/work/` routes reuse the governed forms and reload record access
+  from the API. Transfers retain field values, testcase selections, pending
+  files/images, unsent activity comments, active tabs, and list filters/paging.
+  The source tab remains independent when another tab is opened. Transfers
+  use account/workspace-bound browser IndexedDB snapshots with an eight-hour
+  expiry; URLs contain a random handoff ID rather than form contents. Draft
+  transfer failure leaves the current form open. Switching a view does not
+  submit a record. In-tab drafts and list state remain available when returning;
+  browser reload restores the last transferred snapshot. No migration is needed.
 - Large cycle additions (more than 500 rows), testcase Excel imports, and
   repository/lifecycle Excel exports run as background jobs. Job status and
   generated artifacts live under `<configured upload root>/.jobs`; therefore
@@ -1621,6 +1638,41 @@ Ordinary project ownership and business workflow permissions remain enforced.
 Deploy matching frontend/backend versions and apply additive, restartable
 migration `a41d9e7c2b60` after `f81b2c6d9a30`. Migration rollback retains recovery
 receipts. Validation evidence is in `validation/admin-recovery-2026-10-16/`.
+
+### Linking a QA Request after opening a standalone defect
+
+The Link QA request picker uses `/api/defects/{id}/qa-request-options`, which
+filters by the defect's application/workspace and the actor's authorized
+departments before pagination. Search covers request ID, CR/EPIC, module and
+department. Draft/cancelled requests are excluded, and existing Functional
+Request or execution traces constrain the eligible parent request.
+
+A New defect initially raised under its QA reporter's department can adopt the
+selected request's owning department after explicit confirmation. The server
+rechecks eligibility and revision, audits both departments, and retains the
+workflow, resolver assignment, module and evidence. After triage begins, parent
+linking retains the existing owning-department boundary. This change requires
+matching frontend/backend code and no database migration. Validation evidence
+is in `validation/late-qa-request-link-2026-10-22/`.
+
+### Test Cycle subfolders
+
+Test Execution supports nested cycle folders, matching Test Repository. Use a
+folder's **Add subfolder** action or select a **Parent folder** in **Add folder**.
+The sidebar expands and collapses each branch; folder pickers show the full path.
+Cycles remain directly under their assigned folder, with All cycles and Unfiled
+views available. New subfolders are selected after creation.
+
+Subfolders must satisfy their own and all parent access restrictions. Child
+grants cannot bypass parent restrictions. Existing project access, QA governance
+and workspace ownership checks still apply. A folder containing cycles or
+subfolders cannot be deleted. Admin Recovery preserves a complete nested cycle
+folder tree and its access rules when moving connected work between projects.
+
+Apply migration `c83f7b0d5e41` (after `b72e6a9c4d30`) with `alembic upgrade head`
+before deploying the matching backend. It adds a nullable parent reference,
+foreign key and index; existing folders remain at the top level. Rollback keeps
+the hierarchy. Validation evidence is in `validation/cycle-subfolders-2026-10-22/`.
 
 ### Bank Staff and vendor organization profiles
 

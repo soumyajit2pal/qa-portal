@@ -1,3 +1,7 @@
+import { useRetainedState, useListScrollRestoration } from '../../components/WorkViews'
+import AddCasesModal from '../../components/AddCasesModal'
+import CycleFolderTree from '../../components/CycleFolderTree'
+import { cycleFolderAncestors, cycleFolderIsRestricted, cycleFolderPathLabel } from '../../cycleFolders'
 import ExecutionRetest from '../../components/ExecutionRetest'
 import ExecutionEvidenceFields from '../../components/ExecutionEvidenceFields'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -12,7 +16,7 @@ import SearchableSelect from '../../components/SearchableSelect'
 import CycleRequestPicker from '../../components/CycleRequestPicker'
 import { CycleFunctionalRequestOption } from '../../types'
 import ProjectSelect from '../../components/ProjectSelect'
-import { ENVIRONMENTS, defectBlocksExecution, activeExternalExecutionDefects, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, QA_STATUS_LABELS, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, usesRetestForm, selectionActionLabel, EXECUTION_LINKABLE_DEFECT_STATUSES } from '../../constants'
+import { ENVIRONMENTS, defectBlocksExecution, activeExternalExecutionDefects, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, QA_STATUS_LABELS, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, usesRetestForm, selectionActionLabel, EXECUTION_LINKABLE_DEFECT_STATUSES } from '../../constants'
 import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOption, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, DefectOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
@@ -155,12 +159,13 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
         </Field>
         <Field label="Folder">
           <SearchableSelect
+            ariaLabel="Cycle folder"
             value={folderId === '' ? '' : String(folderId)}
             onChange={(v) => setFolderId(v ? Number(v) : '')}
             placeholder="-- Unfiled --"
             options={[{ value: '', label: '-- Unfiled --' }, ...folders.map((f) => ({
               value: String(f.id),
-              label: f.access_grants.length ? `${f.name} (restricted)` : f.name,
+              label: `${cycleFolderPathLabel(folders, f)}${cycleFolderIsRestricted(folders, f) ? ' (restricted)' : ''}`,
             }))]}
           />
         </Field>
@@ -233,16 +238,16 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
   )
 }
 
-// Reported directly: "Create Test Cycle Folder, in which I can give access
-// department based or user level, same behaviour like project has." Flat --
-// no nesting, no rename-with-reparent complexity (see
-// ORACLE_MIGRATION_2026-07.md section 147) -- just a name.
-function NewCycleFolderModal({ projectId, editing, onClose, onSaved }: {
+// Folder creation supports a parent path; renaming preserves that parent.
+function NewCycleFolderModal({ projectId, folders, defaultParentId = '', editing, onClose, onSaved }: {
   projectId: number
+  folders: TestCycleFolderOut[]
+  defaultParentId?: number | ''
   editing?: TestCycleFolderOut | null
   onClose: () => void
   onSaved: (f: TestCycleFolderOut) => void
 }) {
+  const [parentId, setParentId] = useState<number | ''>(defaultParentId)
   const [name, setName] = useState(editing?.name || '')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
@@ -254,21 +259,27 @@ function NewCycleFolderModal({ projectId, editing, onClose, onSaved }: {
     try {
       const saved = editing
         ? await api.patch<TestCycleFolderOut>(`/api/test-execution/cycle-folders/${editing.id}`, { name: name.trim() })
-        : await api.post<TestCycleFolderOut>(`/api/test-execution/projects/${projectId}/cycle-folders`, { name: name.trim() })
+        : await api.post<TestCycleFolderOut>(`/api/test-execution/projects/${projectId}/cycle-folders`, { name: name.trim(), parent_id: parentId || null })
       onSaved(saved)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
   return (
-    <Modal title={editing ? 'Rename Folder' : 'New Test Cycle Folder'} onClose={onClose}>
+    <Modal title={editing ? 'Rename Folder' : 'New Test Cycle Folder'} onClose={onClose} closeDisabled={busy} variant="dialog" compact preventBackdropClose>
       <form onSubmit={submit}>
+        {!editing && <Field label="Parent folder">
+          <SearchableSelect ariaLabel="Parent folder" disabled={busy} value={String(parentId)} onChange={value => setParentId(value ? Number(value) : '')}
+            placeholder="Top level" searchPlaceholder="Search folder path..."
+            options={[{ value: '', label: 'Top level' }, ...folders.filter(folder => folder.workspace_writable).map(folder => ({ value: String(folder.id), label: cycleFolderPathLabel(folders, folder) }))]} />
+          <small className="muted">Choose a parent to create a subfolder. Parent access restrictions also apply.</small>
+        </Field>}
         <Field label="Folder Name *">
-          <input autoFocus required value={name} onChange={(e) => setName(e.target.value)} />
+          <input aria-label="Folder name" autoFocus required maxLength={150} disabled={busy} value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
           <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : editing ? 'Save' : 'Create Folder'}</button>
-          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
         </div>
       </form>
     </Modal>
@@ -341,9 +352,10 @@ function CycleFolderAccessModal({ folder, departments, onClose, onChanged }: {
     <Modal title={`Folder access — ${folder.name}`} onClose={onClose}>
       <p className="muted small">
         {grants.length === 0
-          ? 'No access restriction yet -- this folder is visible to anyone who can already execute in this project, same as an Unfiled cycle.'
+          ? folder.parent_id ? 'This folder adds no further access restriction. Its parent folders’ access rules still apply.' : 'No access restriction yet -- this folder is visible to anyone who can already execute in this project, same as an Unfiled cycle.'
           : 'This folder is RESTRICTED -- only the department(s)/user(s) below (plus the project owner, this folder\'s creator, and the QA Lead Group/Admin) can see its test cycles.'}
       </p>
+      <p className="muted small">Access restrictions apply to this folder and its subfolders. Child access grants cannot override a parent restriction. Existing QA governance and project-owner exemptions still apply.</p>
       {!loaded ? <p className="muted">Loading...</p> : (
         <div className="tm-view-access-list">
           {grants.map((grant) => (
@@ -838,322 +850,6 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
         </ModuleBoundary>
       )}
     </>
-  )
-}
-
-interface TestCaseCandidate {
-  id: number
-  test_case_key: string
-  test_scenario?: string | null
-  test_type?: string | null
-  priority?: string | null
-  module_name?: string | null
-  version: string
-  created_at: string
-  created_by_id?: number | null
-  created_by_name?: string | null
-}
-
-interface TestCaseCandidateAuthor { id: number; name: string }
-
-interface TestCaseCandidatePage {
-  items: TestCaseCandidate[]
-  total: number
-  next_cursor?: number | null
-  has_more: boolean
-}
-
-function AddCasesModal({ cycleId, canAssign, requiresScopeChangeReason, runnerCandidates, onClose, onAdded }: {
-  cycleId: number
-  canAssign: boolean
-  requiresScopeChangeReason: boolean
-  runnerCandidates: UserOption[]
-  onClose: () => void
-  onAdded: (createdCount: number) => void
-}) {
-  const pageSize = 25
-  const [candidatePage, setCandidatePage] = useState<TestCaseCandidatePage>({ items: [], total: 0, has_more: false })
-  const [candidateLoading, setCandidateLoading] = useState(true)
-  const [search, setSearch] = useState('')
-  const [debouncedSearch, setDebouncedSearch] = useState('')
-  const [priority, setPriority] = useState('')
-  const [createdById, setCreatedById] = useState('')
-  const [authors, setAuthors] = useState<TestCaseCandidateAuthor[]>([])
-  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest')
-  // Each entry is the cursor used to load that page. Keeping the small
-  // history client-side gives Previous/Next navigation without OFFSET.
-  const filterKey = JSON.stringify([cycleId, debouncedSearch, priority, createdById, sortOrder])
-  const [pagination, setPagination] = useState<{ key: string; cursors: Array<number | null> }>({ key: filterKey, cursors: [null] })
-  // A cursor only belongs to the exact query that produced it.
-  const cursorStack = pagination.key === filterKey ? pagination.cursors : [null]
-  const setCursorStack = (update: React.SetStateAction<Array<number | null>>) => {
-    setPagination(current => {
-      const cursors = current.key === filterKey ? current.cursors : [null]
-      return { key: filterKey, cursors: typeof update === 'function' ? update(cursors) : update }
-    })
-  }
-  const [selected, setSelected] = useState<Set<number>>(new Set())
-  const [selectAllMatching, setSelectAllMatching] = useState(false)
-  const [excluded, setExcluded] = useState<Set<number>>(new Set())
-  const [error, setError] = useState<unknown>(null)
-  const [busy, setBusy] = useState(false)
-  const [assignedTo, setAssignedTo] = useState('')
-  const [scopeChangeReason, setScopeChangeReason] = useState('')
-  const submittingRef = useRef(false)
-  const requestRef = useRef(0)
-  const jobController = useRef<AbortController | null>(null)
-
-  useEffect(() => () => {
-    jobController.current?.abort()
-  }, [])
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250)
-    return () => window.clearTimeout(timer)
-  }, [search])
-
-  useEffect(() => {
-    let active = true
-    api.get<TestCaseCandidateAuthor[]>(`/api/test-execution/cycles/${cycleId}/candidate-authors`)
-      .then(rows => { if (active) setAuthors(rows) })
-      .catch(err => { if (active) setError(err) })
-    return () => { active = false }
-  }, [cycleId])
-
-  useEffect(() => {
-    setCursorStack([null])
-    setSelectAllMatching(false)
-    setSelected(new Set())
-    setExcluded(new Set())
-  }, [debouncedSearch, priority, createdById])
-
-  // Sorting changes presentation only, so keep explicit selections while
-  // restarting cursor pagination from the beginning of the new order.
-  useEffect(() => { setCursorStack([null]) }, [sortOrder])
-
-  const cursor = cursorStack[cursorStack.length - 1]
-  const pageNumber = cursorStack.length
-  useEffect(() => {
-    const requestId = ++requestRef.current
-    const qs = new URLSearchParams({ page_size: String(pageSize) })
-    if (cursor != null) qs.set('cursor', String(cursor))
-    if (debouncedSearch) qs.set('search', debouncedSearch)
-    if (priority) qs.set('priority', priority)
-    if (createdById) qs.set('created_by_id', createdById)
-    qs.set('sort_order', sortOrder)
-    setCandidateLoading(true)
-    api.get<TestCaseCandidatePage>(`/api/test-execution/cycles/${cycleId}/candidate-test-cases?${qs.toString()}`)
-      .then((result) => { if (requestId === requestRef.current) { setCandidatePage(result); setError(null) } })
-      .catch((err) => { if (requestId === requestRef.current) setError(err) })
-      .finally(() => { if (requestId === requestRef.current) setCandidateLoading(false) })
-    return () => { if (requestId === requestRef.current) ++requestRef.current }
-  }, [cycleId, cursor, debouncedSearch, priority, createdById, sortOrder])
-
-  const candidates = candidatePage.items
-  const selectedCount = selectAllMatching ? Math.max(0, candidatePage.total - excluded.size) : selected.size
-
-  function toggle(id: number) {
-    if (busy) return
-    if (selectAllMatching) {
-      setExcluded((prev) => {
-        const next = new Set(prev)
-        if (next.has(id)) next.delete(id); else next.add(id)
-        return next
-      })
-      return
-    }
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id); else next.add(id)
-      return next
-    })
-  }
-
-  const isSelected = (id: number) => selectAllMatching ? !excluded.has(id) : selected.has(id)
-  const allCandidatesSelected = candidates.length > 0 && candidates.every((testCase) => isSelected(testCase.id))
-
-  function toggleAllCandidates() {
-    if (busy) return
-    setSelected((current) => {
-      if (selectAllMatching) {
-        setExcluded((previous) => {
-          const nextExcluded = new Set(previous)
-          if (allCandidatesSelected) candidates.forEach((testCase) => nextExcluded.add(testCase.id))
-          else candidates.forEach((testCase) => nextExcluded.delete(testCase.id))
-          return nextExcluded
-        })
-        return current
-      }
-      const next = new Set(current)
-      if (allCandidatesSelected) candidates.forEach((testCase) => next.delete(testCase.id))
-      else candidates.forEach((testCase) => next.add(testCase.id))
-      return next
-    })
-  }
-
-  function selectEveryMatchingCase() {
-    setSelectAllMatching(true)
-    setSelected(new Set())
-    setExcluded(new Set())
-  }
-
-  function clearSelection() {
-    setSelectAllMatching(false)
-    setSelected(new Set())
-    setExcluded(new Set())
-  }
-
-  async function submit() {
-    // State updates are asynchronous, so a fast double-click can enter this
-    // function twice before `busy` rerenders the button. The ref is an
-    // immediate submission lock; the visible modal overlay below explains
-    // the ongoing work and prevents every other interaction.
-    if (submittingRef.current) return
-    if (selectedCount === 0) { setError(new Error('Pick at least one test case')); return }
-    const normalizedScopeChangeReason = scopeChangeReason.trim()
-    if (requiresScopeChangeReason && normalizedScopeChangeReason.length < 10) {
-      setError(new Error('Enter a scope expansion reason of at least 10 characters.'))
-      return
-    }
-    submittingRef.current = true
-    setBusy(true); setError(null)
-    try {
-      let result = await api.post<{ created_count: number; skipped_count: number; job_id?: string | null; status?: string | null }>(`/api/test-execution/cycles/${cycleId}/executions/from-selection`, {
-        selection_mode: selectAllMatching ? 'all_matching' : 'ids',
-        test_case_ids: selectAllMatching ? [] : Array.from(selected),
-        excluded_ids: selectAllMatching ? Array.from(excluded) : [],
-        search: debouncedSearch || null,
-        priority: priority || null,
-        created_by_id: createdById ? Number(createdById) : null,
-        assigned_to_id: assignedTo ? Number(assignedTo) : null,
-        reason: requiresScopeChangeReason ? normalizedScopeChangeReason : null,
-      }, 180_000)
-      if (result.job_id && result.status !== 'COMPLETED') {
-        const controller = new AbortController()
-        jobController.current?.abort()
-        jobController.current = controller
-        const job = await waitForJob<{ created_count: number; skipped_count: number }>(result.job_id, { signal: controller.signal })
-        result = { ...result, ...job.result, status: job.status }
-      }
-      onAdded(result.created_count)
-    } catch (err) {
-      if (!(err instanceof Error && err.name === 'AbortError')) setError(err)
-    } finally {
-      jobController.current = null
-      submittingRef.current = false
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Modal title="Add Test Cases to Cycle" onClose={() => { if (!busy) onClose() }} closeDisabled={busy} wide>
-      <div className="tm-add-cases-modal" aria-busy={busy}>
-      {busy && (
-        <div className="tm-add-cases-loading-overlay" role="status" aria-live="assertive">
-          <div className="tm-add-cases-loading-card">
-            <span className="tm-add-cases-loading-spinner" aria-hidden="true" />
-            <strong>Adding {selectedCount.toLocaleString()} testcase{selectedCount !== 1 ? 's' : ''} to this cycle</strong>
-            <span>Validating approved versions and creating execution records. Large selections may take a moment.</span>
-            <small>Please keep this window open.</small>
-          </div>
-        </div>
-      )}
-      {requiresScopeChangeReason && (
-        <div className="info-banner" role="note">
-          <strong>Execution has started.</strong>
-          <span>Adding approved testcases expands the governed scope. Existing attempts and evidence stay unchanged, and every new testcase starts as Not Executed.</span>
-          <Field label="Scope expansion reason (required)">
-            <textarea
-              rows={3}
-              maxLength={2000}
-              value={scopeChangeReason}
-              onChange={(event) => setScopeChangeReason(event.target.value)}
-              placeholder="Explain why these testcases are being added after execution started"
-              disabled={busy}
-              required
-            />
-          </Field>
-          <small>This reason will be retained in the cycle activity. Any pending QA Clearance snapshot must be refreshed before approval.</small>
-        </div>
-      )}
-      {canAssign && <div className="tm-add-cases-runner"><div><strong>Assign selected testcases</strong><span>Optional—assign all selected cases to one runner now, then reassign individual rows later.</span></div><UserAssignSelect value={assignedTo} onChange={setAssignedTo} users={runnerCandidates} placeholder="Leave unassigned…" disabled={busy} /></div>}
-      <div className="tm-add-cases-discovery">
-        <Field label="Find approved testcases">
-          <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Test Case ID, scenario, module or type…" disabled={busy} />
-        </Field>
-        <Field label="Priority">
-          <select value={priority} onChange={(event) => setPriority(event.target.value)} disabled={busy}><option value="">All priorities</option>{TEST_CASE_PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>
-        </Field>
-        <Field label="Created By">
-          <select value={createdById} onChange={(event) => setCreatedById(event.target.value)} disabled={busy}><option value="">All creators</option>{authors.map(author => <option key={author.id} value={author.id}>{author.name}</option>)}</select>
-        </Field>
-        <Field label="Sort By">
-          <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as 'newest' | 'oldest')} disabled={busy}><option value="newest">Recently added first</option><option value="oldest">Oldest added first</option></select>
-        </Field>
-      </div>
-      <div className="tm-add-cases-discovery-note"><span>Newest testcases are shown first by default. Date means when the testcase was created or imported into the portal.</span>{(search || priority || createdById || sortOrder !== 'newest') && <button type="button" className="link-btn" disabled={busy} onClick={() => { setSearch(''); setPriority(''); setCreatedById(''); setSortOrder('newest') }}>Reset filters</button>}</div>
-      {candidateLoading ? (
-        <p className="muted small">Loading approved testcases…</p>
-      ) : candidates.length === 0 ? (
-        <p className="muted small">{search || priority || createdById ? 'No approved testcases match these filters. Change or reset the filters to see other available cases.' : 'There are no approved testcases available to add. Approve pending testcases in the Test Repository first.'}</p>
-      ) : (
-        <>
-          <div className="tm-add-cases-selection-bar">
-            <div>
-              <strong>{selectedCount ? `${selectedCount.toLocaleString()} testcase${selectedCount !== 1 ? 's' : ''} selected` : 'Select testcases to add'}</strong>
-              <span>{candidatePage.total.toLocaleString()} approved testcase{candidatePage.total !== 1 ? 's' : ''} available</span>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {!selectAllMatching && <button type="button" className="btn btn-sm" onClick={selectEveryMatchingCase} disabled={busy}>Select all matching ({candidatePage.total.toLocaleString()})</button>}
-              {selectedCount > 0 && <button type="button" className="btn btn-sm" onClick={clearSelection} disabled={busy}>Clear selection</button>}
-            </div>
-          </div>
-          <Table<TestCaseCandidate>
-            tableId="add-testcases-to-cycle"
-            rowKey="id"
-            rows={candidates}
-            onRowClick={(testCase) => toggle(testCase.id)}
-            columns={[
-              {
-                key: 'selection',
-                header: <input type="checkbox" aria-label="Select all eligible testcases" checked={allCandidatesSelected} disabled={busy} onChange={toggleAllCandidates} onClick={(event) => event.stopPropagation()} />,
-                filterable: false,
-                render: (testCase) => <input type="checkbox" aria-label={`Select ${testCase.test_case_key}`} checked={isSelected(testCase.id)} disabled={busy} onChange={() => toggle(testCase.id)} onClick={(event) => event.stopPropagation()} />,
-              },
-              { key: 'test_case_key', header: 'Test Case ID' },
-              { key: 'test_scenario', header: 'Scenario', render: (testCase) => testCase.test_scenario || '—' },
-              { key: 'test_type', header: 'Type', render: (testCase) => testCase.test_type || '—' },
-              { key: 'priority', header: 'Priority', render: (testCase) => testCase.priority || '—' },
-              { key: 'module_name', header: 'Module', render: (testCase) => testCase.module_name || '—' },
-              { key: 'created_by_name', header: 'Created By', render: (testCase) => testCase.created_by_name || 'Unknown creator', filterValue: (testCase) => testCase.created_by_name || '' },
-              { key: 'created_at', header: 'Upload / Created Date', render: (testCase) => formatDateTimeIST(testCase.created_at), filterValue: (testCase) => formatDateTimeIST(testCase.created_at) },
-              { key: 'version', header: 'Version' },
-            ]}
-            server={{
-              page: pageNumber,
-              pageSize,
-              total: candidatePage.total,
-              totalPages: Math.max(1, Math.ceil(candidatePage.total / pageSize)),
-              hasNext: candidatePage.has_more,
-              hasPrevious: cursorStack.length > 1,
-              loading: candidateLoading,
-              onPageChange: (nextPage) => {
-                if (nextPage > pageNumber && candidatePage.next_cursor != null) setCursorStack((current) => [...current, candidatePage.next_cursor!])
-                if (nextPage < pageNumber) setCursorStack((current) => current.slice(0, -1))
-              },
-            }}
-          />
-        </>
-      )}
-      <ErrorText error={error} />
-      <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-        <button className="btn btn-primary" disabled={busy || selectedCount === 0 || (requiresScopeChangeReason && scopeChangeReason.trim().length < 10)} onClick={submit}>
-          {busy ? 'Adding…' : `Add Selected (${selectedCount.toLocaleString()})`}
-        </button>
-        <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
-      </div>
-      </div>
-    </Modal>
   )
 }
 
@@ -2339,18 +2035,20 @@ export default function TestExecution() {
     return executionRemovalEligibility(user, execution, canManageExecutionGovernance)
   }, [canManageExecutionGovernance, user])
   const [projects, setProjects] = useState<TestProjectOut[]>([])
-  const [projectId, setProjectId] = useState<number | ''>('')
+  const [projectId, setProjectId] = useRetainedState<number | ''>('execution.list.projectId', '')
   const [cycles, setCycles] = useState<TestCycleOut[]>([])
-  const [cycleId, setCycleId] = useState<number | ''>('')
+  const [cycleId, setCycleId] = useRetainedState<number | ''>('execution.list.cycleId', '')
   // Reported directly: "Create Test Cycle Folder, in which I can give
   // access department based or user level, same behaviour like project
-  // has. Under this folder create test cycle." Flat folders, restrict-not-
+  // has. Under this folder create test cycle." Nested folders, restrict-not-
   // widen access (see backend models.TestCycleFolder's own docstring).
   // '' means "All cycles", CYCLE_UNFILED means the Unfiled pseudo-folder.
   const [cycleFolders, setCycleFolders] = useState<TestCycleFolderOut[]>([])
   const [cycleFolderTotals, setCycleFolderTotals] = useState<{ unfiled_count: number; total: number }>({ unfiled_count: 0, total: 0 })
-  const [selectedCycleFolder, setSelectedCycleFolder] = useState<number | typeof CYCLE_UNFILED | ''>('')
+  const [selectedCycleFolder, setSelectedCycleFolder] = useRetainedState<number | typeof CYCLE_UNFILED | ''>('execution.list.selectedCycleFolder', '')
   const [showNewCycleFolder, setShowNewCycleFolder] = useState(false)
+  const [newCycleFolderParent, setNewCycleFolderParent] = useState<number | ''>('')
+  const [collapsedCycleFolders, setCollapsedCycleFolders] = useRetainedState<number[]>('execution.list.collapsedCycleFolders', [])
   const [editingCycleFolder, setEditingCycleFolder] = useState<TestCycleFolderOut | null>(null)
   const [managingCycleFolderAccess, setManagingCycleFolderAccess] = useState<TestCycleFolderOut | null>(null)
   const [cycleFolderToDelete, setCycleFolderToDelete] = useState<TestCycleFolderOut | null>(null)
@@ -2370,13 +2068,13 @@ export default function TestExecution() {
   const [editingCycle, setEditingCycle] = useState<TestCycleOut | null>(null)
   const [showAddCases, setShowAddCases] = useState(false)
   const [editingExecution, setEditingExecution] = useState<TestExecutionOut | null>(null)
-  const [resultFilter, setResultFilter] = useState('')
-  const [assignmentFilter, setAssignmentFilter] = useState<'all' | 'mine' | 'unassigned'>('all')
+  const [resultFilter, setResultFilter] = useRetainedState('execution.list.resultFilter', '')
+  const [assignmentFilter, setAssignmentFilter] = useRetainedState<'all' | 'mine' | 'unassigned'>('execution.list.assignmentFilter', 'all')
   const [cycleToDelete, setCycleToDelete] = useState<TestCycleOut | null>(null)
   const [deletingCycle, setDeletingCycle] = useState(false)
-  const [selectedExecutionIds, setSelectedExecutionIds] = useState<Set<number>>(new Set())
-  const [bulkAssigneeId, setBulkAssigneeId] = useState('')
-  const [bulkAssignReason, setBulkAssignReason] = useState('')
+  const [selectedExecutionIds, setSelectedExecutionIds] = useRetainedState<Set<number>>('execution.list.selectedExecutionIds', new Set())
+  const [bulkAssigneeId, setBulkAssigneeId] = useRetainedState('execution.list.bulkAssigneeId', '')
+  const [bulkAssignReason, setBulkAssignReason] = useRetainedState('execution.list.bulkAssignReason', '')
   const [bulkAssigning, setBulkAssigning] = useState(false)
   // 2026-08 Reassignment Requirement -- the inline per-row runner picker
   // used to fire the PATCH immediately on change; reassigning an already-
@@ -2389,7 +2087,7 @@ export default function TestExecution() {
   const [bulkRemoveExecutions, setBulkRemoveExecutions] = useState<TestExecutionOut[] | null>(null)
   const [cycleActivity, setCycleActivity] = useState<ApprovalActionOut[]>([])
   const [showActivity, setShowActivity] = useState(false)
-  const [cycleSidebarCollapsed, setCycleSidebarCollapsed] = useState(false)
+  const [cycleSidebarCollapsed, setCycleSidebarCollapsed] = useRetainedState('execution.list.cycleSidebarCollapsed', false)
   const [users, setUsers] = useState<UserOption[]>([])
   const [exportingCycle, setExportingCycle] = useState(false)
   const exportJobController = useRef<AbortController | null>(null)
@@ -2480,7 +2178,7 @@ export default function TestExecution() {
       if (!isCurrent()) return
       setCycles(c)
       const requestedCycle = Number(searchParams.get('cycle'))
-      setCycleId(c.some((cycle) => cycle.id === requestedCycle) ? requestedCycle : (c.length ? c[0].id : ''))
+      setCycleId(current => c.some((cycle) => cycle.id === requestedCycle) ? requestedCycle : c.some(cycle => cycle.id === current) ? current : (c.length ? c[0].id : ''))
     } catch (err) { if (isCurrent()) setError(err) }
   }, [searchParams])
   const loadCycleFolders = useCallback(async (pid: number) => {
@@ -2528,7 +2226,7 @@ export default function TestExecution() {
       sortOrder: 'asc',
       extra: { assignment: assignmentFilter !== 'all' ? assignmentFilter : undefined },
     },
-    { cursor: true },
+    { cursor: true, retainKey: 'execution.list' },
   )
   const loadExecutionExtras = useCallback(async (cid: number) => {
     const request = ++executionSummaryRequest.current
@@ -2622,6 +2320,7 @@ export default function TestExecution() {
   const assignedCount = executionSummary?.assigned_count ?? 0
   const unassignedCount = executionSummary?.unassigned_count ?? 0
   const myAssignmentCount = executionSummary?.mine_count ?? 0
+  useListScrollRestoration(executionsLoading)
   const totalRunCount = executionSummary?.total_run_count ?? 0
   const cycleExecutionTotal = executionSummary?.total ?? 0
   const progressRate = cycleExecutionTotal ? Math.round((executedCount / cycleExecutionTotal) * 100) : 0
@@ -2773,10 +2472,8 @@ export default function TestExecution() {
   // now renders nested directly under that one selected row in the tree
   // below, instead of in an entirely separate list sitting past the whole
   // folder section with no visual link back to which folder it belongs to.
-  // Folders themselves stay flat (no sub-folders -- that was a deliberate,
-  // separate decision, see ORACLE_MIGRATION_2026-07.md section 147) -- only
-  // "which cycles are these" is now shown as a visual parent/child
-  // relationship, not the folders themselves.
+  // Cycle folders also nest beneath their parent; each selected folder
+  // shows only the cycles directly assigned to it.
   const nestedCycleList = (
     <ul className="tm-cycle-nested">
       {cycles.map((cycle) => (
@@ -2850,18 +2547,9 @@ export default function TestExecution() {
                 >{cycleSidebarCollapsed ? '›' : '‹'}</button>
               </div>
             </div>
-            {/* Reported directly: "Create Test Cycle Folder, in which I can
-                give access department based or user level, same behaviour
-                like project has. Under this folder create test cycle."
-                Flat -- no nesting -- same `.tm-folder-row`/`.link-btn`
-                styling Test Repository's own folder tree already uses
-                (this aside shares its `tm-tree-panel` class). A folder with
-                a lock icon has at least one access grant and is RESTRICTED
-                to those departments/users -- see backend
-                models.TestCycleFolder's own docstring. Whichever row is
-                currently selected shows its own cycles nested directly
-                beneath it (nestedCycleList, computed above) -- see that
-                variable's own comment for why. */}
+            {/* Folder hierarchy mirrors Test Repository. Access restrictions
+                apply through the whole parent path; cycles remain directly
+                beneath their selected folder. */}
             {!cycleSidebarCollapsed && <>
               <div className="tm-cycle-scope-label">Cycle views</div>
               <ul className="plain-list tm-cycle-scope-list">
@@ -2883,29 +2571,14 @@ export default function TestExecution() {
               </li>
               </ul>
               <div className="tm-cycle-folder-label"><span>Folders</span><em>{cycleFolders.length}</em></div>
-              <ul className="plain-list tm-cycle-folder-list">
-              {cycleFolders.map((f) => (
-                <li key={f.id}>
-                  <div className="tm-folder-row">
-                    <button type="button" className={`link-btn ${selectedCycleFolder === f.id ? 'active' : ''}`} onClick={() => setSelectedCycleFolder(f.id)}>
-                      {f.access_grants.length ? <IconLock className="restricted" aria-hidden="true" /> : <IconFolder aria-hidden="true" />} <span className="tm-cycle-link-label">{f.name}</span> <em>{f.cycle_count}</em>
-                    </button>
-                    {canExec && f.workspace_writable && projectIsActive && (
-                      <div className="tm-folder-actions">
-                        <button type="button" className="tm-folder-action" title="Manage access" aria-label={`Manage access for ${f.name}`} onClick={() => setManagingCycleFolderAccess(f)}><IconLock aria-hidden="true" /></button>
-                        <button type="button" className="tm-folder-action" title="Rename folder" aria-label={`Rename ${f.name}`} onClick={() => setEditingCycleFolder(f)}>✎</button>
-                        {canManageExecutionGovernance && (
-                          <button type="button" className="tm-folder-action tm-folder-delete" title="Delete folder" aria-label={`Delete ${f.name}`} onClick={() => setCycleFolderToDelete(f)}>×</button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  {selectedCycleFolder === f.id && nestedCycleList}
-                </li>
-              ))}
-              </ul>
+              <CycleFolderTree folders={cycleFolders} selectedFolder={selectedCycleFolder} collapsed={collapsedCycleFolders}
+                onToggle={id => setCollapsedCycleFolders(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])}
+                onSelect={id => { setSelectedCycleFolder(id); setCollapsedCycleFolders(current => current.filter(item => item !== id)) }}
+                cycles={nestedCycleList} canExecute={canExec} canDelete={canManageExecutionGovernance} projectIsActive={projectIsActive}
+                onAdd={folder => { setNewCycleFolderParent(folder.id); setShowNewCycleFolder(true) }}
+                onAccess={setManagingCycleFolderAccess} onRename={setEditingCycleFolder} onDelete={setCycleFolderToDelete} />
             </>}
-            {!cycleSidebarCollapsed && canExec && projectCanContribute && <button type="button" className="tm-tree-add" onClick={() => setShowNewCycleFolder(true)}><IconPlus aria-hidden="true" /> Add folder</button>}
+            {!cycleSidebarCollapsed && canExec && projectCanContribute && <button type="button" className="tm-tree-add" onClick={() => { setNewCycleFolderParent(''); setShowNewCycleFolder(true) }}><IconPlus aria-hidden="true" /> Add folder</button>}
           </aside>
           <section className="tm-main-panel">
           {cycleId ? (
@@ -3150,14 +2823,20 @@ export default function TestExecution() {
       )}
       {showNewCycleFolder && projectId && projectCanContribute && (
         <NewCycleFolderModal
-          projectId={projectId}
+          projectId={projectId} folders={cycleFolders} defaultParentId={newCycleFolderParent}
           onClose={() => setShowNewCycleFolder(false)}
-          onSaved={() => { loadCycleFolders(projectId); setShowNewCycleFolder(false) }}
+          onSaved={folder => {
+            loadCycleFolders(projectId)
+            const pathIds = new Set(cycleFolderAncestors([...cycleFolders, folder], folder).map(item => item.id))
+            setCollapsedCycleFolders(current => current.filter(id => !pathIds.has(id)))
+            setSelectedCycleFolder(folder.id)
+            setShowNewCycleFolder(false)
+          }}
         />
       )}
       {editingCycleFolder && (
         <NewCycleFolderModal
-          projectId={editingCycleFolder.project_id}
+          projectId={editingCycleFolder.project_id} folders={cycleFolders}
           editing={editingCycleFolder}
           onClose={() => setEditingCycleFolder(null)}
           onSaved={() => { if (projectId) loadCycleFolders(projectId); setEditingCycleFolder(null) }}
@@ -3177,7 +2856,7 @@ export default function TestExecution() {
       {cycleFolderToDelete && (
         <ConfirmModal
           title="Delete folder?"
-          message={<p>Delete <strong>{cycleFolderToDelete.name}</strong> from this project? Only an empty folder (no test cycles in it) can be deleted.</p>}
+          message={<p>Delete <strong>{cycleFolderToDelete.name}</strong> from this project? Only an empty folder with no test cycles or subfolders can be deleted.</p>}
           confirmLabel="Delete folder" cancelLabel="Keep folder" destructive busy={deletingCycleFolder}
           onConfirm={deleteCycleFolder} onCancel={() => setCycleFolderToDelete(null)}
         />
